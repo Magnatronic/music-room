@@ -753,6 +753,9 @@ function makeChips(label,key,map,onChange){
 const COLORMODE_OPTS={note:{label:'🌈 Note colours'},theme:{label:'🎨 Theme'},single:{label:'⬤ One colour'}};
 function buildVisualsPanel(){
   const el=document.getElementById('visualsContent'); el.innerHTML='';
+  // An app can take over the Visuals panel (e.g. Song Grid's reward styles);
+  // QUALITY/setPerf/applyStats/applyBg and the make* helpers are in scope for it.
+  if(Anim.buildVisuals){ Anim.buildVisuals(el); return; }
   el.appendChild(makeToggle('Paint trails','paint',buildVisualsPanel));
   el.appendChild(makeChips('Paint colours','colorMode',COLORMODE_OPTS,()=>{
     if(SETTINGS.colorMode==='single'&&!SETTINGS.lockedColor){ SETTINGS.lockedColor=[1,1,1]; saveSettings(); }
@@ -869,6 +872,7 @@ function buildInstrumentPanel(){
 // ── Instrument panel (id "sound"): what the notes sound like ────────────────────
 function buildSoundPanel(){
   const snd=document.getElementById('soundControls'); snd.innerHTML='';
+  if(Anim.soundExtras) Anim.soundExtras(snd);   // app-specific controls (e.g. tuning) on top
   snd.appendChild(makeChips('Voice','voice',VOICES));
   const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; snd.appendChild(fx);
   snd.appendChild(makeToggle('Reverb','reverb',applyReverb));
@@ -1003,9 +1007,10 @@ const FRAME_RAIL=[
 ];
 // Apps that only make sense as a note grid set Anim.lockMode='notes' — the
 // Keys/Flow rail toggle is hidden and SETTINGS.mode stays as their defaults set it.
+// Anim.hideRail=['clear',...] hides other framework rail buttons that don't apply.
 function allRailButtons(){
-  const base = Anim.lockMode ? FRAME_RAIL.filter(b=>b.id!=='mode') : FRAME_RAIL;
-  return base.concat(Anim.railButtons||[]);
+  const hide=new Set(Anim.hideRail||[]); if(Anim.lockMode) hide.add('mode');
+  return FRAME_RAIL.filter(b=>!hide.has(b.id)).concat(Anim.railButtons||[]);
 }
 function buildRailButtons(){
   railExtra.innerHTML='';
@@ -1103,6 +1108,10 @@ function boot(){
   buildScale();
   buildBands();
   buildRailButtons();
+  // Apps can rename the menu tabs to match their concepts, e.g. {instrument:'🎵 Songs'}
+  if(Anim.paneLabels) for(const k in Anim.paneLabels){
+    const b=document.querySelector('.bbar[data-mode="'+k+'"]'); if(b) b.textContent=Anim.paneLabels[k];
+  }
   setTheme(currentTheme);
   applyBg();
   applyStats();
