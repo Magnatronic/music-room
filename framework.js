@@ -266,7 +266,7 @@ function getAudio(){
     chDelay.connect(chorusWet); chorusWet.connect(busA);
     // Echo (send connected on demand in applyEcho)
     const ecDelay=ecDelayN=ac.createDelay(); ecDelay.delayTime.value=0.33;
-    const ecFb=ac.createGain(); ecFb.gain.value=0.42;
+    const ecFb=ac.createGain(); ecFb.gain.value=0.32;   // 0.42 gave long dub-style repeat trains
     ecDelay.connect(ecFb); ecFb.connect(ecDelay);
     echoWet=ac.createGain(); echoWet.gain.value=SETTINGS.echo?0.5:0;
     const busB=fxBusB=ac.createGain();
