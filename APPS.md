@@ -5,7 +5,8 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
 
 ## Cross-cutting conventions (every app)
 
-- Built from `template.html` (shared framework — see README). One HTML file per app.
+- Built from `template.html`; all apps share `framework.js` + `framework.css` (see README), so
+  the sound system, input, menu, presets and lock are identical everywhere by construction.
 - **Boomwhacker note colours** for anything pitched (C red, D orange, E yellow, F green, G teal,
   A purple, B pink) — matches the physical instruments the therapists use.
 - **Therapist controls**: scale/root/register/number-of-notes where pitched; named per-student

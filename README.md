@@ -34,25 +34,25 @@ Sibling project: [touch](https://github.com/Magnatronic/touch) — visual-focuse
 
 See **`APPS.md`** for the full roadmap and per-app specs.
 
-## Architecture: framework + app
+## Architecture: shared framework + tiny app files
 
-Every app file is split into two marked regions:
+The framework lives in exactly **two shared files** every app loads — there is one sound system,
+one input system, one menu system, by construction:
 
-- **FRAMEWORK** (`FRAMEWORK-CSS / -HTML / -JS START…END`) — shared scaffolding, identical in every
-  file: settings + `localStorage` persistence, the scale/note engine with Boomwhacker colours and
-  the note-zone grid, the audio engine (9 voices, 4 scales, effects with gated sends, master
-  limiter, click-free retuning), 5-touch input, the Notes/Instrument/Visuals/Presets menu,
-  per-student presets, session lock, idle sim sleep, DPR sizing, WebGL context-loss recovery,
-  and the render loop. **Never hand-edit per file.**
-- **ANIMATION** (`ANIMATION START…END`) — the app-specific part: one `Anim` object
-  (`themes, defaults, schema, init, resize, splat, frame, reset`, optional `styles`,
-  `railButtons`, `setQuality`). `splat` coords are 0..1 with **y up**.
+- **`framework.js`** — settings + `localStorage` persistence, the scale/note engine with
+  Boomwhacker colours and the note-zone grid, the audio engine (9 voices, 4 scales, effects with
+  gated sends, polyphony auto-mixer, soft limiter, click-free retuning), 5-touch input, the menu
+  panels, per-student presets, session lock, idle sim sleep, DPR sizing, WebGL context-loss
+  recovery, and the render loop. It injects its own HTML (canvas, rail, menu, overlays) at load.
+- **`framework.css`** — all shared styling.
 
-Edit the framework once in `template.html`, then propagate:
+Each app `.html` is then just a title, the two includes, and one `Anim` object
+(`themes, defaults, schema, init, resize, splat, frame, reset`, plus optional hooks:
+`styles, railButtons, setQuality, buildInstrument, buildVisuals, soundExtras, onCell,
+lockMode, hideRail, paneLabels, bandColor`). `splat` coords are 0..1 with **y up**.
 
-```
-node sync-framework.js
-```
+Script/link tags resolve relative paths on `file://`, so everything still runs offline —
+just keep the folder together (copy the whole folder to a USB stick, not a single file).
 
 ## Adding a new app
 

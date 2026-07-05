@@ -1,0 +1,130 @@
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+
+/* ── Control bar ─────────────────────────────────────────── */
+/* Full-height, click-through container pinned to the left edge. align-items:center keeps
+   each column vertically centred INDEPENDENTLY, so the rail never shifts when the menu opens. */
+#ui{position:fixed;left:16px;top:0;height:100vh;
+  display:flex;flex-direction:row;align-items:center;gap:8px;
+  z-index:10;pointer-events:none}
+#ui > *{pointer-events:auto}
+#rail{display:flex;flex-direction:column;align-items:flex-start;gap:8px;
+  opacity:0.5;transition:opacity 0.4s}
+#rail:hover,#ui.open #rail{opacity:1}
+#railExtra{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+#railExtra:empty{display:none}
+#menuExpand{display:none;flex-direction:row;align-items:center;gap:8px;max-height:100vh}
+#ui.open #menuExpand{display:flex}
+#quickRow{display:flex;flex-direction:column;gap:8px;align-items:stretch;
+  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;
+  background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.14);
+  border-radius:16px;padding:12px;backdrop-filter:blur(8px)}
+#quickRow:empty{display:none}
+#quickRow::-webkit-scrollbar{display:none}
+#quickRow .chip{text-align:center}
+#quickRow .autochip,#quickRow .bgpick{width:100%;justify-content:center}
+.swatchgrid{display:grid;grid-template-columns:repeat(2,auto);gap:8px;justify-content:center;justify-items:center}
+#bottomRow{display:flex;flex-direction:column;gap:6px;align-items:flex-start;
+  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none}
+#bottomRow::-webkit-scrollbar{display:none}
+.btn{background:rgba(0,0,0,0.50);border:1px solid rgba(255,255,255,0.22);color:rgba(255,255,255,0.95);
+  padding:9px 18px;border-radius:22px;font-size:13px;cursor:pointer;font-family:sans-serif;
+  transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;white-space:nowrap;
+  text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+.btn:hover{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.55)}
+.btn.active{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.75);color:#fff}
+#rail .btn,#railExtra .btn{font-size:18px;padding:11px 15px;min-width:48px;text-align:center}
+#collapse{font-size:18px}
+#homeBtn{text-decoration:none}
+.bbar{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.95);
+  padding:8px 14px;border-radius:20px;font-size:12px;cursor:pointer;font-family:sans-serif;
+  transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;
+  white-space:nowrap;display:inline-flex;align-items:center;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+.bbar:hover{background:rgba(0,0,0,0.68);border-color:rgba(255,255,255,0.50)}
+.bbar.active{background:rgba(0,0,0,0.65);border-color:rgba(255,255,255,0.75);color:#fff}
+
+/* ── Settings panel ──────────────────────────────────────── */
+#panel{display:none;width:44vw;max-width:440px;background:rgba(0,0,0,0.85);backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:18px 22px;
+  font-family:sans-serif;color:#fff;max-height:88vh;overflow-y:auto}
+#panel.open{display:block}
+.sectn{font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
+  color:rgba(255,255,255,0.35);margin:18px 0 8px}
+.pane > .sectn:first-child{margin-top:2px}
+.row{margin-bottom:14px}
+.rowhead{display:flex;justify-content:space-between;align-items:center}
+.rowhead label{color:rgba(255,255,255,0.7);font-size:13px}
+.rowhead .val{color:rgba(255,255,255,0.5);font-size:13px;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;margin-top:8px;
+  background:rgba(255,255,255,0.15);border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;
+  background:#fff;cursor:pointer;border:none}
+input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#fff;cursor:pointer;border:none}
+.toggle{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.toggle label{color:rgba(255,255,255,0.7);font-size:13px}
+.switch{position:relative;width:44px;height:24px;background:rgba(255,255,255,0.15);
+  border-radius:12px;cursor:pointer;transition:background 0.2s}
+.switch.on{background:rgba(120,180,255,0.7)}
+.switch::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;
+  border-radius:50%;background:#fff;transition:transform 0.2s}
+.switch.on::after{transform:translateX(20px)}
+.swatch{width:24px;height:24px;border-radius:50%;cursor:pointer;border:2px solid rgba(255,255,255,0.25);
+  transition:transform 0.15s;flex-shrink:0}
+.swatch:hover{transform:scale(1.12)}
+.swatch.active{border-color:#fff;transform:scale(1.1)}
+.autochip{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.20);
+  color:rgba(255,255,255,0.95);height:28px;padding:0 12px;border-radius:14px;font-size:12px;cursor:pointer;
+  font-family:sans-serif;transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  user-select:none;display:flex;align-items:center;flex:none;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+.autochip:hover{background:rgba(0,0,0,0.68)}
+.autochip.active{background:rgba(0,0,0,0.65);border-color:#fff}
+.picker{position:relative;width:24px;height:24px;border-radius:50%;overflow:hidden;flex-shrink:0;
+  border:2px solid rgba(255,255,255,0.25);cursor:pointer;
+  background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)}
+.picker.active{border-color:#fff}
+.picker input{position:absolute;inset:-4px;width:200%;height:200%;opacity:0;cursor:pointer;border:none;padding:0}
+.qsep{display:block;width:100%;height:1px;background:rgba(255,255,255,0.15);
+  font-size:0;line-height:0;user-select:none;flex-shrink:0;margin:2px 0}
+.bgpick{position:relative;overflow:hidden;cursor:pointer;font-size:11px;
+  color:rgba(255,255,255,0.75);padding:0 10px;height:28px;border-radius:14px}
+.bgpick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:none;padding:0}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 14px}
+.chip{padding:7px 13px;border-radius:16px;background:rgba(0,0,0,0.45);
+  border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.95);font-size:12px;cursor:pointer;
+  font-family:sans-serif;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  user-select:none;transition:all 0.15s;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+.chip:hover{background:rgba(0,0,0,0.65)}
+.chip.active{background:rgba(0,0,0,0.65);border-color:#fff;color:#fff}
+.pane{display:none}
+.pane.active{display:block}
+#stats{position:fixed;top:10px;left:12px;z-index:30;display:none;
+  font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:rgba(255,255,255,0.85);
+  background:rgba(0,0,0,0.45);padding:6px 9px;border-radius:8px;pointer-events:none;white-space:pre}
+
+/* ── Notes mode: band / grid overlay ─────────────────────── */
+#bands{position:fixed;inset:0;display:grid;z-index:4;pointer-events:none}
+#bands.hidden{display:none}
+.band{position:relative;background:rgba(var(--c),var(--a,0.06));transition:background 0.45s}
+.band.held{background:rgba(var(--c),0.30);transition:background 0.06s}
+.band.flash{background:rgba(var(--c),0.32);transition:background 0.03s}
+.band .lbl{position:absolute;bottom:5vh;left:50%;transform:translateX(-50%);
+  font-family:sans-serif;font-weight:700;font-size:6vmin;color:rgb(var(--c));
+  opacity:0.85;text-shadow:0 1px 8px rgba(0,0,0,0.85);user-select:none}
+.band.cell .lbl{top:50%;bottom:auto;transform:translate(-50%,-50%);font-size:5vmin}
+.swrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 14px}
+
+/* ── Session lock ────────────────────────────────────────── */
+#unlockZone{position:fixed;top:0;left:0;width:76px;height:76px;z-index:40;display:none;border-radius:0 0 24px 0}
+#lockHint{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:41;
+  background:rgba(0,0,0,0.72);color:rgba(255,255,255,0.92);font:13px sans-serif;
+  padding:10px 16px;border-radius:12px;opacity:0;pointer-events:none;transition:opacity 0.5s;
+  max-width:80vw;text-align:center}
+#lockHint.show{opacity:1}
+
+/* ── Presets pane ────────────────────────────────────────── */
+#panel input[type=text]{width:100%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.22);
+  border-radius:10px;color:#fff;padding:9px 12px;font-size:13px;font-family:sans-serif;outline:none;margin-top:4px}
+#panel input[type=text]:focus{border-color:rgba(255,255,255,0.5)}
+.prow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.prow .pname{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis}
