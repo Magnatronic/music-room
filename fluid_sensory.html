@@ -274,6 +274,7 @@ const STANDARD_SWATCHES = [
 // C=red D=orange E=yellow F=green G=teal A=purple B=pink (keyed by pitch class 0–11).
 const BOOMWHACKER={0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],7:[28,169,169],9:[125,79,181],11:[224,90,156]};
 function bandRGB255(i){
+  if(Anim.bandColor){ const c=Anim.bandColor(i); if(c) return c; }   // app palette override
   const pc=NOTES[i]?NOTES[i].pc:0;
   if(BOOMWHACKER[pc]) return BOOMWHACKER[pc];
   const base=BOOMWHACKER[(pc+11)%12]||[200,200,200];   // sharps/flats: darkened colour of the natural below
