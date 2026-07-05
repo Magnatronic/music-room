@@ -23,7 +23,7 @@ Sibling project: [touch](https://github.com/Magnatronic/touch) — visual-focuse
 | File | App | Status |
 |---|---|---|
 | `fluid_sensory.html` | 🎹 Fluid Keys — fluid painting + playable note grid | ✅ Built |
-| `song_grid.html` | 🎵 Song Grid — follow-along song player | In progress |
+| `song_grid.html` | 🎵 Song Grid — follow-along song player | ✅ Built |
 | `drums.html` | 🥁 Drum Pads | Planned |
 | `big_switch.html` | 🔘 Big Switch Songs | Planned |
 | `strummer.html` | 🎸 Chord Strummer | Planned |

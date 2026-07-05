@@ -640,7 +640,7 @@ function onDown(id, cx, cy){
   p.color=pointerColor(p.col);
   if(p.voice) stopVoice(p.voice);
   p.voice=startVoice(s.x,s.y);
-  if(SETTINGS.mode==='notes'){ flashCell(p.col,p.row); updateHeldCells(); }
+  if(SETTINGS.mode==='notes'){ flashCell(p.col,p.row); updateHeldCells(); if(Anim.onCell) Anim.onCell(p.col,p.row); }
 }
 function onMove(id, cx, cy){
   const p=pointers.find(p=>p.id===id);
@@ -653,6 +653,7 @@ function onMove(id, cx, cy){
       p.col=c; p.row=r; p.color=pointerColor(c);
       if(!retuneVoice(p.voice,s.x,s.y)) p.voice=startVoice(s.x,s.y);
       flashCell(c,r); updateHeldCells();
+      if(Anim.onCell) Anim.onCell(c,r);
       return;
     }
   } else if(c!==p.col){
@@ -845,6 +846,10 @@ function refreshMusic(){ buildScale(); buildBands(); refreshRailButtons(); }
 function refreshInstrument(){ refreshMusic(); buildInstrumentPanel(); }
 function buildInstrumentPanel(){
   const el=document.getElementById('instrumentContent'); el.innerHTML='';
+  // An app can take over the Notes panel entirely (e.g. Song Grid's song picker);
+  // the framework helpers (makeChips/makeSlider/makeToggle, rootOptions, OCT_OPTS,
+  // refreshMusic/refreshInstrument) are all in scope for it to reuse.
+  if(Anim.buildInstrument){ Anim.buildInstrument(el); return; }
   el.appendChild(makeChips('Mode','mode',MODE_OPTS,refreshInstrument));
   el.appendChild(makeChips('Up / down means…','yAxis',YAXIS_OPTS,refreshInstrument));
   if(SETTINGS.yAxis==='octaves')
@@ -996,7 +1001,12 @@ const FRAME_RAIL=[
   { id:'lock', icon:()=>'🔒', title:()=>'Lock controls (hold top-left corner 3s to unlock)',
     onClick(){ setLocked(true); }},
 ];
-function allRailButtons(){ return FRAME_RAIL.concat(Anim.railButtons||[]); }
+// Apps that only make sense as a note grid set Anim.lockMode='notes' — the
+// Keys/Flow rail toggle is hidden and SETTINGS.mode stays as their defaults set it.
+function allRailButtons(){
+  const base = Anim.lockMode ? FRAME_RAIL.filter(b=>b.id!=='mode') : FRAME_RAIL;
+  return base.concat(Anim.railButtons||[]);
+}
 function buildRailButtons(){
   railExtra.innerHTML='';
   allRailButtons().forEach(desc=>{

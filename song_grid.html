@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Template – Music Room</title>
+<title>Song Grid – Music Room</title>
 <style>
 /* ===== FRAMEWORK-CSS START (synced by sync-framework.js — do not edit per file) ===== */
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1115,49 +1115,206 @@ function boot(){
 /* ===== FRAMEWORK-JS END ===== */
 
 /* ===== ANIMATION START =====
-   Replace everything in this block to make a new app. Provide an `Anim` object
-   with the hooks the framework calls. This placeholder paints soft glowing
-   blobs on a Canvas2D context that fade toward the background colour.
+   Song Grid — follow-along song player. The note grid lights the next note of a
+   song; the student plays the whole tune by pressing lit cells at their own pace
+   (Follow along), or watches/listens as it autoplays (Listen). Songs are stored
+   movable-do (column indices into the current scale), so the Starting note and
+   Register controls transpose everything automatically.
 */
-const Anim = {
-  sectionLabel: 'Brush',
-  themes: {
-    sunset: {label:'🌅 Sunset', colors:[[1,0.5,0.1],[1,0.2,0.3],[1,0.8,0.2],[0.9,0.3,0.5],[1,0.6,0.0]]},
-    ocean:  {label:'🌊 Ocean',  colors:[[0,0.6,1],[0,1,0.8],[0.1,0.3,0.9],[0,0.8,0.6],[0.4,0.9,1]]},
-    candy:  {label:'🍬 Candy',  colors:[[1,0.4,0.8],[0.6,0.4,1],[0.3,0.8,1],[1,0.8,0.3],[0.5,1,0.6]]},
-    mono:   {label:'⚪ Mono',   colors:[[1,1,1],[0.8,0.85,1],[0.7,0.9,1],[0.9,0.9,0.95],[1,0.95,0.9]]},
-  },
-  defaults: { theme:'sunset', brushSize:0.10, fade:0.05 },
-  schema: [
-    {key:'brushSize', label:'Brush size', min:0.02, max:0.30, step:0.01, dp:2},
-    {key:'fade',      label:'Fade speed',  min:0.0,  max:0.20, step:0.005, dp:3},
-  ],
-  _ctx: null,
-  init(cv){ this._ctx = cv.getContext('2d'); this.reset(); },
-  resize(w,h){ this.reset(); },   // a 2D canvas clears when resized
-  splat(x,y,dx,dy,color){
-    const ctx=this._ctx; if(!ctx) return;
-    const W=canvas.width, H=canvas.height;
-    const px=x*W, py=(1-y)*H, r=Math.max(6, SETTINGS.brushSize*H*0.5);
-    const col=`${Math.min(color[0],1)*255|0},${Math.min(color[1],1)*255|0},${Math.min(color[2],1)*255|0}`;
-    const g=ctx.createRadialGradient(px,py,0,px,py,r);
-    g.addColorStop(0,`rgba(${col},0.85)`); g.addColorStop(1,`rgba(${col},0)`);
-    ctx.globalCompositeOperation='lighter';
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
-  },
-  frame(dt){
-    const ctx=this._ctx; if(!ctx) return;
-    ctx.globalCompositeOperation='source-over';
-    ctx.fillStyle=`rgba(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0},${SETTINGS.fade})`;
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-  },
-  reset(){
-    const ctx=this._ctx; if(!ctx) return;
-    ctx.globalCompositeOperation='source-over';
-    ctx.fillStyle=`rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-  },
-};
+const Anim = (() => {
+
+  // notes = [columnIndex, beats]; span = how many grid columns the song needs.
+  // Column 0 is the starting note (do). All melodies public domain.
+  const SONGS = {
+    twinkle: {label:'✨ Twinkle Twinkle', span:6, bpm:100, notes:[
+      [0,1],[0,1],[4,1],[4,1],[5,1],[5,1],[4,2],[3,1],[3,1],[2,1],[2,1],[1,1],[1,1],[0,2],
+      [4,1],[4,1],[3,1],[3,1],[2,1],[2,1],[1,2],[4,1],[4,1],[3,1],[3,1],[2,1],[2,1],[1,2],
+      [0,1],[0,1],[4,1],[4,1],[5,1],[5,1],[4,2],[3,1],[3,1],[2,1],[2,1],[1,1],[1,1],[0,2]]},
+    mary: {label:'🐑 Mary Had a Little Lamb', span:5, bpm:110, notes:[
+      [2,1],[1,1],[0,1],[1,1],[2,1],[2,1],[2,2],[1,1],[1,1],[1,2],[2,1],[4,1],[4,2],
+      [2,1],[1,1],[0,1],[1,1],[2,1],[2,1],[2,1],[2,1],[1,1],[1,1],[2,1],[1,1],[0,4]]},
+    hotcross: {label:'🥐 Hot Cross Buns', span:3, bpm:100, notes:[
+      [2,1],[1,1],[0,2],[2,1],[1,1],[0,2],
+      [0,0.5],[0,0.5],[0,0.5],[0,0.5],[1,0.5],[1,0.5],[1,0.5],[1,0.5],[2,1],[1,1],[0,2]]},
+    ode: {label:'🎻 Ode to Joy', span:5, bpm:110, notes:[
+      [2,1],[2,1],[3,1],[4,1],[4,1],[3,1],[2,1],[1,1],[0,1],[0,1],[1,1],[2,1],[2,1.5],[1,0.5],[1,2],
+      [2,1],[2,1],[3,1],[4,1],[4,1],[3,1],[2,1],[1,1],[0,1],[0,1],[1,1],[2,1],[1,1.5],[0,0.5],[0,2]]},
+    row: {label:'🚣 Row Your Boat', span:8, bpm:84, notes:[
+      [0,1],[0,1],[0,0.7],[1,0.3],[2,1],[2,0.7],[1,0.3],[2,0.7],[3,0.3],[4,2],
+      [7,0.33],[7,0.33],[7,0.34],[4,0.33],[4,0.33],[4,0.34],
+      [2,0.33],[2,0.33],[2,0.34],[0,0.33],[0,0.33],[0,0.34],
+      [4,0.7],[3,0.3],[2,0.7],[1,0.3],[0,2]]},
+    london: {label:'🌉 London Bridge', span:6, bpm:105, notes:[
+      [4,1.5],[5,0.5],[4,1],[3,1],[2,1],[3,1],[4,2],[1,1],[2,1],[3,2],[2,1],[3,1],[4,2],
+      [4,1.5],[5,0.5],[4,1],[3,1],[2,1],[3,1],[4,2],[1,2],[4,2],[2,1],[0,3]]},
+  };
+  const PLAY_OPTS={follow:{label:'👆 Follow along'},listen:{label:'👂 Listen'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  let pos=0, playing=false, wait=0, celebrating=false;
+  let ctx=null, sparks=[], progEl=null;
+
+  function song(){ return SONGS[SETTINGS.song]||SONGS.twinkle; }
+  function beatSecs(b){ return b*(60/song().bpm)/(SETTINGS.tempo||1); }
+  function cellEl(c){ return document.querySelector('[data-cell="'+c+'-0"]'); }
+  function setProgress(){ if(progEl) progEl.style.width=(pos/song().notes.length*100)+'%'; }
+  function updateTarget(){
+    document.querySelectorAll('.band.target').forEach(d=>d.classList.remove('target'));
+    setProgress();
+    if(celebrating || SETTINGS.playMode!=='follow' || pos>=song().notes.length) return;
+    const d=cellEl(song().notes[pos][0]); if(d) d.classList.add('target');
+  }
+  function burst(col,n,big){
+    const x=(col+0.5)/song().span*canvas.width, y=canvas.height*0.5;
+    const rgb=bandRGB255(col);
+    for(let i=0;i<n;i++){
+      const a=Math.random()*Math.PI*2, v=(big?3:1.6)*(0.5+Math.random())*canvas.height/180;
+      sparks.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:1,rgb});
+    }
+    pokeSim();
+  }
+  function playCol(col){
+    pluckNote((col+0.5)/song().span, 0.5, 1);
+    flashCell(col,0);
+  }
+  function applySong(){
+    stopListen();
+    SETTINGS.noteCount=song().span;
+    SETTINGS.yAxis='none'; SETTINGS.mode='notes';
+    saveSettings(); refreshMusic();
+    pos=0; celebrating=false; updateTarget();
+  }
+  function stopListen(){ playing=false; refreshRailButtons(); }
+  function startListen(){
+    if(pos>=song().notes.length) pos=0;
+    playing=true; wait=0.4; getAudio(); pokeSim(); updateTarget(); refreshRailButtons();
+  }
+  function finishSong(){
+    celebrating=true; playing=false; updateTarget(); setProgress();
+    const s=song().span;
+    for(let i=0;i<s;i++){
+      setTimeout(()=>{ flashCell(i,0); pluckNote((i+0.5)/s,0.5,0.7); burst(i,12,true); pokeSim(); }, 350+i*110);
+    }
+    setTimeout(()=>{
+      celebrating=false; pos=0;
+      if(SETTINGS.loopSong && SETTINGS.playMode==='listen') startListen();
+      updateTarget(); refreshRailButtons();
+    }, 350+s*110+1200);
+  }
+
+  return {
+    sectionLabel:'Song Grid',
+    lockMode:'notes',
+    themes:{
+      glow: {label:'✨ Glow',  colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]},
+      ocean:{label:'🌊 Ocean', colors:[[0,0.6,1],[0,1,0.8],[0.1,0.3,0.9],[0,0.8,0.6],[0.4,0.9,1]]},
+      candy:{label:'🍬 Candy', colors:[[1,0.4,0.8],[0.6,0.4,1],[0.3,0.8,1],[1,0.8,0.3],[0.5,1,0.6]]},
+    },
+    defaults:{ theme:'glow', song:'twinkle', playMode:'follow', tempo:1.0, loopSong:false,
+      mode:'notes', paint:false, yAxis:'none', zoneLook:'tint', scale:'major',
+      colorMode:'note', noteCount:6 },
+    schema:[],
+    railButtons:[
+      { id:'sgplay',
+        icon:()=> SETTINGS.playMode==='listen' ? (playing?'⏸':'▶') : '⏮',
+        title:()=> SETTINGS.playMode==='listen' ? (playing?'Pause the song':'Play the song')
+                                                : 'Restart the song from the beginning',
+        active:()=>playing,
+        onClick(){
+          if(SETTINGS.playMode==='listen'){ playing ? stopListen() : startListen(); }
+          else { pos=0; celebrating=false; updateTarget(); }
+        }},
+    ],
+    buildInstrument(el){
+      el.appendChild(makeChips('Song','song',SONGS,applySong));
+      el.appendChild(makeChips('How it plays','playMode',PLAY_OPTS,()=>{
+        stopListen(); pos=0; buildInstrumentPanel(); updateTarget(); }));
+      if(SETTINGS.playMode==='listen')
+        el.appendChild(makeSlider({key:'tempo',label:'Speed',min:0.4,max:1.6,step:0.05,dp:2}));
+      el.appendChild(makeToggle('Repeat when finished','loopSong'));
+      el.appendChild(makeChips('Scale','scale',SG_SCALES,refreshInstrument));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
+      el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
+    },
+    onCell(col,row){
+      if(celebrating || SETTINGS.playMode!=='follow') return;
+      const notes=song().notes;
+      if(pos<notes.length && col===notes[pos][0]){
+        burst(col,8,false);
+        pos++;
+        if(pos>=notes.length) finishSong(); else updateTarget();
+      }
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('sgCss')){
+        const st=document.createElement('style'); st.id='sgCss';
+        st.textContent=
+          '.band.target{outline:3px solid rgba(255,255,255,0.95);outline-offset:-4px;'+
+          'background:rgba(var(--c),0.30)!important;animation:sgPulse 1.1s ease-in-out infinite}'+
+          '@keyframes sgPulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.9)}}'+
+          '#sgProgress{position:fixed;top:0;left:0;height:6px;width:0;z-index:6;'+
+          'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+          'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+      }
+      if(!progEl){ progEl=document.createElement('div'); progEl.id='sgProgress'; document.body.appendChild(progEl); }
+      this.reset();
+      applySong();
+    },
+    resize(w,h){ this.reset(); },   // a 2D canvas clears when resized
+    splat(x,y,dx,dy,color){   // paint trails (off by default — Visuals → Paint trails)
+      if(!ctx) return;
+      const W=canvas.width,H=canvas.height, px=x*W, py=(1-y)*H, r=Math.max(8,H*0.06);
+      const col=(Math.min(color[0],1)*255|0)+','+(Math.min(color[1],1)*255|0)+','+(Math.min(color[2],1)*255|0);
+      const g=ctx.createRadialGradient(px,py,0,px,py,r);
+      g.addColorStop(0,'rgba('+col+',0.7)'); g.addColorStop(1,'rgba('+col+',0)');
+      ctx.globalCompositeOperation='lighter';
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
+    },
+    frame(dt){
+      if(!ctx) return;
+      // fade toward the background; keeps paint trails and sparks ephemeral
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+',0.10)';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      // Listen-mode scheduler (frame-driven; pokeSim keeps the loop awake while playing)
+      if(playing){
+        pokeSim();
+        wait-=dt;
+        while(playing && wait<=0){
+          const notes=song().notes;
+          const c=notes[pos][0], b=notes[pos][1];
+          playCol(c); burst(c,6,false);
+          pos++; setProgress();
+          wait+=beatSecs(b);
+          if(pos>=notes.length){ playing=false; setTimeout(finishSong, beatSecs(b)*1000); }
+        }
+      }
+      // sparks
+      if(sparks.length){
+        pokeSim();
+        ctx.globalCompositeOperation='lighter';
+        for(const s of sparks){
+          s.x+=s.vx*dt*60; s.y+=s.vy*dt*60; s.vy+=canvas.height*0.02*dt*60/60; s.life-=dt*1.3;
+          if(s.life>0){
+            ctx.fillStyle='rgba('+s.rgb[0]+','+s.rgb[1]+','+s.rgb[2]+','+Math.max(0,s.life).toFixed(2)+')';
+            ctx.beginPath(); ctx.arc(s.x,s.y,Math.max(1.5,canvas.height*0.005*s.life),0,Math.PI*2); ctx.fill();
+          }
+        }
+        sparks=sparks.filter(s=>s.life>0);
+      }
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      sparks=[];
+    },
+  };
+})();
 /* ===== ANIMATION END ===== */
 
 boot();
