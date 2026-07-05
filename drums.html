@@ -22,7 +22,8 @@
 */
 const Anim = (() => {
 
-  // Pad order chosen so few pads = the most useful kit (2 pads = kick + snare).
+  // Default pad order chosen so few pads = the most useful kit (2 = kick + snare);
+  // the therapist can reassign any drum to any pad in the Drums tab.
   const KIT=[
     {key:'kick',   label:'🥁', name:'Kick',    color:[226,28,28]},
     {key:'snare',  label:'🪘', name:'Snare',   color:[245,209,23]},
@@ -33,6 +34,14 @@ const Anim = (() => {
     {key:'cowbell',label:'🔔', name:'Cowbell', color:[224,90,156]},
     {key:'crash',  label:'💥', name:'Crash',   color:[200,200,210]},
   ];
+  const BY_KEY={}; KIT.forEach(d=>BY_KEY[d.key]=d);
+  const DEFAULT_PADS=KIT.map(d=>d.key);
+  // Per-drum shaping macros (saved in SETTINGS -> presets): every frequency in a
+  // recipe scales by pitch, every decay/stop time by len, filter cutoffs by tone.
+  function mulOf(key){ return {
+    pitch: SETTINGS['tw_'+key+'_pitch']||1,
+    len:   SETTINGS['tw_'+key+'_len']||1,
+    tone:  SETTINGS['tw_'+key+'_tone']||1 }; }
 
   let ctx=null, btAudio=null, btName='';
 
@@ -60,61 +69,66 @@ const Anim = (() => {
     g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(peak,t+0.006);
     g.gain.exponentialRampToValueAtTime(0.0008,t+decay); return g; }
   const DRUMS={
-    kick(ac,t,out){
+    kick(ac,t,out,m){
       const o=ac.createOscillator(); o.type='sine';
-      o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(50,t+0.12);
-      const g=env(ac,t,1.1,0.4); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.5);
-      return t+0.5;
+      o.frequency.setValueAtTime(150*m.pitch,t); o.frequency.exponentialRampToValueAtTime(50*m.pitch,t+0.12*m.len);
+      const g=env(ac,t,1.1,0.5*m.len); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.65*m.len);
+      return t+0.65*m.len;
     },
-    snare(ac,t,out){
-      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=0.9;
-      const g=env(ac,t,0.8,0.18); n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.25);
-      const o=ac.createOscillator(); o.type='triangle'; o.frequency.value=190;
-      const g2=env(ac,t,0.5,0.12); o.connect(g2); g2.connect(out); o.start(t); o.stop(t+0.2);
-      return t+0.25;
+    snare(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800*m.pitch*m.tone; bp.Q.value=0.9;
+      const g=env(ac,t,0.8,0.24*m.len); n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.32*m.len);
+      const o=ac.createOscillator(); o.type='triangle'; o.frequency.value=190*m.pitch;
+      const g2=env(ac,t,0.5,0.14*m.len); o.connect(g2); g2.connect(out); o.start(t); o.stop(t+0.2*m.len);
+      return t+0.32*m.len;
     },
-    hat(ac,t,out){
-      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=7500;
-      const g=env(ac,t,0.45,0.06); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+0.12);
-      return t+0.12;
+    hat(ac,t,out,m){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=7500*m.pitch*m.tone;
+      const g=env(ac,t,0.45,0.09*m.len); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+0.16*m.len);
+      return t+0.16*m.len;
     },
-    clap(ac,t,out){
-      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500; bp.Q.value=1.8;
+    clap(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500*m.pitch*m.tone; bp.Q.value=1.8;
       const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
       for(let i=0;i<3;i++){ const tt=t+i*0.02;                  // three quick bursts
         g.gain.setValueAtTime(0.7,tt); g.gain.exponentialRampToValueAtTime(0.12,tt+0.018); }
-      g.gain.exponentialRampToValueAtTime(0.0008,t+0.22);
-      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.3);
-      return t+0.3;
+      g.gain.exponentialRampToValueAtTime(0.0008,t+0.28*m.len);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.36*m.len);
+      return t+0.36*m.len;
     },
-    shaker(ac,t,out){
-      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=5500; bp.Q.value=1.4;
+    shaker(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=5500*m.pitch*m.tone; bp.Q.value=1.4;
       const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
-      g.gain.linearRampToValueAtTime(0.4,t+0.03); g.gain.exponentialRampToValueAtTime(0.0008,t+0.16);
-      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.22);
-      return t+0.22;
+      g.gain.linearRampToValueAtTime(0.4,t+0.03); g.gain.exponentialRampToValueAtTime(0.0008,t+0.18*m.len);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.25*m.len);
+      return t+0.25*m.len;
     },
-    tom(ac,t,out){
+    tom(ac,t,out,m){
       const o=ac.createOscillator(); o.type='sine';
-      o.frequency.setValueAtTime(210,t); o.frequency.exponentialRampToValueAtTime(95,t+0.2);
-      const g=env(ac,t,0.9,0.3); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.4);
-      return t+0.4;
+      o.frequency.setValueAtTime(210*m.pitch,t); o.frequency.exponentialRampToValueAtTime(95*m.pitch,t+0.2*m.len);
+      const g=env(ac,t,0.9,0.45*m.len); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.6*m.len);
+      return t+0.6*m.len;
     },
-    cowbell(ac,t,out){
-      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=800; bp.Q.value=3;
-      const g=env(ac,t,0.5,0.25); bp.connect(g); g.connect(out);
+    cowbell(ac,t,out,m){
+      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=800*m.pitch*m.tone; bp.Q.value=3;
+      const g=env(ac,t,0.5,0.4*m.len); bp.connect(g); g.connect(out);
       for(const f of [540,845]){ const o=ac.createOscillator(); o.type='square';
-        o.frequency.value=f; o.connect(bp); o.start(t); o.stop(t+0.35); }
-      return t+0.35;
+        o.frequency.value=f*m.pitch; o.connect(bp); o.start(t); o.stop(t+0.55*m.len); }
+      return t+0.55*m.len;
     },
-    crash(ac,t,out){
-      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=5000;
-      const g=env(ac,t,0.6,0.9); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+1.1);
-      return t+1.1;
+    crash(ac,t,out,m){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=5000*m.pitch*m.tone;
+      const g=env(ac,t,0.6,1.6*m.len); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+2.0*m.len);
+      return t+2.0*m.len;
     },
   };
-  function pads(){ return KIT.slice(0, Math.max(2,Math.min(8,Math.round(SETTINGS.noteCount)||4))); }
-  function playPad(col){ const p=pads()[col]; if(p&&DRUMS[p.key]) hit(DRUMS[p.key]); }
+  function padKeys(){
+    const arr=Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:DEFAULT_PADS;
+    return arr.slice(0, Math.max(2,Math.min(8,Math.round(SETTINGS.noteCount)||4)));
+  }
+  function pads(){ return padKeys().map(k=>BY_KEY[k]||KIT[0]); }
+  function playDrum(key){ if(DRUMS[key]) hit((ac,t,out)=>DRUMS[key](ac,t,out,mulOf(key))); }
+  function playPad(col){ const p=pads()[col]; if(p) playDrum(p.key); }
 
   // ── backing track: therapist's own file, session-only ──
   function pickTrack(rebuild){
@@ -129,6 +143,20 @@ const Anim = (() => {
     inp.click();
   }
 
+  // Defaults include every per-drum macro so Reset restores them and presets
+  // capture a whole custom kit.
+  const DEFAULTS={ theme:'kit', noteCount:4, btVolume:0.7, pressFx:'bloom', tweakDrum:'kick',
+    padSounds:DEFAULT_PADS,
+    mode:'notes', paint:false, yAxis:'none', zoneLook:'tint', colorMode:'note', showLabels:true };
+  KIT.forEach(d=>{ DEFAULTS['tw_'+d.key+'_pitch']=1; DEFAULTS['tw_'+d.key+'_len']=1; DEFAULTS['tw_'+d.key+'_tone']=1; });
+
+  let lastPreview=0;
+  function preview(key){                       // throttled so slider drags don't machine-gun
+    const now=performance.now();
+    if(now-lastPreview<160) return;
+    lastPreview=now; getAudio(); playDrum(key);
+  }
+
   return {
     sectionLabel:'Drums',
     lockMode:'notes',
@@ -136,14 +164,28 @@ const Anim = (() => {
     hideRail:['clear'],
     paneLabels:{ instrument:'🥁 Drums', sound:'🎛️ Sound' },
     themes:{ kit:{label:'🥁 Kit', colors:[[1,0.2,0.2],[1,0.85,0.1],[0.1,0.7,0.7],[1,0.5,0.1],[0.3,0.75,0.3]]} },
-    defaults:{ theme:'kit', noteCount:4, btVolume:0.7, pressFx:'bloom',
-      mode:'notes', paint:false, yAxis:'none', zoneLook:'tint', colorMode:'note', showLabels:true },
+    defaults:DEFAULTS,
     schema:[],
     bandColor(i){ const p=pads()[i]; return p?p.color:[200,200,200]; },
     bandLabel(i){ const p=pads()[i]; return p?p.label:''; },
-    // 🥁 Drums tab — pads + backing track
+    // 🥁 Drums tab — pads, pad sounds, backing track
     buildInstrument(el){
-      el.appendChild(makeSlider({key:'noteCount',label:'How many pads',min:2,max:8,step:1,dp:0,onChange:refreshMusic}));
+      el.appendChild(makeSlider({key:'noteCount',label:'How many pads',min:2,max:8,step:1,dp:0,
+        onChange:()=>{ refreshMusic(); buildInstrumentPanel(); }}));
+      const hp=document.createElement('div'); hp.className='sectn'; hp.textContent='Pad sounds (tap to change & hear)'; el.appendChild(hp);
+      padKeys().forEach((cur,i)=>{
+        const row=document.createElement('div'); row.className='chips';
+        KIT.forEach(d=>{
+          const c=document.createElement('div'); c.className='chip'+(d.key===cur?' active':'');
+          c.textContent=d.label; c.title=d.name+(i===0?'':'');
+          c.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+            const arr=padKeys(); const full=(Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:DEFAULT_PADS).slice();
+            full[i]=d.key; SETTINGS.padSounds=full; saveSettings();
+            playDrum(d.key); refreshMusic(); buildInstrumentPanel(); });
+          row.appendChild(c);
+        });
+        el.appendChild(row);
+      });
       const h=document.createElement('div'); h.className='sectn'; h.textContent='Backing track (from this computer)'; el.appendChild(h);
       const row=document.createElement('div'); row.className='chips';
       const pick=document.createElement('div'); pick.className='chip';
@@ -162,8 +204,29 @@ const Anim = (() => {
       if(btAudio) el.appendChild(makeSlider({key:'btVolume',label:'Backing volume',min:0,max:1,step:0.01,dp:2,
         onChange:()=>{ if(btAudio) btAudio.volume=SETTINGS.btVolume; }}));
     },
-    // 🎛️ Sound tab — effects/volume only (Voice is meaningless for drums)
+    // 🎛️ Sound tab — per-drum shaping + effects/volume (no Voice: drums are the voice)
     buildSound(el){
+      const hs=document.createElement('div'); hs.className='sectn'; hs.textContent='Shape a drum'; el.appendChild(hs);
+      const sel=document.createElement('div'); sel.className='chips';
+      KIT.forEach(d=>{
+        const c=document.createElement('div'); c.className='chip'+(SETTINGS.tweakDrum===d.key?' active':'');
+        c.textContent=d.label+' '+d.name;
+        c.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+          SETTINGS.tweakDrum=d.key; saveSettings(); playDrum(d.key); buildSoundPanel(); });
+        sel.appendChild(c);
+      });
+      el.appendChild(sel);
+      const k=BY_KEY[SETTINGS.tweakDrum]?SETTINGS.tweakDrum:'kick';
+      const hear=()=>preview(k);
+      el.appendChild(makeSlider({key:'tw_'+k+'_pitch',label:'Pitch (deep ↔ high)',min:0.5,max:2,step:0.05,dp:2,onChange:hear}));
+      el.appendChild(makeSlider({key:'tw_'+k+'_len',  label:'Length (tight ↔ ringing)',min:0.4,max:2.5,step:0.05,dp:2,onChange:hear}));
+      el.appendChild(makeSlider({key:'tw_'+k+'_tone', label:'Tone (soft ↔ sharp)',min:0.5,max:2,step:0.05,dp:2,onChange:hear}));
+      const rst=document.createElement('div'); rst.className='chips';
+      const rc=document.createElement('div'); rc.className='chip'; rc.textContent='↺ Reset this drum';
+      rc.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+        SETTINGS['tw_'+k+'_pitch']=1; SETTINGS['tw_'+k+'_len']=1; SETTINGS['tw_'+k+'_tone']=1;
+        saveSettings(); playDrum(k); buildSoundPanel(); });
+      rst.appendChild(rc); el.appendChild(rst);
       const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
       el.appendChild(makeToggle('Reverb','reverb',applyReverb));
       el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
