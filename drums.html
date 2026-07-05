@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Drum Pads – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Drum Pads — big colourful percussion zones. Tap a pad to play its drum; drag
+   across pads for rolls. All drums are synthesised (no samples), routed through
+   the framework's master chain (volume, effects, auto-mixer, limiter).
+
+   Menu: 🥁 Drums (pad count + backing track) · 🎸 Instrument (effects/volume,
+   no Voice — drums are the voice) · ✨ Visuals (press effect etc) · ⭐ Presets.
+   Backing track: the therapist loads their own MP3 from disk — nothing bundled,
+   still fully offline. Session-only (file permissions can't persist).
+*/
+const Anim = (() => {
+
+  // Pad order chosen so few pads = the most useful kit (2 pads = kick + snare).
+  const KIT=[
+    {key:'kick',   label:'🥁', name:'Kick',    color:[226,28,28]},
+    {key:'snare',  label:'🪘', name:'Snare',   color:[245,209,23]},
+    {key:'hat',    label:'🎩', name:'Hi-hat',  color:[28,169,169]},
+    {key:'clap',   label:'👏', name:'Clap',    color:[245,125,23]},
+    {key:'shaker', label:'🪇', name:'Shaker',  color:[59,181,74]},
+    {key:'tom',    label:'🛢️', name:'Tom',     color:[125,79,181]},
+    {key:'cowbell',label:'🔔', name:'Cowbell', color:[224,90,156]},
+    {key:'crash',  label:'💥', name:'Crash',   color:[200,200,210]},
+  ];
+
+  let ctx=null, btAudio=null, btName='';
+
+  // ── synthesised drums, routed into the framework master chain ──
+  let noiseBuf=null;
+  function noiseSrc(ac){
+    if(!noiseBuf){
+      noiseBuf=ac.createBuffer(1,ac.sampleRate*1.2,ac.sampleRate);
+      const d=noiseBuf.getChannelData(0);
+      for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    }
+    const s=ac.createBufferSource(); s.buffer=noiseBuf; return s;
+  }
+  // Every hit counts as a sounding voice so the framework auto-mixer sees it.
+  function hit(build){
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    const t=ac.currentTime+0.012;                 // scheduling headroom
+    const out=ac.createGain(); out.gain.value=1; out.connect(masterGain);
+    soundingVoices++; updatePolyGain();
+    const endAt=build(ac,t,out);                  // returns when the sound is over
+    setTimeout(()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+      try{out.disconnect();}catch(e){} }, Math.max(100,(endAt-ac.currentTime)*1000+150));
+  }
+  function env(ac,t,peak,decay){ const g=ac.createGain();
+    g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(peak,t+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0008,t+decay); return g; }
+  const DRUMS={
+    kick(ac,t,out){
+      const o=ac.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(50,t+0.12);
+      const g=env(ac,t,1.1,0.4); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.5);
+      return t+0.5;
+    },
+    snare(ac,t,out){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=0.9;
+      const g=env(ac,t,0.8,0.18); n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.25);
+      const o=ac.createOscillator(); o.type='triangle'; o.frequency.value=190;
+      const g2=env(ac,t,0.5,0.12); o.connect(g2); g2.connect(out); o.start(t); o.stop(t+0.2);
+      return t+0.25;
+    },
+    hat(ac,t,out){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=7500;
+      const g=env(ac,t,0.45,0.06); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+0.12);
+      return t+0.12;
+    },
+    clap(ac,t,out){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500; bp.Q.value=1.8;
+      const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
+      for(let i=0;i<3;i++){ const tt=t+i*0.02;                  // three quick bursts
+        g.gain.setValueAtTime(0.7,tt); g.gain.exponentialRampToValueAtTime(0.12,tt+0.018); }
+      g.gain.exponentialRampToValueAtTime(0.0008,t+0.22);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.3);
+      return t+0.3;
+    },
+    shaker(ac,t,out){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=5500; bp.Q.value=1.4;
+      const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
+      g.gain.linearRampToValueAtTime(0.4,t+0.03); g.gain.exponentialRampToValueAtTime(0.0008,t+0.16);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.22);
+      return t+0.22;
+    },
+    tom(ac,t,out){
+      const o=ac.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(210,t); o.frequency.exponentialRampToValueAtTime(95,t+0.2);
+      const g=env(ac,t,0.9,0.3); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.4);
+      return t+0.4;
+    },
+    cowbell(ac,t,out){
+      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=800; bp.Q.value=3;
+      const g=env(ac,t,0.5,0.25); bp.connect(g); g.connect(out);
+      for(const f of [540,845]){ const o=ac.createOscillator(); o.type='square';
+        o.frequency.value=f; o.connect(bp); o.start(t); o.stop(t+0.35); }
+      return t+0.35;
+    },
+    crash(ac,t,out){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=5000;
+      const g=env(ac,t,0.6,0.9); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+1.1);
+      return t+1.1;
+    },
+  };
+  function pads(){ return KIT.slice(0, Math.max(2,Math.min(8,Math.round(SETTINGS.noteCount)||4))); }
+  function playPad(col){ const p=pads()[col]; if(p&&DRUMS[p.key]) hit(DRUMS[p.key]); }
+
+  // ── backing track: therapist's own file, session-only ──
+  function pickTrack(rebuild){
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='audio/*';
+    inp.addEventListener('change',()=>{
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      if(btAudio){ btAudio.pause(); URL.revokeObjectURL(btAudio.src); }
+      btAudio=new Audio(URL.createObjectURL(f));
+      btAudio.loop=true; btAudio.volume=SETTINGS.btVolume;
+      btName=f.name; rebuild();
+    });
+    inp.click();
+  }
+
+  return {
+    sectionLabel:'Drums',
+    lockMode:'notes',
+    noVoices:true,                     // drums ARE the sound; skip the pitched voices
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🥁 Drums', sound:'🎛️ Sound' },
+    themes:{ kit:{label:'🥁 Kit', colors:[[1,0.2,0.2],[1,0.85,0.1],[0.1,0.7,0.7],[1,0.5,0.1],[0.3,0.75,0.3]]} },
+    defaults:{ theme:'kit', noteCount:4, btVolume:0.7, pressFx:'bloom',
+      mode:'notes', paint:false, yAxis:'none', zoneLook:'tint', colorMode:'note', showLabels:true },
+    schema:[],
+    bandColor(i){ const p=pads()[i]; return p?p.color:[200,200,200]; },
+    bandLabel(i){ const p=pads()[i]; return p?p.label:''; },
+    // 🥁 Drums tab — pads + backing track
+    buildInstrument(el){
+      el.appendChild(makeSlider({key:'noteCount',label:'How many pads',min:2,max:8,step:1,dp:0,onChange:refreshMusic}));
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Backing track (from this computer)'; el.appendChild(h);
+      const row=document.createElement('div'); row.className='chips';
+      const pick=document.createElement('div'); pick.className='chip';
+      pick.textContent = btName ? ('🎵 '+(btName.length>26?btName.slice(0,24)+'…':btName)) : '📂 Choose a music file…';
+      pick.addEventListener('click',e=>{ e.stopPropagation(); pickTrack(buildInstrumentPanel); });
+      row.appendChild(pick);
+      if(btAudio){
+        const play=document.createElement('div'); play.className='chip'+(btAudio.paused?'':' active');
+        play.textContent = btAudio.paused ? '▶ Play' : '⏸ Pause';
+        play.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+          if(btAudio.paused) btAudio.play(); else btAudio.pause();
+          buildInstrumentPanel(); });
+        row.appendChild(play);
+      }
+      el.appendChild(row);
+      if(btAudio) el.appendChild(makeSlider({key:'btVolume',label:'Backing volume',min:0,max:1,step:0.01,dp:2,
+        onChange:()=>{ if(btAudio) btAudio.volume=SETTINGS.btVolume; }}));
+    },
+    // 🎛️ Sound tab — effects/volume only (Voice is meaningless for drums)
+    buildSound(el){
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
+      el.appendChild(makeToggle('Drum icons on pads','showLabels',buildBands));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    onCell(col,row){ playPad(col); fxCell(col,0); },
+    init(cv){ ctx=cv.getContext('2d'); this.reset(); refreshMusic(); },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

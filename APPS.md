@@ -25,7 +25,7 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
 
 ---
 
-## 1. 🎵 Song Grid — `song_grid.html` (BUILD FIRST, M)
+## 1. 🎵 Song Grid — `song_grid.html` ✅ BUILT
 
 **Concept.** The note grid from Fluid Keys becomes a song teacher: pick a song, and the grid
 lights the next note; the student plays the whole song by pressing lit cells at their own pace.
@@ -50,7 +50,7 @@ Mary Had a Little Lamb, Hot Cross Buns, Ode to Joy, Frère Jacques, Happy Birthd
 
 ---
 
-## 2. 🥁 Drum Pads — `drums.html` (S/M)
+## 2. 🥁 Drum Pads — `drums.html` ✅ BUILT
 
 **Concept.** 4–8 large percussion zones (kick, snare, hi-hat, clap, shaker, tom, cowbell,
 cymbal). Tap anywhere in a zone; the zone flashes and its icon bounces.
@@ -67,7 +67,7 @@ player (see conventions); optional auto-metronome with visual pulse.
 
 ---
 
-## 3. 🔘 Big Switch Songs — `big_switch.html` (S)
+## 3. 🔘 Big Switch Songs — `big_switch.html` ✅ BUILT
 
 **Concept.** The whole screen is ONE giant button. Every activation — touch anywhere, any
 keyboard key, or an accessibility switch (switches present as Space/Enter) — plays the NEXT

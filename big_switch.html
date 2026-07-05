@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Big Switch Songs – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="songs.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Big Switch Songs — the whole screen is ONE giant button. Every activation
+   (touch anywhere, any keyboard key, or an accessibility switch presenting as
+   Space/Enter) plays the NEXT note or phrase of the song, with a full-screen
+   wash of the note's Boomwhacker colour and a giant note letter. The classic
+   switch-access interaction: full musical agency from a single reliable action.
+
+   Reuses songs.js and the framework's pitched voice engine (pluckNote) — the
+   note grid exists invisibly underneath so pitch/colour mapping stays identical
+   to Song Grid, but no zones are drawn and touch position doesn't matter.
+*/
+const Anim = (() => {
+
+  const SONGS = window.MUSIC_SONGS;   // shared library — see songs.js
+  const GRAN_OPTS={note:{label:'One note'},phrase:{label:'A whole phrase'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  let pos=0, phrases=[], phrasePos=0, celebrating=false, finished=false, lastHit=0;
+  let ctx=null, wash=null, washA=0, letterEl=null, progEl=null;
+
+  function song(){ return SONGS[SETTINGS.song]||SONGS.twinkle; }
+  function beatSecs(b){ return b*(60/song().bpm)/(SETTINGS.tempo||1); }
+  function total(){ return SETTINGS.granularity==='phrase' ? phrases.length : song().notes.length; }
+  function done(){ return SETTINGS.granularity==='phrase' ? phrasePos : pos; }
+  function setProgress(){ if(progEl) progEl.style.width=(done()/Math.max(1,total())*100)+'%'; }
+
+  function flashNote(col,dur){
+    wash=bandRGB255(col); washA=0.55; pokeSim();
+    if(letterEl && SETTINGS.showLetter){
+      letterEl.textContent=NOTES[col]?NOTES[col].label:'';
+      letterEl.style.color='rgb('+wash.join(',')+')';
+      letterEl.classList.remove('pop'); void letterEl.offsetWidth;
+      letterEl.classList.add('pop');
+    }
+  }
+  function playNote(col,beats){
+    pluckNote((col+0.5)/song().span, 0.5, 1);
+    flashNote(col,beats);
+  }
+  function applySong(){
+    SETTINGS.noteCount=song().span;
+    SETTINGS.yAxis='none'; SETTINGS.mode='notes'; SETTINGS.zoneLook='off';
+    saveSettings(); refreshMusic();
+    phrases=window.songPhrases(song());
+    pos=0; phrasePos=0; celebrating=false; finished=false; setProgress();
+    if(letterEl) letterEl.textContent='';
+  }
+  function celebrate(){
+    celebrating=true;
+    const s=song().span;
+    for(let i=0;i<s;i++) setTimeout(()=>{ playNote(i,1); }, 250+i*140);
+    setTimeout(()=>{ celebrating=false; pos=0; phrasePos=0;
+      finished=!SETTINGS.loopSong;   // with repeat off, wait for ⏮ before playing again
+      setProgress();
+      if(letterEl) letterEl.textContent=''; }, 250+s*140+1200);
+  }
+  // One activation = one step through the song. Debounced so a two-finger tap
+  // or a bouncy switch doesn't skip notes.
+  function advance(){
+    const now=performance.now();
+    if(celebrating || finished || now-lastHit<180) return;
+    lastHit=now;
+    getAudio(); pokeSim();
+    if(SETTINGS.granularity==='phrase'){
+      const ph=phrases[phrasePos]; if(!ph) return;
+      let at=0;
+      for(const [c,b] of ph){
+        setTimeout(()=>playNote(c,b), at*1000);
+        at+=beatSecs(b);
+      }
+      phrasePos++;
+      setTimeout(setProgress,50);
+      if(phrasePos>=phrases.length) setTimeout(celebrate, at*1000+300);
+    } else {
+      const n=song().notes[pos]; if(!n) return;
+      playNote(n[0],n[1]);
+      pos++; setProgress();
+      if(pos>=song().notes.length) setTimeout(celebrate,600);
+    }
+  }
+
+  return {
+    sectionLabel:'Big Switch',
+    lockMode:'notes',
+    noVoices:true,                    // any touch = the next song step, not a pitched zone
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🎵 Songs' },
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', song:'twinkle', granularity:'note', tempo:1.0, loopSong:true,
+      showLetter:true, mode:'notes', paint:false, yAxis:'none', zoneLook:'off',
+      colorMode:'note', scale:'major', noteCount:6, showLabels:false },
+    schema:[],
+    railButtons:[
+      { id:'bsrestart', icon:()=>'⏮', title:()=>'Restart the song from the beginning',
+        onClick(){ pos=0; phrasePos=0; celebrating=false; finished=false; setProgress(); if(letterEl) letterEl.textContent=''; }},
+    ],
+    // 🎵 Songs tab
+    buildInstrument(el){
+      el.appendChild(makeChips('Song','song',SONGS,applySong));
+      el.appendChild(makeChips('Each press plays…','granularity',GRAN_OPTS,()=>{
+        pos=0; phrasePos=0; setProgress(); buildInstrumentPanel(); }));
+      if(SETTINGS.granularity==='phrase')
+        el.appendChild(makeSlider({key:'tempo',label:'Phrase speed',min:0.4,max:1.6,step:0.05,dp:2}));
+      el.appendChild(makeToggle('Start again when finished','loopSong'));
+    },
+    // 🎸 Instrument tab — tuning on top of voice/effects/volume
+    soundExtras(el){
+      el.appendChild(makeChips('Scale','scale',SG_SCALES,refreshMusic));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Giant note letter','showLetter'));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    onCell(){ advance(); },   // any touch anywhere counts
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('bsCss')){
+        const st=document.createElement('style'); st.id='bsCss';
+        st.textContent=
+          '#bsLetter{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;'+
+            'font-family:system-ui,sans-serif;font-weight:800;font-size:38vh;pointer-events:none;'+
+            'text-shadow:0 0 6vh rgba(255,255,255,0.25);z-index:3;opacity:0.95}'+
+          '#bsLetter.pop{animation:bsPop 0.9s ease-out}'+
+          '@keyframes bsPop{0%{transform:scale(0.6);opacity:1}100%{transform:scale(1.15);opacity:0.85}}'+
+          '#bsProgress{position:fixed;top:0;left:0;height:6px;width:0;z-index:6;'+
+            'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+            'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+      }
+      if(!letterEl){ letterEl=document.createElement('div'); letterEl.id='bsLetter'; document.body.appendChild(letterEl); }
+      if(!progEl){ progEl=document.createElement('div'); progEl.id='bsProgress'; document.body.appendChild(progEl); }
+      // Keyboard / accessibility switch: any key advances (switch boxes send Space/Enter)
+      window.addEventListener('keydown',e=>{
+        if(e.target!==document.body) return;          // don't steal typing in the preset box
+        if(e.key==='Escape') return;
+        e.preventDefault(); advance();
+      });
+      this.reset();
+      applySong();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      if(wash && washA>0.005){
+        pokeSim();
+        ctx.fillStyle='rgba('+wash.join(',')+','+washA.toFixed(3)+')';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        washA*=Math.pow(0.05,dt);   // smooth exponential fade (~1s)
+      }
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      washA=0;
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

@@ -24,8 +24,8 @@ Sibling project: [touch](https://github.com/Magnatronic/touch) — visual-focuse
 |---|---|---|
 | `fluid_sensory.html` | 🎹 Fluid Keys — fluid painting + playable note grid | ✅ Built |
 | `song_grid.html` | 🎵 Song Grid — follow-along song player | ✅ Built |
-| `drums.html` | 🥁 Drum Pads | Planned |
-| `big_switch.html` | 🔘 Big Switch Songs | Planned |
+| `drums.html` | 🥁 Drum Pads — synthesized kit + backing track | ✅ Built |
+| `big_switch.html` | 🔘 Big Switch Songs — one giant button plays the song | ✅ Built |
 | `strummer.html` | 🎸 Chord Strummer | Planned |
 | `voice_visuals.html` | 🎤 Voice Visuals | Planned |
 | `voice_play.html` | 🗣️ Voice Play | Planned |

@@ -128,7 +128,8 @@ function buildBands(){
       if(c<cols-1) d.style.borderRight='1px solid rgba(255,255,255,0.10)';
       if(r>0)      d.style.borderBottom='1px solid rgba(255,255,255,0.10)';
       if(SETTINGS.showLabels){
-        const l=document.createElement('div'); l.className='lbl'; l.textContent=NOTES[c].label;
+        const l=document.createElement('div'); l.className='lbl';
+        l.textContent = Anim.bandLabel ? Anim.bandLabel(c) : NOTES[c].label;   // e.g. drum icons
         d.appendChild(l);
       }
       bandsEl.appendChild(d);
@@ -140,6 +141,31 @@ function flashCell(c,r){
   d.classList.add('flash');
   clearTimeout(d._ft); d._ft=setTimeout(()=>d.classList.remove('flash'),220);
 }
+// Press effect inside a cell, driven by SETTINGS.pressFx ('bloom'|'smoke'|'pixel'|
+// 'ripple'|'none'; apps opt in by putting pressFx in their defaults and exposing
+// the chips). Styles live in framework.css. Contained by design — the reward
+// happens exactly where the student is looking, nothing competes with the grid.
+function fxCell(c,r){
+  const style=SETTINGS.pressFx||'none';
+  if(style==='none') return;
+  const d=bandsEl.querySelector('[data-cell="'+c+'-'+(r||0)+'"]'); if(!d) return;
+  if(style==='bloom'){
+    d.classList.remove('bloom'); void d.offsetWidth;   // restart the animation
+    d.classList.add('bloom');
+    clearTimeout(d._bt); d._bt=setTimeout(()=>d.classList.remove('bloom'),600);
+    return;
+  }
+  if(d.querySelectorAll('.fx').length>2) return;   // cap overlay pile-up on fast swipes
+  const o=document.createElement('div'); o.className='fx fx-'+style;
+  o.style.setProperty('--c', bandRGB255(c).join(','));
+  d.appendChild(o);
+  o.addEventListener('animationend',()=>o.remove());
+  setTimeout(()=>{ if(o.parentNode) o.remove(); },1600);   // safety net
+}
+const PRESSFX_OPTS={
+  bloom:{label:'🌟 Bloom'}, smoke:{label:'💨 Smoke'},
+  pixel:{label:'🟦 Pixelate'}, ripple:{label:'💧 Ripple'}, none:{label:'Off'},
+};
 // Zones stay lit for as long as a touch is holding them (instrument-key feedback).
 function updateHeldCells(){
   bandsEl.querySelectorAll('.band.held').forEach(d=>d.classList.remove('held'));
@@ -484,7 +510,9 @@ function onDown(id, cx, cy){
   p.col=colIndex(s.x); p.row=rowIndex(s.y);
   p.color=pointerColor(p.col);
   if(p.voice) stopVoice(p.voice);
-  p.voice=startVoice(s.x,s.y);
+  // Apps with their own sounds (drums, big-switch) set Anim.noVoices=true and
+  // play in onCell instead of using the pitched voice engine.
+  p.voice = Anim.noVoices ? 0 : startVoice(s.x,s.y);
   if(SETTINGS.mode==='notes'){ flashCell(p.col,p.row); updateHeldCells(); if(Anim.onCell) Anim.onCell(p.col,p.row); }
 }
 function onMove(id, cx, cy){
@@ -496,7 +524,7 @@ function onMove(id, cx, cy){
   if(SETTINGS.mode==='notes'){
     if(c!==p.col || r!==p.row){   // crossed into a new note zone: retune + articulate
       p.col=c; p.row=r; p.color=pointerColor(c);
-      if(!retuneVoice(p.voice,s.x,s.y)) p.voice=startVoice(s.x,s.y);
+      if(!Anim.noVoices && !retuneVoice(p.voice,s.x,s.y)) p.voice=startVoice(s.x,s.y);
       flashCell(c,r); updateHeldCells();
       if(Anim.onCell) Anim.onCell(c,r);
       return;
@@ -717,6 +745,7 @@ function buildInstrumentPanel(){
 // ── Instrument panel (id "sound"): what the notes sound like ────────────────────
 function buildSoundPanel(){
   const snd=document.getElementById('soundControls'); snd.innerHTML='';
+  if(Anim.buildSound){ Anim.buildSound(snd); return; }   // full takeover (e.g. drums: no Voice)
   if(Anim.soundExtras) Anim.soundExtras(snd);   // app-specific controls (e.g. tuning) on top
   snd.appendChild(makeChips('Voice','voice',VOICES));
   const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; snd.appendChild(fx);
