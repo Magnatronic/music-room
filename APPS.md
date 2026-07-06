@@ -265,7 +265,7 @@ compositions save into the existing named-preset system for recall across sessio
 
 ---
 
-## 13. 🪄 Conductor — `conductor.html` (M)
+## 13. 🪄 Conductor — `conductor.html` ✅ BUILT
 
 **Concept.** The inverse of every other app: music plays only while the student *moves*. A song
 (existing library) flows while the pointer/finger is in motion — movement speed sets tempo,

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Conductor – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="songs.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Conductor — the inverse of every other app: music plays only while the
+   student MOVES. A comet trail follows the baton (finger/pointer); movement
+   speed sets the tempo, height on screen sets the volume, and stillness lets
+   the music rest with a soft shimmer until the baton stirs again.
+
+   Two things to conduct: a SONG (the shared song engine — imports included;
+   movement is the transport, so the song advances only while conducting) or a
+   TEXTURE (a rich chord pad in the current key that swells with motion — no
+   sequencing demand, pure cause-and-effect).
+
+   Motion sensitivity is the key access control: at high sensitivity tiny
+   tremor-level movements count ("whisper mode" for motor control). Pointer
+   motion is smoothed over ~300 ms so the music breathes rather than stutters.
+*/
+const Anim = (() => {
+
+  const SONGS=window.MUSIC_SONGS;
+  const CMODE_OPTS={song:{label:'🎵 Conduct a song'},texture:{label:'🌊 Conduct a texture'}};
+  const TRAIL_OPTS={comet:{label:'☄ Comet'},stardust:{label:'✨ Stardust'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  let ctx=null, W=0,H=0, sig='', progEl=null;
+  let motion=0, stillFor=0, lastX=0.5, lastY=0.5, hasPointer=false, time=0;
+  let songPos=0, acc=0, celebrating=false;
+  let parts=[], pad=null, padWant=0;
+
+  function song(){ return SONGS[SETTINGS.song]||SONGS.twinkle; }
+  function inSong(){ return SETTINGS.conductMode!=='texture'; }
+  function setProgress(){ if(progEl) progEl.style.width=(inSong()? songPos/song().notes.length*100 : 0)+'%'; }
+
+  // ── motion envelope: the heart of the app ──
+  function senseGain(){ return 40+SETTINGS.sens*360; }        // high sens: tremors count
+  function updateMotion(dt){
+    let sp=0;
+    for(const p of pointers){
+      if(!p.down) continue;
+      hasPointer=true; lastX=p.x; lastY=p.y;
+      sp=Math.max(sp, Math.hypot(p.dx,p.dy));
+    }
+    if(!pointers.some(p=>p.down)) hasPointer=false;
+    const target=Math.min(1, sp*senseGain());
+    // ~300 ms smoothing — rises quickly with a flourish, releases gently
+    const k=target>motion?dt/0.14:dt/0.45;
+    motion+=(target-motion)*Math.min(1,k);
+    if(motion<0.05) stillFor+=dt; else stillFor=0;
+  }
+  function conducting(){ return motion>=0.05 || stillFor<(SETTINGS.patience||1); }
+  function volNow(){ return (0.35+0.65*Math.max(0,Math.min(1,lastY)))*Math.min(1,0.3+motion); }
+
+  // ── song transport ──
+  function beatSecs(b){
+    const minT=0.4, maxT=Math.max(0.6,SETTINGS.maxTempo||1.4);
+    const mult=minT+Math.pow(motion,0.8)*(maxT-minT);
+    return b*(60/song().bpm)/mult;
+  }
+  function playSongNote(){
+    const notes=song().notes;
+    if(songPos>=notes.length){ finishSong(); return; }
+    const n=notes[songPos];
+    const col=n[0], span=Math.max(1,NOTES.length);
+    pluckNote((col+0.5)/span, lastY, volNow());
+    noteBurst(lastX*W,(1-lastY)*H, bandRGB255(col));
+    songPos++; setProgress();
+    if(songPos>=notes.length) finishSong();
+    else acc=beatSecs(notes[songPos-1][1]);
+  }
+  function finishSong(){
+    if(celebrating) return;
+    celebrating=true; pokeSim();
+    const span=Math.max(1,NOTES.length);
+    for(let i=0;i<span;i++) setTimeout(()=>{
+      pluckNote((i+0.5)/span,0.7,0.6);
+      noteBurst(W*(i+0.5)/span,H*0.35,bandRGB255(i),true);
+    }, 250+i*130);
+    setTimeout(()=>{ celebrating=false; songPos=0; acc=0; setProgress(); }, 250+span*130+1300);
+  }
+
+  // ── texture pad (built lazily once audio exists; retuned via sig check) ──
+  function ensurePad(){
+    if(inSong() || pad || !audioCtx || !masterGain || !NOTES.length) return;
+    try{
+      const ac=audioCtx;
+      const gain=ac.createGain(); gain.gain.value=0.0001;
+      const filt=ac.createBiquadFilter(); filt.type='lowpass'; filt.frequency.value=700; filt.Q.value=1.2;
+      filt.connect(gain); gain.connect(masterGain);
+      const oscs=[];
+      const chord=[NOTES[0],NOTES[2%NOTES.length],NOTES[4%NOTES.length]];
+      for(const nt of chord){
+        for(const det of [-6,6]){
+          const o=ac.createOscillator(); o.type='sawtooth';
+          o.frequency.value=nt.freq/2; o.detune.value=det;   // pad register: an octave down
+          const g=ac.createGain(); g.gain.value=0.3;
+          o.connect(g); g.connect(filt); o.start(); oscs.push(o);
+        }
+      }
+      const tip=ac.createOscillator(); tip.type='sine'; tip.frequency.value=NOTES[0].freq*2;
+      const tg=ac.createGain(); tg.gain.value=0.12; tip.connect(tg); tg.connect(filt); tip.start(); oscs.push(tip);
+      pad={oscs,filt,gain};
+      soundingVoices++; updatePolyGain();
+    }catch(e){}
+  }
+  function killPad(){
+    if(!pad) return;
+    const p=pad; pad=null;
+    try{
+      p.gain.gain.setTargetAtTime(0.0001,audioCtx.currentTime,0.3);
+      setTimeout(()=>{ p.oscs.forEach(o=>{try{o.stop();}catch(e){}});
+        try{p.filt.disconnect();p.gain.disconnect();}catch(e){} },2500);
+    }catch(e){}
+    soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+  }
+
+  // ── visuals ──
+  function noteBurst(x,y,col,big){
+    parts.push({x,y,vx:0,vy:0,age:0,life:0.5,col,ring:true,size:big?1.6:1});
+    pokeSim();
+  }
+  function trailDot(x,y,col){
+    const q=activeQuality(), cap=q==='low'?70:q==='med'?150:240;
+    if(parts.length>=cap) return;
+    if(SETTINGS.trail==='stardust'){
+      const a=Math.random()*6.28, sp=H*0.1*(0.3+Math.random());
+      parts.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,age:0,life:0.5+Math.random()*0.6,col,size:1.5+Math.random()*2.5});
+    } else {
+      parts.push({x,y,vx:0,vy:H*0.02,age:0,life:0.8+motion*0.6,col,size:4+motion*9});
+    }
+  }
+  function currentColor(){
+    if(inSong()){
+      const notes=song().notes;
+      const col=notes[Math.min(songPos,notes.length-1)][0];
+      return bandRGB255(col);
+    }
+    const t=time*0.4, cols=Anim.themes.glow.colors;
+    const c=cols[Math.floor(t)%cols.length];
+    return [c[0]*255|0,c[1]*255|0,c[2]*255|0];
+  }
+
+  function applySetup(){
+    songPos=0; acc=0; celebrating=false; parts.length=0;
+    if(inSong()){
+      if(song().scaleHint && SG_SCALES[song().scaleHint]) SETTINGS.scale=song().scaleHint;
+      SETTINGS.noteCount=song().span;
+    } else {
+      SETTINGS.noteCount=Math.max(5,Math.min(8,Math.round(SETTINGS.noteCount)||5));
+    }
+    SETTINGS.mode='flow'; SETTINGS.yAxis='none';
+    saveSettings(); refreshMusic(); setProgress();
+    killPad();
+  }
+  function settingsSig(){
+    return [SETTINGS.conductMode,SETTINGS.song,SETTINGS.scale,SETTINGS.rootNote,SETTINGS.octave].join('|');
+  }
+
+  return {
+    sectionLabel:'Conductor',
+    lockMode:'flow',
+    noVoices:true,
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🪄 Conduct' },
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', conductMode:'song', song:'twinkle', sens:0.5, patience:1.0,
+      maxTempo:1.4, trail:'comet', mode:'flow', paint:true, yAxis:'none',
+      colorMode:'note', scale:'major', noteCount:5, showLabels:false },
+    schema:[],
+    railButtons:[
+      { id:'cdrestart', icon:()=>'⏮', title:()=>'Restart the song from the beginning',
+        onClick(){ songPos=0; acc=0; celebrating=false; setProgress(); }},
+    ],
+    // 🪄 Conduct tab
+    buildInstrument(el){
+      el.appendChild(makeChips('What to conduct','conductMode',CMODE_OPTS,()=>{ applySetup(); buildInstrumentPanel(); }));
+      if(inSong()) el.appendChild(makeChips('Song','song',SONGS,applySetup));
+      el.appendChild(makeSlider({key:'sens',label:'Motion sensitivity (high = tiny movements count)',min:0,max:1,step:0.05,dp:2}));
+      el.appendChild(makeSlider({key:'patience',label:'Seconds of stillness before the music rests',min:0.2,max:3,step:0.1,dp:1}));
+      if(inSong())
+        el.appendChild(makeSlider({key:'maxTempo',label:'How fast it can go',min:0.8,max:2,step:0.05,dp:2}));
+      if(inSong()) el.appendChild(makeSongImportUI(()=>{ applySetup(); buildInstrumentPanel(); }));
+    },
+    // 🎸 Instrument tab — tuning on top of voice/effects/volume
+    soundExtras(el){
+      el.appendChild(makeChips('Scale','scale',SG_SCALES,()=>{ refreshMusic(); killPad(); }));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),()=>{ refreshMusic(); killPad(); }));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,()=>{ refreshMusic(); killPad(); }));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('Baton trail','trail',TRAIL_OPTS));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    init(cv){
+      ctx=cv.getContext('2d'); W=canvas.width; H=canvas.height;
+      if(!progEl){
+        const st=document.createElement('style');
+        st.textContent='#cdProgress{position:fixed;top:0;left:0;height:6px;width:0;z-index:6;'+
+          'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+          'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+        progEl=document.createElement('div'); progEl.id='cdProgress'; document.body.appendChild(progEl);
+      }
+      // audio unlock needs a real user gesture (noVoices skips the framework path)
+      canvas.addEventListener('mousedown',()=>getAudio());
+      canvas.addEventListener('touchstart',()=>getAudio(),{passive:true});
+      sig=settingsSig();
+      applySetup();
+    },
+    resize(w,h){ W=w; H=h; },
+    // the baton: every interpolated movement step leaves trail
+    splat(x,y,dx,dy,color,opts){
+      trailDot(x*W,(1-y)*H,currentColor());
+    },
+    frame(dt){
+      time+=dt;
+      const s2=settingsSig();
+      if(s2!==sig){ sig=s2; applySetup(); }
+      updateMotion(dt);
+      if(hasPointer||motion>0.01||parts.length||pad) pokeSim();
+
+      // ── song transport: movement is the clock ──
+      if(inSong() && !celebrating && motion>=0.05){
+        acc-=dt*1;                       // acc holds seconds until the next note
+        if(acc<=0) playSongNote();
+      }
+      // ── texture pad: swells with motion, brightness follows height ──
+      if(!inSong()){
+        ensurePad();
+        if(pad){
+          padWant = conducting()? 0.15*Math.pow(motion,1.3)*(0.4+0.6*lastY) : 0;
+          try{
+            pad.gain.gain.setTargetAtTime(padWant+0.0001,audioCtx.currentTime,0.18);
+            pad.filt.frequency.setTargetAtTime(350+Math.max(0,Math.min(1,lastY))*2300,audioCtx.currentTime,0.2);
+          }catch(e){}
+        }
+      }
+
+      // ── draw ──
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,W,H);
+      // resting shimmer: a slow breathing glow where the baton last was
+      if(!hasPointer && motion<0.05){
+        const a=0.05+0.03*Math.sin(time*1.6);
+        const g=ctx.createRadialGradient(lastX*W,(1-lastY)*H,0,lastX*W,(1-lastY)*H,H*0.18);
+        g.addColorStop(0,'rgba(255,255,255,'+a.toFixed(3)+')');
+        g.addColorStop(1,'rgba(255,255,255,0)');
+        ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+      }
+      for(const p of parts){
+        p.age+=dt; p.x+=p.vx*dt; p.y+=p.vy*dt;
+        const k=1-p.age/p.life;
+        if(k<=0) continue;
+        if(p.ring){
+          ctx.strokeStyle='rgba('+p.col.join(',')+','+(k*0.9).toFixed(3)+')';
+          ctx.lineWidth=3.5*k+1;
+          ctx.beginPath(); ctx.arc(p.x,p.y,(1-k)*H*0.11*(p.size||1)+8,0,6.29); ctx.stroke();
+        } else {
+          ctx.fillStyle='rgba('+p.col.join(',')+','+(k*0.85).toFixed(3)+')';
+          ctx.beginPath(); ctx.arc(p.x,p.y,p.size*k+0.4,0,6.29); ctx.fill();
+        }
+      }
+      parts=parts.filter(p=>p.age<p.life);
+      // the baton itself: a glowing tip that brightens with motion
+      if(hasPointer){
+        const col=currentColor();
+        const r=H*(0.015+motion*0.03);
+        const g=ctx.createRadialGradient(lastX*W,(1-lastY)*H,0,lastX*W,(1-lastY)*H,r*4);
+        g.addColorStop(0,'rgba(255,255,255,0.9)');
+        g.addColorStop(0.3,'rgba('+col.join(',')+',0.55)');
+        g.addColorStop(1,'rgba('+col.join(',')+',0)');
+        ctx.fillStyle=g;
+        ctx.beginPath(); ctx.arc(lastX*W,(1-lastY)*H,r*4,0,6.29); ctx.fill();
+      }
+    },
+    reset(){ parts.length=0; },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>
