@@ -199,7 +199,7 @@ the new batch.
 
 ---
 
-## 10. 🌊 Sweep Chimes — `sweep_chimes.html` (S/M)
+## 10. 🎐 Sweep Chimes — `sweep_chimes.html` ✅ BUILT
 
 **Concept.** A row or arc of hanging wind-chime bars fills the screen. Dragging through them
 rings them with real physics: bars swing on their pivots, knock into neighbours, and set each
