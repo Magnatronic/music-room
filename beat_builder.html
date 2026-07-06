@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Beat Builder – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Beat Builder — a big-cell step sequencer. Tap cells to place sounds; the loop
+   plays forever with a bouncing playhead and a soft screen pulse on the beat.
+   The student COMPOSES rather than performs: they make a thing that keeps
+   existing, and it reloads next session ("remember your song from last week?")
+   because the pattern lives inside SETTINGS and therefore inside named presets.
+
+   Rows come in therapist-chosen layouts (2 or 4 drums, 3 notes, or a mix);
+   drum voices are the synthesized Drum Pads kit, note rows play the current
+   scale/voice. 4 steps = quarter notes, 8 = eighths; swing makes 8ths shuffle.
+   Patterns are remembered PER ROW, so switching layouts never loses work.
+   Clear lives behind the therapist menu — students can't wipe a beat by accident.
+*/
+const Anim = (() => {
+
+  const LAYOUTS={
+    drums2:{label:'🥁 Kick + snare',  rows:['kick','snare']},
+    drums4:{label:'🥁 Four drums',    rows:['kick','snare','hat','clap']},
+    notes3:{label:'🎵 Three notes',   rows:['n4','n2','n0']},
+    mix4:  {label:'🥁🎵 Drums + notes',rows:['kick','snare','n4','n0']},
+  };
+  const STEP_OPTS={'4':{label:'4 big steps'},'8':{label:'8 steps'}};
+  const DRUM_META={
+    kick: {icon:'🦶', color:[226,28,28]},
+    snare:{icon:'🥁', color:[245,209,23]},
+    hat:  {icon:'🎩', color:[28,169,169]},
+    clap: {icon:'👏', color:[245,125,23]},
+  };
+
+  let ctx=null, gridEl=null, playing=false, stepIdx=0, acc=0, pulse=0, beatFlash=0;
+  let sig='', patRef=null, noiseBuf=null;
+
+  // ── drum synthesis (the Drum Pads recipes, fixed shaping) ──
+  function noiseSrc(ac){
+    if(!noiseBuf){
+      noiseBuf=ac.createBuffer(1,ac.sampleRate*1.2,ac.sampleRate);
+      const d=noiseBuf.getChannelData(0);
+      for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    }
+    const s=ac.createBufferSource(); s.buffer=noiseBuf; return s;
+  }
+  function hit(build){
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    const t=ac.currentTime+0.012;
+    const out=ac.createGain(); out.gain.value=1; out.connect(masterGain);
+    soundingVoices++; updatePolyGain();
+    const endAt=build(ac,t,out);
+    setTimeout(()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+      try{out.disconnect();}catch(e){} }, Math.max(100,(endAt-ac.currentTime)*1000+150));
+  }
+  function env(ac,t,peak,decay){ const g=ac.createGain();
+    g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(peak,t+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0008,t+decay); return g; }
+  const DRUMS={
+    kick(ac,t,out){
+      const o=ac.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(50,t+0.12);
+      const g=env(ac,t,1.1,0.5); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.65);
+      return t+0.65;
+    },
+    snare(ac,t,out){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=0.9;
+      const g=env(ac,t,0.8,0.24); n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.32);
+      const o=ac.createOscillator(); o.type='triangle'; o.frequency.value=190;
+      const g2=env(ac,t,0.5,0.14); o.connect(g2); g2.connect(out); o.start(t); o.stop(t+0.2);
+      return t+0.32;
+    },
+    hat(ac,t,out){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=7500;
+      const g=env(ac,t,0.45,0.09); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+0.16);
+      return t+0.16;
+    },
+    clap(ac,t,out){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500; bp.Q.value=1.8;
+      const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
+      for(let i=0;i<3;i++){ const tt=t+i*0.02;
+        g.gain.setValueAtTime(0.7,tt); g.gain.exponentialRampToValueAtTime(0.12,tt+0.018); }
+      g.gain.exponentialRampToValueAtTime(0.0008,t+0.28);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.36);
+      return t+0.36;
+    },
+  };
+
+  // ── rows / pattern ──
+  function steps(){ return parseInt(SETTINGS.steps,10)||8; }
+  function rowIds(){ return (LAYOUTS[SETTINGS.layout]||LAYOUTS.drums2).rows; }
+  function rowInfo(id){
+    if(id[0]==='n'){
+      const idx=+id.slice(1);
+      return { id, type:'note', idx,
+        color: NOTES[idx]?bandRGB255(idx):[200,200,200],
+        icon: NOTES[idx]?NOTES[idx].label:'♪' };
+    }
+    return { id, type:'drum', key:id, color:DRUM_META[id].color, icon:DRUM_META[id].icon };
+  }
+  function pattern(){
+    if(typeof SETTINGS.pattern!=='object' || !SETTINGS.pattern) SETTINGS.pattern={};
+    return SETTINGS.pattern;
+  }
+  function rowPat(id){
+    const p=pattern();
+    if(!Array.isArray(p[id])) p[id]=new Array(16).fill(false);
+    return p[id];
+  }
+  function trigger(row){
+    if(row.type==='drum'){ if(DRUMS[row.key]) hit(DRUMS[row.key]); }
+    else pluckNote((row.idx+0.5)/Math.max(1,NOTES.length), 0.5, 1);
+  }
+
+  // ── grid DOM ──
+  function buildGrid(){
+    if(!gridEl) return;
+    const n=steps(), ids=rowIds();
+    gridEl.innerHTML='';
+    gridEl.style.gridTemplateColumns='minmax(7vw,9vw) repeat('+n+',1fr)';
+    gridEl.style.gridTemplateRows='repeat('+ids.length+',1fr)';
+    for(const id of ids){
+      const row=rowInfo(id), pat=rowPat(id);
+      const lab=document.createElement('div'); lab.className='bbLab';
+      lab.textContent=row.icon;
+      lab.style.color='rgb('+row.color.join(',')+')';
+      gridEl.appendChild(lab);
+      for(let s=0;s<n;s++){
+        const c=document.createElement('div'); c.className='bbCell'+(pat[s]?' on':'');
+        c.dataset.row=id; c.dataset.step=s;
+        c.style.setProperty('--c',row.color.join(','));
+        c.addEventListener('pointerdown',e=>{
+          e.preventDefault(); getAudio(); pokeSim();
+          pat[s]=!pat[s]; c.classList.toggle('on',pat[s]);
+          saveSettings();
+          if(pat[s]){ trigger(row);                   // instant feedback for the placed sound
+            c.classList.remove('hit'); void c.offsetWidth; c.classList.add('hit'); }
+          if(!playing) startLoop();                   // placing a first sound starts the music
+        });
+        gridEl.appendChild(c);
+      }
+    }
+    paintPlayhead();
+  }
+  function paintPlayhead(){
+    gridEl.querySelectorAll('.bbCell.ph').forEach(d=>d.classList.remove('ph'));
+    gridEl.querySelectorAll('.bbCell[data-step="'+stepIdx+'"]').forEach(d=>d.classList.add('ph'));
+  }
+  function startLoop(){ playing=true; getAudio(); pokeSim(); refreshRailButtons(); }
+  function stopLoop(){ playing=false; refreshRailButtons(); }
+  function doStep(){
+    const ids=rowIds();
+    for(const id of ids){
+      if(rowPat(id)[stepIdx]){
+        const row=rowInfo(id);
+        trigger(row);
+        const c=gridEl.querySelector('.bbCell[data-row="'+id+'"][data-step="'+stepIdx+'"]');
+        if(c){ c.classList.remove('hit'); void c.offsetWidth; c.classList.add('hit'); }
+      }
+    }
+    pulse = stepIdx%4===0 ? 0.16 : 0.07;
+    beatFlash = stepIdx%4===0 ? 1 : 0.5;
+    paintPlayhead();
+  }
+  function stepDur(){
+    const base=(steps()===4?60:30)/(SETTINGS.bpm||90);
+    if(SETTINGS.swing && steps()===8) return stepIdx%2===0 ? base*1.32 : base*0.68;
+    return base;
+  }
+  function clearAll(){
+    const p=pattern();
+    for(const id of rowIds()) p[id]=new Array(16).fill(false);
+    saveSettings(); buildGrid();
+  }
+
+  function applyLayout(){
+    // note rows need the scale built wide enough for their highest degree
+    SETTINGS.noteCount=Math.max(5,Math.min(8,Math.round(SETTINGS.noteCount)||5));
+    SETTINGS.mode='flow'; SETTINGS.yAxis='none';
+    saveSettings(); refreshMusic(); buildGrid();
+  }
+  function settingsSig(){
+    return [SETTINGS.layout,SETTINGS.steps,SETTINGS.scale,SETTINGS.rootNote,SETTINGS.octave].join('|');
+  }
+
+  return {
+    sectionLabel:'Beat Builder',
+    lockMode:'flow',
+    noVoices:true,
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🥁 Beat' },
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', layout:'drums2', steps:'4', bpm:90, swing:false, pattern:{},
+      mode:'flow', paint:false, yAxis:'none', colorMode:'note', scale:'major', noteCount:5,
+      showLabels:true },
+    schema:[],
+    railButtons:[
+      { id:'bbplay',
+        icon:()=>playing?'⏸':'▶',
+        title:()=>playing?'Pause the beat':'Play the beat',
+        active:()=>playing,
+        onClick(){ playing?stopLoop():startLoop(); }},
+      { id:'bbrewind', icon:()=>'⏮', title:()=>'Back to the first step',
+        onClick(){ stepIdx=0; acc=0; paintPlayhead(); }},
+    ],
+    // 🥁 Beat tab
+    buildInstrument(el){
+      el.appendChild(makeChips('Sounds','layout',LAYOUTS,applyLayout));
+      el.appendChild(makeChips('Steps in the loop','steps',STEP_OPTS,()=>{ stepIdx=0; acc=0; buildGrid(); }));
+      el.appendChild(makeSlider({key:'bpm',label:'Tempo (BPM)',min:50,max:160,step:1,dp:0}));
+      el.appendChild(makeToggle('Swing (shuffle feel)','swing'));
+      const hint=document.createElement('div');
+      hint.style.cssText='color:rgba(255,255,255,0.45);font-size:12px;line-height:1.5;margin:8px 0';
+      hint.textContent='💡 Save this beat with a name in ⭐ Presets — it comes back next session.';
+      el.appendChild(hint);
+      const clr=document.createElement('button'); clr.className='btn';
+      clr.style.cssText='width:100%;text-align:center';
+      clr.textContent='🧹 Clear the whole beat';
+      clr.addEventListener('click',e=>{ e.stopPropagation(); clearAll(); });
+      el.appendChild(clr);
+    },
+    // 🎸 Instrument tab — tuning for the note rows, on top of voice/effects/volume
+    soundExtras(el){
+      el.appendChild(makeChips('Scale','scale',{major:{label:'Major (do-re-mi)'},minor:{label:'Minor'},penta:{label:'Pentatonic'}},()=>{ refreshMusic(); buildGrid(); }));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),()=>{ refreshMusic(); buildGrid(); }));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,()=>{ refreshMusic(); buildGrid(); }));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('bbCss')){
+        const st=document.createElement('style'); st.id='bbCss';
+        st.textContent=
+          '#bbGrid{position:fixed;left:4vw;right:4vw;top:9vh;bottom:9vh;display:grid;'+
+            'gap:1.4vh 0.9vw;z-index:2;touch-action:none}'+
+          '.bbLab{display:flex;align-items:center;justify-content:center;'+
+            'font-size:min(6vh,4vw);font-weight:800;font-family:system-ui,sans-serif;'+
+            'text-shadow:0 0 1.5vh rgba(255,255,255,0.2);user-select:none}'+
+          '.bbCell{border-radius:1.8vh;background:rgba(var(--c),0.10);'+
+            'border:2px solid rgba(var(--c),0.35);cursor:pointer;user-select:none;'+
+            'transition:background 0.12s,box-shadow 0.12s,transform 0.12s}'+
+          '.bbCell.on{background:rgba(var(--c),0.75);border-color:rgba(255,255,255,0.65);'+
+            'box-shadow:0 0 2.2vh rgba(var(--c),0.55)}'+
+          '.bbCell.ph{outline:3px solid rgba(255,255,255,0.85);outline-offset:-1px}'+
+          '.bbCell.hit{animation:bbHit 0.28s ease-out}'+
+          '@keyframes bbHit{0%{transform:scale(1)}35%{transform:scale(1.10)}100%{transform:scale(1)}}';
+        document.head.appendChild(st);
+      }
+      if(!gridEl){ gridEl=document.createElement('div'); gridEl.id='bbGrid'; document.body.appendChild(gridEl); }
+      sig=settingsSig(); patRef=SETTINGS.pattern;
+      applyLayout();
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      // preset loads swap SETTINGS wholesale — pick the change up here
+      const s2=settingsSig();
+      if(s2!==sig || SETTINGS.pattern!==patRef){
+        sig=s2; patRef=SETTINGS.pattern;
+        stepIdx=0; acc=0; refreshMusic(); buildGrid();
+      }
+      if(playing){
+        pokeSim();
+        acc+=dt;
+        let dur=stepDur();
+        while(acc>=dur){
+          acc-=dur;
+          doStep();
+          stepIdx=(stepIdx+1)%steps();
+          dur=stepDur();
+        }
+      }
+      pulse*=Math.exp(-4*dt);
+      // canvas: solid bg + a soft breathing pulse behind the grid on each beat
+      if(ctx){
+        ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        if(pulse>0.004){
+          const g=ctx.createRadialGradient(canvas.width/2,canvas.height/2,0,
+            canvas.width/2,canvas.height/2,canvas.width*0.7);
+          g.addColorStop(0,'rgba(255,255,255,'+pulse.toFixed(3)+')');
+          g.addColorStop(1,'rgba(255,255,255,0)');
+          ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
+        }
+      }
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

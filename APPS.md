@@ -245,7 +245,7 @@ sideways / falling like snow), which notes/colours appear, game-mode goals.
 
 ---
 
-## 12. 🏗️ Beat Builder — `beat_builder.html` (M)
+## 12. 🏗️ Beat Builder — `beat_builder.html` ✅ BUILT
 
 **Concept.** A big-cell step sequencer: 4 or 8 steps across, 2–4 sound rows (drums and/or notes).
 Tap cells to toggle them; the loop plays continuously with a bouncing playhead. The student
