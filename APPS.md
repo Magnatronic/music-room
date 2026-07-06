@@ -23,6 +23,24 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
 - Mic apps require the room's external microphone and never output the mic signal to the
   speakers unless the app is explicitly designed for it (feedback risk).
 
+## Custom song import (framework feature, planned)
+
+Therapists should be able to add their own songs to the shared library (`songs.js` powers Song
+Grid, Big Switch, Echo Bird, and Music Bubbles' song mode). Import format: **ABC notation** —
+plain text pasted into a textarea in the therapist panel, so it works offline and songs are
+freely findable online (abcnotation.com, thesession.org: search "<song name> abc").
+
+- Parse a melody subset only: `T:`/`K:`/`L:` headers, notes A–G with octave marks and duration
+  multipliers, rests, bar lines (ignored). ~100–150 lines, no dependencies.
+- Convert absolute pitches to scale degrees relative to the declared key → the existing
+  movable-do `[[deg, beats], ...]` format, so imported songs transpose with root/register/scale
+  automatically and work in every song-engine app for free. Compute `span` from the range.
+- Notes outside the scale snap to the nearest degree with a gentle "n notes adjusted" notice —
+  never reject a song outright.
+- Also accept bare letter lines (`C C G G A A G`) — the format of Boomwhacker song sheets.
+- Custom songs persist in localStorage; export/import as `.json` so therapists can share song
+  packs between machines.
+
 ---
 
 ## 1. 🎵 Song Grid — `song_grid.html` ✅ BUILT
@@ -115,19 +133,12 @@ via autocorrelation on the time-domain buffer (good enough for voice).
 
 ---
 
-## 6. 🗣️ Voice Play — `voice_play.html` (M/L, riskier)
+## 6. 🗣️ Voice Play — `voice_play.html` ❌ CANCELLED
 
-**Concept.** Hear your own voice transformed: echo canyon, deep giant voice, chipmunk, robot
-(ring mod), stutter. Big icon buttons choose the effect; the screen visualizes input vs output.
-
-**Therapy goals.** Vocal experimentation and self-recognition; hugely motivating for students
-who love hearing themselves.
-
-**Build notes.** Feedback management is the core problem: prefer headphones/directional mic;
-include an anti-feedback ducker (mute output while input is loud → take-turns echo pattern
-rather than live monitoring). Pitch shift via granular playback (record 0.5–2 s, replay
-transformed) is safer than live shifting and doubles as a mini turn-taking game. Build after
-Voice Visuals proves the mic pipeline.
+Cancelled 2026-07: the sensory room is getting a hardware voice effects unit, which handles
+live voice transformation (and its feedback risks) better than a browser app can. If a
+software fallback is ever wanted, the safest design was granular record-then-replay
+(0.5–2 s clips, transformed) rather than live monitoring — see git history for the full spec.
 
 ---
 
@@ -160,13 +171,137 @@ chirps for birds; the existing pad voice for the drone in the current key) — n
 
 ---
 
+## 9. 🦜 Echo Bird — `echo_bird.html` (S/M)
+
+**Concept.** Call-and-response on the note grid. The app (a friendly bird character) plays a
+short phrase — 2–4 notes, cells lighting as they sound — then waits. The student replies on the
+same grid. ANY reply is celebrated; a matching reply gets an extra shimmer and the bird's
+delighted flourish. Then the bird plays the next call.
+
+**Therapy goals.** Turn-taking and joint attention — the core call-and-response technique of
+music therapy sessions, currently missing from the suite. Auditory memory and imitation for
+students working at that level, with zero penalty for students who just want to answer freely.
+
+**Modes.**
+- **Free reply** (default) — bird calls, student plays anything, bird responds warmly. Pure
+  conversation; match detection only adds sparkle, never gates progress.
+- **Copycat** — the called cells stay gently haloed as a visual guide; matching them in order
+  triggers the big celebration. Still no fail state — stray notes sound normally.
+- **Therapist call** — the therapist plays the call from a second area/row (or the same grid
+  while holding a modifier), turning it into a live human duet with the app as referee/rewarder.
+
+**Settings.** Phrase length (1–5 notes), whether calls are drawn from a chosen song (reuses the
+Song Grid song engine — the song becomes a sequence of calls) or generated within the current
+scale, reply time window (or "wait forever", the default), bird tempo.
+
+**Build note.** Reuses the Song Grid engine and grid rendering nearly verbatim — build first of
+the new batch.
+
+---
+
+## 10. 🌊 Sweep Chimes — `sweep_chimes.html` (S/M)
+
+**Concept.** A row or arc of hanging wind-chime bars fills the screen. Dragging through them
+rings them with real physics: bars swing on their pivots, knock into neighbours, and set each
+other ringing. Low/long bars on the left, high/short bars on the right — pitch is spatial.
+
+**Therapy goals.** Gross-motor sweeps and continuous movement (like Strummer but with physical
+cause-and-effect the student can *see* — the bar they hit visibly swings); pitch-space mapping
+(left = low, right = high); gentle unpredictability (knock-on collisions) that rewards
+experimentation.
+
+**Sound.** Existing pluck/bell voices, bars tuned to the current scale across the chosen
+register. Strike velocity from drag speed → loudness and swing amplitude.
+
+**Settings.** Bar count (5–15; fewer = bigger targets), layout (straight row / hanging arc),
+collision chaining on/off (off = each bar independent, calmer), material look (bamboo, metal,
+crystal — pick voice to match).
+
+---
+
+## 11. 🫧 Music Bubbles — `bubbles.html` (M)
+
+**Concept.** Bubbles drift up (or across) the screen, each tinted a Boomwhacker note colour.
+Pop one and it bursts into sparkles and sounds its note. Escaped bubbles simply recycle — no
+misses, no score, unless a game mode is deliberately switched on.
+
+**Therapy goals.** Visual tracking plus timed reach — the only app in the suite where targets
+*move*. Therapist tunes difficulty precisely: drift speed, bubble size, and density map directly
+to the student's tracking and reach ability. Colour–note association reinforces the Boomwhacker
+mapping used everywhere else.
+
+**Modes.**
+- **Free pop** (default) — endless gentle bubbles in the current scale.
+- **Song bubbles** — bubbles carry the next notes of a chosen song (song engine again); popping
+  any bubble plays the next song note, popping the *highlighted* one adds sparkle. The song
+  always progresses — exploration is never wrong.
+- **Game mode** (optional, therapist-enabled) — soft goals, never fail states: "pop 10 bubbles"
+  fills a rainbow meter → celebration burst; "pop the green ones" (colour targeting); a chill
+  streak counter that only ever grows or gently resets. No lives, no game-over, no timer
+  pressure unless the therapist adds one.
+
+**Settings.** Drift speed, bubble size (huge → small), spawn density, direction (up / drifting
+sideways / falling like snow), which notes/colours appear, game-mode goals.
+
+---
+
+## 12. 🏗️ Beat Builder — `beat_builder.html` (M)
+
+**Concept.** A big-cell step sequencer: 4 or 8 steps across, 2–4 sound rows (drums and/or notes).
+Tap cells to toggle them; the loop plays continuously with a bouncing playhead. The student
+*composes* something that keeps existing — different agency from every performance app.
+
+**Therapy goals.** Planning and prediction (place a sound, anticipate when it returns), pattern
+awareness, ownership and identity ("YOUR song"), session continuity — saved beats reload next
+week ("remember what you made?"). Also a natural collaboration surface: therapist fills one row,
+student fills another.
+
+**Sound.** Drum rows reuse the synthesized Drum Pads kit; note rows use the current scale/voice.
+Tempo slider with a big visual pulse; swing toggle for instant groove.
+
+**Features.** Row count and step count are therapist controls (start 2×4 for emerging users);
+clear-row and clear-all behind the therapist panel (students can't wipe work accidentally);
+compositions save into the existing named-preset system for recall across sessions.
+
+---
+
+## 13. 🪄 Conductor — `conductor.html` (M)
+
+**Concept.** The inverse of every other app: music plays only while the student *moves*. A song
+(existing library) flows while the pointer/finger is in motion — movement speed sets tempo,
+vertical position sets volume/brightness — and fades gracefully to a shimmer when they stop.
+A comet trail follows the "baton".
+
+**Therapy goals.** Sustained continuous movement rather than discrete presses — range-of-motion
+and movement-endurance work (including wheelchair users doing arm sweeps); self-regulation
+(fast/slow, loud/quiet under the student's control); the profound reward of an orchestra that
+obeys you.
+
+**Modes.**
+- **Conduct a song** — song engine supplies the notes; movement is the transport.
+- **Conduct a texture** — no song, just a rich chord pad in the current key that swells with
+  motion; calmer, no sequencing demand.
+
+**Settings.** Motion sensitivity (tiny tremor movements can count — the "whisper mode"
+equivalent for motor control), fade-out patience (how long stillness lasts before the music
+rests), tempo range clamp, trail visuals.
+
+**Build notes.** Input is pointer-move deltas smoothed over ~300 ms; no camera needed for v1.
+A webcam-motion input mode can arrive later via the framework input-adapter work.
+
+---
+
 ## Later / ideas parking lot
 
 - **Realistic melodic instruments** (piano/marimba via multisample packs) — revisit once the
   assets/sample-pack pattern is proven with drums; full sample sets may need a hosted (non-USB)
   deployment or a local server.
-- **Turn-taking duet** — split screen call-and-response; app replays the student's phrase.
-- **Conducting** — music plays only while the student moves; movement speed = tempo.
 - **Accessibility input adapters** (framework level): switch scanning, Xbox Adaptive Controller
   (Gamepad API), webcam motion, Web MIDI for real instruments.
 - **Room lighting** (WLED/Hue sync) — needs a local bridge app; after the suite matures.
+- **Breathing Buddy** — paced-breathing glow with soft tone; receptive regulation tool.
+- **Resonance Room** — hold-to-bloom sustained tone; trains sustained touch, deeply calming.
+- **Choice Board Jukebox** — 2–6 picture tiles holding therapist-assigned songs; choice-making,
+  natural switch-scanning target.
+- **Sound Story** — touchable illustrated scenes (farm, storm, space) for narrative sessions;
+  art-asset heavy.
