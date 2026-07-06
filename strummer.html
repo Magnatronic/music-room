@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Chord Strummer – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Chord bar — part of the instrument, so it stays visible when the session is locked */
+#chordBar{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:6;
+  display:flex;gap:12px;max-width:94vw}
+.chordBtn{--c:255,255,255;flex:1 1 auto;min-width:clamp(80px,11vw,170px);height:clamp(64px,13vh,110px);
+  border-radius:20px;border:3px solid rgba(var(--c),0.8);background:rgba(var(--c),0.14);
+  color:#fff;font-family:sans-serif;cursor:pointer;touch-action:manipulation;
+  -webkit-tap-highlight-color:transparent;user-select:none;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  text-shadow:0 1px 4px rgba(0,0,0,0.8);backdrop-filter:blur(6px);
+  transition:transform 0.12s,background 0.2s,box-shadow 0.2s}
+.chordBtn .cname{font-size:clamp(22px,4.2vh,34px);font-weight:800;line-height:1}
+.chordBtn .rn{font-size:12px;opacity:0.65;letter-spacing:0.08em}
+.chordBtn.active{background:rgba(var(--c),0.5);box-shadow:0 0 26px rgba(var(--c),0.55);transform:scale(1.05)}
+.chordBtn:active{transform:scale(0.97)}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Chord Strummer — an autoharp/omnichord. The screen is filled with vertical
+   strings tuned to the chosen chord across several octaves, so sweeping across
+   them is always a harmonious harp glissando. Big Boomwhacker-coloured chord
+   buttons along the bottom change the harmony; every sweep is always "right".
+   Space/Enter (accessibility switches) strums the whole set, so a switch user
+   strums while the therapist changes chords.
+
+   Strings are Karplus-Strong plucks rendered into cached AudioBuffers (real
+   string physics, zero per-voice CPU while ringing) routed through the
+   framework master chain (volume, effects, auto-mixer, limiter). Like a real
+   autoharp, changing chord damps the old strings before retuning.
+*/
+const Anim = (() => {
+
+  // Diatonic triads of the chosen major key. Order = scale-degree order.
+  const CHORDS={ I:{deg:0,minor:false}, ii:{deg:1,minor:true}, iii:{deg:2,minor:true},
+                 IV:{deg:3,minor:false}, V:{deg:4,minor:false}, vi:{deg:5,minor:true} };
+  const ORDER=['I','ii','iii','IV','V','vi'];
+  const MAJOR=[0,2,4,5,7,9,11];
+  // Same Boomwhacker map as the framework, keyed by our own string pitches
+  // (framework bandRGB255 reads NOTES, which strummer doesn't use).
+  const BW={0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+  function colOf(pc){ if(BW[pc]) return BW[pc];
+    const b=BW[(pc+11)%12]||[200,200,200]; return b.map(v=>Math.round(v*0.7)); }
+
+  let ctx=null, STR=[], lastSig='';
+  const lastPos=new Map();          // pointer id -> last normalised x (sweep tracking)
+  const active=new Set();           // ringing plucks, for the chord-change damper
+
+  function offered(){ const o=ORDER.filter(k=>SETTINGS['chord_'+k]); return o.length?o:['I']; }
+  function curChord(){ const o=offered(); return o.includes(SETTINGS.curChord)?SETTINGS.curChord:o[0]; }
+  function keyRootPc(){ return ROOT_PC[SETTINGS.rootNote]!==undefined?ROOT_PC[SETTINGS.rootNote]:0; }
+  function chordLabel(k){
+    const C=CHORDS[k], pc=(keyRootPc()+MAJOR[C.deg])%12;
+    return noteNames()[pc]+(C.minor?'m':'');
+  }
+
+  // ── string layout: chord tones ascending across octaves, centred on the register ──
+  function buildStrings(){
+    const n=Math.max(8,Math.min(24,Math.round(SETTINGS.stringCount)||15));
+    const C=CHORDS[curChord()];
+    const octv=parseInt(SETTINGS.octave,10)||4;
+    const base=12*(octv+1)+keyRootPc();
+    const tones=[0,2,4].map(k=>{ const d=C.deg+k; return base+MAJOR[d%7]+12*Math.floor(d/7); });
+    const octaves=Math.ceil(n/3);
+    const midis=[]; for(let i=0;i<n;i++) midis.push(tones[i%3]+12*Math.floor(i/3)-12*Math.floor((octaves-1)/2));
+    // keep the whole range playable (~A1 bass, treble caps itself for big counts)
+    let off=0;
+    const mx=Math.max.apply(null,midis), mn=Math.min.apply(null,midis);
+    if(mx>103) off=-12*Math.ceil((mx-103)/12);
+    if(mn+off<24) off+=12*Math.ceil((24-mn-off)/12);
+    const names=noteNames();
+    STR=midis.map((m0,i)=>{ const m=m0+off, pc=((m%12)+12)%12;
+      return { x:(i+0.5)/n, midi:m, freq:noteFreq(m), pc, col:colOf(pc),
+               label:names[pc], amp:0, phase:Math.random()*6.28, lastHit:0 }; });
+  }
+
+  // ── Karplus-Strong plucks, rendered once per pitch/timbre and cached ──
+  const bufCache=new Map();
+  function ksBuf(ac,freq){
+    const bright=Math.max(0.15,Math.min(1,SETTINGS.bright||0.6));
+    const ring=Math.max(0.5,Math.min(4,SETTINGS.ring||2.2));
+    const key=freq.toFixed(1)+'|'+bright.toFixed(2)+'|'+ring.toFixed(1);
+    const hit=bufCache.get(key); if(hit) return hit;
+    if(bufCache.size>120) bufCache.clear();
+    const sr=ac.sampleRate, N=Math.max(2,Math.round(sr/freq));
+    const len=Math.floor(sr*ring*1.1)+N+2;
+    const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
+    let lp=0;   // one-pole lowpass on the excitation noise = pluck brightness
+    for(let i=0;i<N;i++){ lp=bright*(Math.random()*2-1)+(1-bright)*lp; d[i]=lp; }
+    const rho=Math.pow(0.001,1/(ring*sr));   // ~-60 dB at the ring time
+    for(let i=N;i<len;i++){ const a=d[i-N], b=i-N-1>=0?d[i-N-1]:0; d[i]=rho*0.5*(a+b); }
+    let peak=0; for(let i=0;i<len;i++){ const a=Math.abs(d[i]); if(a>peak) peak=a; }
+    const g=peak>0?0.9/peak:1;
+    for(let i=0;i<len;i++) d[i]*=g;
+    const fade=Math.min(len,Math.floor(sr*0.05));   // declick the hard buffer end
+    for(let i=0;i<fade;i++) d[len-1-i]*=i/fade;
+    bufCache.set(key,buf); return buf;
+  }
+
+  function pluck(i,vol,delay){
+    const s=STR[i]; if(!s) return;
+    const at=performance.now()+(delay||0)*1000;
+    if(at-s.lastHit<55) return;         // tap-then-cross double-fire guard
+    s.lastHit=at;
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    if(active.size>=60) return;         // runaway-gliss safety cap
+    const t=ac.currentTime+0.012+(delay||0);   // scheduling headroom, see framework
+    const src=ac.createBufferSource(); src.buffer=ksBuf(ac,s.freq);
+    const g=ac.createGain(); g.gain.value=0.5*Math.min(1.2,vol);
+    const pan=ac.createStereoPanner(); pan.pan.value=(s.x*2-1)*0.6;
+    src.connect(g); g.connect(pan); pan.connect(masterGain);
+    const entry={src,g};
+    active.add(entry);
+    // Count the pluck for the auto-mixer only while it's actually loud — the long
+    // quiet KS tail shouldn't duck the whole mix during glissandos.
+    let counted=true; soundingVoices++; updatePolyGain();
+    const uncount=()=>{ if(counted){ counted=false; soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain(); } };
+    setTimeout(uncount,(0.012+(delay||0)+(SETTINGS.ring||2.2)*0.45)*1000);
+    src.onended=()=>{ uncount(); active.delete(entry); try{g.disconnect();pan.disconnect();}catch(e){} };
+    src.start(t);
+    const vis=()=>{ s.amp=Math.min(1,0.45+vol*0.55); s.phase=0; pokeSim(); };
+    if((delay||0)>0.03) setTimeout(vis,(delay||0)*1000); else vis();
+  }
+
+  function strum(vol){ STR.forEach((s,i)=>pluck(i,vol||0.75,i*0.022)); }
+  function dampAll(){                  // autoharp felt damper on chord change
+    if(!audioCtx) return;
+    const t=audioCtx.currentTime;
+    active.forEach(a=>{ try{ a.g.gain.setTargetAtTime(0,t,0.05); a.src.stop(t+0.4); }catch(e){} });
+    STR.forEach(s=>s.amp*=0.3);
+  }
+  function shimmer(){ STR.forEach((s,i)=>setTimeout(()=>{ s.amp=Math.max(s.amp,0.35); pokeSim(); },i*14)); }
+
+  // ── chord bar (big student-facing buttons; stays visible when locked) ──
+  function rebuildChordBar(){
+    let bar=document.getElementById('chordBar');
+    if(!bar){ bar=document.createElement('div'); bar.id='chordBar'; document.body.appendChild(bar); }
+    bar.innerHTML='';
+    const cur=curChord();
+    offered().forEach(k=>{
+      const pc=(keyRootPc()+MAJOR[CHORDS[k].deg])%12;
+      const b=document.createElement('button'); b.className='chordBtn'+(k===cur?' active':'');
+      b.style.setProperty('--c',colOf(pc).join(','));
+      const nm=document.createElement('span'); nm.className='cname'; nm.textContent=chordLabel(k);
+      const rn=document.createElement('span'); rn.className='rn'; rn.textContent=k;
+      b.appendChild(nm); b.appendChild(rn);
+      const go=()=>{ getAudio(); setChord(k); };
+      b.addEventListener('touchstart',e=>{ e.preventDefault(); e.stopPropagation(); go(); },{passive:false});
+      b.addEventListener('mousedown',e=>{ e.stopPropagation(); go(); });
+      bar.appendChild(b);
+    });
+  }
+  function setChord(k){
+    const same=curChord()===k;
+    SETTINGS.curChord=k; saveSettings();
+    if(!same){ dampAll(); sigCheck(); }        // retune + refresh bar
+    if(SETTINGS.autoStrum) strum(0.7);
+    else if(!same) shimmer();
+  }
+  // One rebuild path for every way settings can change (panel, presets, reset):
+  // compare a signature each frame instead of hooking every control.
+  function sigCheck(){
+    const sig=[SETTINGS.rootNote,SETTINGS.octave,Math.round(SETTINGS.stringCount),curChord(),
+               ORDER.map(k=>SETTINGS['chord_'+k]?1:0).join('')].join('|');
+    if(sig===lastSig) return;
+    lastSig=sig;
+    buildStrings(); rebuildChordBar();
+  }
+
+  // ── strum input: track pointer sweeps ourselves (strings ≠ the 2–8 band grid) ──
+  function trackPointers(dt){
+    const seen=new Set();
+    for(const p of pointers){
+      if(!p.down) continue;
+      seen.add(p.id);
+      if(!lastPos.has(p.id)){
+        // normally seeded by onDownPluck; fallback for pointers it didn't see
+        pluck(nearestString(p.x),0.8,0);
+        lastPos.set(p.id,p.x);
+      } else {
+        const x0=lastPos.get(p.id), x1=p.x;
+        if(x1!==x0){
+          const speed=Math.abs(x1-x0)/Math.max(dt,0.001);
+          const vol=SETTINGS.velSense?Math.min(1.15,0.35+speed*0.4):0.9;
+          const lo=Math.min(x0,x1), hi=Math.max(x0,x1);
+          const hitIdx=[];
+          STR.forEach((s,i)=>{ if(s.x>lo && s.x<=hi) hitIdx.push(i); });
+          if(x1<x0) hitIdx.reverse();
+          hitIdx.forEach((i,j)=>pluck(i,vol,j*0.008));
+          lastPos.set(p.id,x1);
+        }
+      }
+    }
+    for(const id of Array.from(lastPos.keys())) if(!seen.has(id)) lastPos.delete(id);
+  }
+
+  function nearestString(x){ const n=STR.length; return Math.max(0,Math.min(n-1,Math.round(x*n-0.5))); }
+  // Pluck on the DOWN event itself, not in frame() — a quick tap can come and go
+  // between two frames and would otherwise make no sound at all.
+  function onDownPluck(id,cx,cy){
+    const s=toSim(cx,cy);
+    getAudio(); pluck(nearestString(s.x),0.8,0);
+    lastPos.set(id,s.x);
+  }
+
+  let lastPreview=0;
+  function preview(){                        // throttled slider audition
+    const now=performance.now();
+    if(now-lastPreview<180) return;
+    lastPreview=now; getAudio(); pluck(Math.floor(STR.length/2),0.8,0);
+  }
+
+  return {
+    sectionLabel:'Strummer',
+    lockMode:'flow',                   // strings, not the Keys/Flow band grid
+    noVoices:true,                     // plucks ARE the sound
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🎸 Chords', sound:'🎛️ Sound' },
+    themes:{ harp:{label:'🎸 Harp', colors:[[1,0.35,0.55],[0.95,0.8,0.2],[0.2,0.7,0.7],[0.55,0.4,0.85],[0.3,0.75,0.4]]} },
+    defaults:{ theme:'harp', stringCount:15, curChord:'I',
+      chord_I:true, chord_ii:false, chord_iii:false, chord_IV:true, chord_V:true, chord_vi:true,
+      autoStrum:true, bright:0.6, ring:2.2, velSense:true,
+      mode:'flow', paint:true, yAxis:'none', colorMode:'note', showLabels:false, scale:'major' },
+    schema:[],
+    // 🎸 Chords tab — key, register, strings, which chord buttons are offered
+    buildInstrument(el){
+      el.appendChild(makeChips('Key','rootNote',rootOptions(),buildInstrumentPanel));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS));
+      el.appendChild(makeSlider({key:'stringCount',label:'How many strings',min:8,max:24,step:1,dp:0}));
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Chord buttons offered'; el.appendChild(h);
+      ORDER.forEach(k=>{
+        el.appendChild(makeToggle(chordLabel(k)+'  —  '+k,'chord_'+k,()=>{
+          if(!ORDER.some(x=>SETTINGS['chord_'+x])){ SETTINGS['chord_'+k]=true; saveSettings(); }
+          buildInstrumentPanel();
+        }));
+      });
+      el.appendChild(makeToggle('Strum when a chord is chosen','autoStrum'));
+    },
+    // 🎛️ Sound tab — pluck shaping + effects (no Voice: the strings are the voice)
+    buildSound(el){
+      el.appendChild(makeSlider({key:'bright',label:'Brightness (soft ↔ bright)',min:0.15,max:1,step:0.01,dp:2,onChange:preview}));
+      el.appendChild(makeSlider({key:'ring',label:'Ring time (short ↔ long)',min:0.6,max:4,step:0.1,dp:1,onChange:preview}));
+      el.appendChild(makeToggle('Louder with faster sweeps','velSense'));
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Chorus','chorus',applyChorus));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Note letters on strings','showLabels'));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      buildStrings(); rebuildChordBar(); sigCheck();
+      cv.addEventListener('mousedown',e=>onDownPluck('mouse',e.offsetX,e.offsetY));
+      cv.addEventListener('touchstart',e=>{ const r=cv.getBoundingClientRect();
+        for(const t of e.changedTouches) onDownPluck(t.identifier,t.clientX-r.left,t.clientY-r.top); },{passive:false});
+      // Space/Enter = strum (accessibility switches present as Space/Enter);
+      // number keys pick the nth offered chord.
+      window.addEventListener('keydown',e=>{
+        if(e.target!==document.body) return;
+        if(e.key===' '||e.key==='Enter'){ e.preventDefault(); getAudio(); strum(0.8); return; }
+        const n=parseInt(e.key,10);
+        if(n>=1&&n<=offered().length){ e.preventDefault(); getAudio(); setChord(offered()[n-1]); }
+      });
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},   // paint stays on so touches keep the sim awake; nothing is painted
+    frame(dt){
+      sigCheck();
+      trackPointers(dt);
+      if(!ctx) return;
+      const W=canvas.width, H=canvas.height;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,W,H);
+      const n=STR.length, maxA=Math.min(W/Math.max(1,n)*0.32,H*0.02);
+      let alive=false;
+      for(const s of STR){
+        if(s.amp>0.004){ alive=true; s.phase+=dt*(14+s.freq*0.012); s.amp*=Math.pow(0.04,dt/1.4); }
+        else s.amp=0;
+        const px=s.x*W, c=s.col.join(',');
+        const draw=(lw,al)=>{
+          ctx.strokeStyle='rgba('+c+','+al.toFixed(3)+')';
+          ctx.lineWidth=lw; ctx.beginPath();
+          if(s.amp>0.004){
+            const A=s.amp*maxA;
+            for(let k=0;k<=16;k++){ const yt=k/16, y=yt*H;
+              const ox=A*Math.sin(yt*Math.PI*2+s.phase)*Math.sin(yt*Math.PI);
+              if(k===0) ctx.moveTo(px+ox,y); else ctx.lineTo(px+ox,y);
+            }
+          } else { ctx.moveTo(px,0); ctx.lineTo(px,H); }
+          ctx.stroke();
+        };
+        draw(Math.max(3,H*0.006)*(1+s.amp),0.10+0.30*s.amp);   // glow
+        draw(Math.max(1.5,H*0.0022),0.55+0.45*s.amp);           // core
+        if(SETTINGS.showLabels){
+          ctx.fillStyle='rgba('+c+',0.85)';
+          ctx.font='700 '+Math.round(H*0.022)+'px sans-serif';
+          ctx.textAlign='center';
+          ctx.fillText(s.label,px,H*0.04);
+        }
+      }
+      if(alive) pokeSim();
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

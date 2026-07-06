@@ -82,7 +82,7 @@ Settings: song, note/phrase granularity, visual burst style, hold-to-repeat on/o
 
 ---
 
-## 4. 🎸 Chord Strummer — `strummer.html` (M)
+## 4. 🎸 Chord Strummer — `strummer.html` ✅ BUILT
 
 **Concept.** Autoharp/omnichord: the screen is filled with vertical strings. Sweeping across
 them strums a harp arpeggio; big labelled chord buttons (I, IV, V, vi in the chosen key) change
