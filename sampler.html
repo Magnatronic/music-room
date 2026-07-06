@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sampler Pads – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Recording / looping states on the framework's band cells */
+.band.recing{animation:smRec 0.9s ease-in-out infinite}
+@keyframes smRec{0%,100%{box-shadow:inset 0 0 0 4px rgba(255,60,60,0.9)}50%{box-shadow:inset 0 0 0 10px rgba(255,60,60,0.45)}}
+.band.looping{animation:smLoop 1.6s ease-in-out infinite}
+@keyframes smLoop{0%,100%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.55)}50%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.15)}}
+#smToast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:41;
+  background:rgba(0,0,0,0.75);color:rgba(255,255,255,0.95);font:14px sans-serif;
+  padding:10px 18px;border-radius:14px;max-width:80vw;text-align:center;
+  opacity:0;transition:opacity 0.3s;pointer-events:none}
+#smToast.show{opacity:1}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Sampler Pads — Koala-lite. Big pads; the therapist turns on Record mode
+   (rail 🎙 button — the rail is hidden by the session lock, so students can't
+   erase pads), holds a pad while making a sound, lets go to save. Tap to play.
+   Per-pad icon, pitch/speed and loop; the kit persists in localStorage and can
+   be exported/imported as a .json file for bigger libraries.
+
+   The student's own voice/sounds become the instrument — recordings play as
+   AudioBuffers through the framework master chain (volume, effects, limiter).
+*/
+const Anim = (() => {
+
+  const KIT_KEY='kit:'+location.pathname.split('/').pop();
+  const LAYOUTS={'4':{label:'4 (2×2)',cols:2,rows:2},'6':{label:'6 (3×2)',cols:3,rows:2},'9':{label:'9 (3×3)',cols:3,rows:3}};
+  const PADCOL=[[226,28,28],[245,125,23],[245,209,23],[59,181,74],[28,169,169],[63,120,224],[125,79,181],[224,90,156],[200,200,210]];
+  const EMPTYCOL=[105,110,120];
+  const DEF_ICONS=['🐶','🐱','🚗','🔔','👏','⭐','🌈','💧','🥁'];
+  const ICONS=['🐶','🐱','🐦','🦁','🚗','🚂','🔔','👏','🎤','⭐','🌈','💧','🥁','😄','🍎','⚽'];
+
+  let ctx=null, kit=loadKit(), buffers=[], playing={}, selPad=0;
+  let recMode=false, recStream=null, micPending=false, recorder=null, recChunks=[];
+  let recPad=-1, recStartAt=0;
+  const holdMap=new Map();
+  let storeTimer=null;
+
+  function loadKit(){
+    try{ const k=JSON.parse(localStorage.getItem(KIT_KEY)||'{}');
+      return {pads:Array.isArray(k.pads)?k.pads.slice(0,9):[]}; }
+    catch(e){ return {pads:[]}; }
+  }
+  function storeKit(){
+    try{ localStorage.setItem(KIT_KEY,JSON.stringify(kit)); }
+    catch(e){ toast('Storage is full — that recording plays now but can\'t be kept. Export the kit to a file.'); }
+  }
+  function storeKitSoon(){ clearTimeout(storeTimer); storeTimer=setTimeout(storeKit,400); }
+  function abToB64(ab){
+    const u=new Uint8Array(ab); let s='';
+    for(let i=0;i<u.length;i+=8192) s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));
+    return btoa(s);
+  }
+  function b64ToAb(b64){
+    const s=atob(b64), u=new Uint8Array(s.length);
+    for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i);
+    return u.buffer;
+  }
+
+  function toast(msg,secs){
+    let el=document.getElementById('smToast');
+    if(!el){ el=document.createElement('div'); el.id='smToast'; document.body.appendChild(el); }
+    el.textContent=msg; el.classList.add('show');
+    clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),(secs||3.5)*1000);
+  }
+
+  // ── layout: pads on the framework's cell grid ──
+  function layout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS['6']; }
+  function padCount(){ const L=layout(); return L.cols*L.rows; }
+  function padOf(col,row){ const rows=gridRowCount(); return (rows-1-row)*NOTES.length+col; }
+  function applyLayout(){
+    const L=layout();
+    SETTINGS.noteCount=L.cols; SETTINGS.octaveRows=String(L.rows); SETTINGS.yAxis='octaves';
+    saveSettings(); refreshMusic(); restyle();
+    if(selPad>=padCount()) selPad=0;
+  }
+  // Per-PAD colours/icons/states: the framework styles bands per COLUMN, so we
+  // re-style every cell after any buildBands (frame() re-runs this when the
+  // cells are fresh — see the _styled marker).
+  function restyle(){
+    const rows=gridRowCount(), cols=NOTES.length;
+    bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
+      const cr=d.dataset.cell.split('-'), idx=(rows-1-cr[1])*cols+ +cr[0];
+      const pad=kit.pads[idx];
+      d._styled=true;
+      d.style.setProperty('--c',(pad?PADCOL[idx%PADCOL.length]:EMPTYCOL).join(','));
+      d.style.setProperty('--a',pad?'0.16':'0.05');
+      d.classList.toggle('recing',recPad===idx);
+      d.classList.toggle('looping',!!(playing[idx]&&pad&&pad.loop));
+      const l=d.querySelector('.lbl');
+      if(l) l.textContent=pad?(pad.icon||'🔊'):(recMode?'🎙️':'·');
+    });
+  }
+
+  // ── playback ──
+  function ensureDecoded(idx){
+    if(buffers[idx]) return Promise.resolve(buffers[idx]);
+    const pad=kit.pads[idx];
+    if(!pad||!pad.d) return Promise.reject();
+    return getAudio().decodeAudioData(b64ToAb(pad.d)).then(b=>{ buffers[idx]=b; return b; });
+  }
+  function stopPad(idx){
+    const pl=playing[idx]; if(!pl) return;
+    delete playing[idx];
+    try{
+      const t=audioCtx.currentTime;
+      pl.g.gain.setTargetAtTime(0,t,0.03); pl.src.stop(t+0.25);
+    }catch(e){}
+  }
+  function playPad(idx){
+    const pad=kit.pads[idx]; if(!pad) return;
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    ensureDecoded(idx).then(buf=>{
+      const wasLooping=!!playing[idx]&&pad.loop;
+      stopPad(idx);
+      if(wasLooping){ restyle(); return; }   // tapping a looping pad stops it
+      const src=ac.createBufferSource(); src.buffer=buf;
+      src.playbackRate.value=pad.pitch||1; src.loop=!!pad.loop;
+      const g=ac.createGain(); g.gain.value=1;
+      src.connect(g); g.connect(masterGain);
+      soundingVoices++; updatePolyGain();
+      const entry={src,g};
+      src.onended=()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+        if(playing[idx]===entry) delete playing[idx];
+        try{g.disconnect();}catch(e){} restyle(); };
+      src.start(ac.currentTime+0.012);
+      playing[idx]=entry;
+      if(pad.loop) restyle();
+    }).catch(()=>{});
+  }
+
+  // ── recording (therapist: rail 🎙 → hold a pad → let go to save) ──
+  function setRecMode(v){
+    if(v===recMode) return;
+    recMode=v;
+    if(v){
+      if(!recStream&&!micPending){
+        micPending=true; getAudio();
+        navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{
+          micPending=false; recStream=s;
+          toast('Record mode: HOLD a pad and make the sound — let go to save. Quick tap plays it back.',5);
+        }).catch(()=>{
+          micPending=false; recMode=false;
+          toast('The microphone was blocked — allow it in the browser and try again.');
+          refreshRailButtons(); restyle(); rebuildPane();
+        });
+      } else toast('Record mode: HOLD a pad and make the sound — let go to save.',4);
+    } else {
+      if(recorder&&recorder.state!=='inactive') recorder.stop();
+      recPad=-1;
+      if(recStream){ recStream.getTracks().forEach(t=>t.stop()); recStream=null; }
+    }
+    refreshRailButtons(); restyle(); rebuildPane();
+  }
+  function startRec(idx){
+    if(!recStream||recorder) return;
+    try{
+      recorder=MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? new MediaRecorder(recStream,{mimeType:'audio/webm;codecs=opus'})
+        : new MediaRecorder(recStream);
+    }catch(e){ try{ recorder=new MediaRecorder(recStream); }catch(e2){ recorder=null; return; } }
+    recChunks=[];
+    const mime=recorder.mimeType, padIdx=idx;
+    recorder.ondataavailable=e=>{ if(e.data&&e.data.size) recChunks.push(e.data); };
+    recorder.onstop=()=>{ recorder=null; finishRec(padIdx,new Blob(recChunks,{type:mime})); };
+    recorder.start();
+    recPad=idx; recStartAt=performance.now(); pokeSim(); restyle();
+  }
+  function stopRec(){
+    if(recorder&&recorder.state!=='inactive') recorder.stop();
+    recPad=-1; restyle();
+  }
+  function finishRec(idx,blob){
+    if(blob.size<600){ toast('Too short — keep holding the pad while you make the sound.'); restyle(); return; }
+    blob.arrayBuffer().then(ab=>{
+      const prev=kit.pads[idx];
+      kit.pads[idx]={d:abToB64(ab),mime:blob.type,
+        icon:(prev&&prev.icon)||DEF_ICONS[idx%DEF_ICONS.length],
+        pitch:(prev&&prev.pitch)||1,loop:false};
+      buffers[idx]=null; storeKit();
+      selPad=idx; restyle(); rebuildPane();
+      playPad(idx);   // instant audition of what was just saved
+    });
+  }
+  // Hold/tap tracking runs per frame (onCell has no release event). onCell pokes
+  // the sim on every touch, so the loop is guaranteed awake while a finger is down.
+  function trackRecord(now){
+    if(recMode&&SETTINGS.locked){ setRecMode(false); return; }   // lock always wins
+    if(!recMode){ holdMap.clear(); return; }
+    const seen=new Set();
+    for(const p of pointers){
+      if(!p.down) continue; seen.add(p.id);
+      if(!holdMap.has(p.id)) holdMap.set(p.id,{t:now,idx:padOf(p.col,p.row)});
+    }
+    for(const e of Array.from(holdMap.entries())){
+      const id=e[0], h=e[1];
+      if(seen.has(id)){
+        if(recPad<0&&!recorder&&now-h.t>200) startRec(h.idx);
+      } else {
+        if(recPad===h.idx) stopRec();
+        else if(now-h.t<=200&&recPad<0) playPad(h.idx);   // quick tap = audition
+        holdMap.delete(id);
+      }
+    }
+    if(recPad>=0){ pokeSim(); if(now-recStartAt>6000) stopRec(); }
+  }
+
+  // ── kit export / import ──
+  function exportKit(){
+    const blob=new Blob([JSON.stringify(kit)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='sampler-kit-'+new Date().toISOString().slice(0,10)+'.json';
+    a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }
+  function importKit(){
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+    inp.addEventListener('change',()=>{
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      f.text().then(txt=>{
+        const k=JSON.parse(txt);
+        if(!k||!Array.isArray(k.pads)) throw 0;
+        kit={pads:k.pads.slice(0,9)}; buffers=[]; storeKit();
+        restyle(); rebuildPane(); toast('Kit loaded.');
+      }).catch(()=>toast('That file doesn\'t look like a sampler kit.'));
+    });
+    inp.click();
+  }
+
+  // ── panel helpers (kit data lives outside SETTINGS, so manual widgets) ──
+  function chip(txt,active,fn){
+    const c=document.createElement('div'); c.className='chip'+(active?' active':'');
+    c.textContent=txt;
+    c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); fn(c); });
+    return c;
+  }
+  function kslider(el,label,get,set,min,max,step){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val'; val.textContent=(+get()).toFixed(2);
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
+    inp.addEventListener('input',()=>{ set(parseFloat(inp.value)); val.textContent=(+get()).toFixed(2); });
+    row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+  }
+  function ktoggle(el,label,get,set){
+    const row=document.createElement('div'); row.className='toggle';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const sw=document.createElement('div'); sw.className='switch'+(get()?' on':'');
+    sw.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+      set(!get()); sw.classList.toggle('on',get()); });
+    row.appendChild(lab); row.appendChild(sw); el.appendChild(row);
+  }
+  function rebuildPane(){ if(currentQuickMode==='instrument') buildInstrumentPanel(); }
+
+  let lastAudition=0;
+  function audition(idx){
+    const now=performance.now();
+    if(now-lastAudition<250) return;
+    lastAudition=now; playPad(idx);
+  }
+
+  return {
+    sectionLabel:'Sampler',
+    lockMode:'notes',
+    noVoices:true,                    // recordings ARE the sound
+    hideRail:['clear'],
+    paneLabels:{ instrument:'📼 Pads', sound:'🎛️ Sound' },
+    themes:{ tape:{label:'📼 Tape', colors:[[1,0.3,0.3],[1,0.7,0.2],[0.3,0.8,0.8],[0.5,0.5,1],[0.9,0.5,0.9]]} },
+    defaults:{ theme:'tape', padLayout:'6', pressFx:'bloom',
+      mode:'notes', paint:false, yAxis:'octaves', octaveRows:'2', noteCount:3,
+      zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major' },
+    schema:[],
+    railButtons:[
+      { id:'smrec', icon:()=>recMode?'⏺':'🎙️',
+        title:()=>recMode?'Record mode is ON — tap to finish':'Record mode: record sounds onto pads',
+        active:()=>recMode,
+        onClick(){ setRecMode(!recMode); } },
+    ],
+    _dbg(){ return {recMode,recPad,mic:!!recStream,
+      pads:kit.pads.map(p=>!!p),playing:Object.keys(playing).length}; },
+    // 📼 Pads tab
+    buildInstrument(el){
+      ktoggle(el,'Record mode (therapist)',()=>recMode,v=>{ setRecMode(v); });
+      el.appendChild(makeChips('How many pads','padLayout',LAYOUTS,applyLayout));
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Edit a pad'; el.appendChild(h);
+      const sel=document.createElement('div'); sel.className='chips';
+      for(let i=0;i<padCount();i++){
+        const p=kit.pads[i];
+        sel.appendChild(chip((p?(p.icon||'🔊'):'·')+' '+(i+1), i===selPad, ()=>{
+          selPad=i; if(p) audition(i); rebuildPane(); }));
+      }
+      el.appendChild(sel);
+      const pad=kit.pads[selPad];
+      if(!pad){
+        const none=document.createElement('div');
+        none.style.cssText='color:rgba(255,255,255,0.5);font:13px/1.5 sans-serif;margin-bottom:12px';
+        none.textContent='Pad '+(selPad+1)+' is empty. Turn on Record mode, then hold the pad on screen while making a sound.';
+        el.appendChild(none);
+      } else {
+        const ic=document.createElement('div'); ic.className='chips';
+        ICONS.forEach(i=>ic.appendChild(chip(i,pad.icon===i,()=>{
+          pad.icon=i; storeKit(); restyle(); rebuildPane(); })));
+        el.appendChild(ic);
+        kslider(el,'Pitch / speed',()=>pad.pitch||1,v=>{ pad.pitch=v; storeKitSoon(); audition(selPad); },0.5,2,0.05);
+        ktoggle(el,'Loop while playing',()=>!!pad.loop,v=>{ pad.loop=v; storeKit(); if(!v) stopPad(selPad); restyle(); });
+        const row=document.createElement('div'); row.className='chips';
+        row.appendChild(chip('▶ Play',false,()=>playPad(selPad)));
+        row.appendChild(chip('🗑 Clear this pad',false,()=>{
+          stopPad(selPad); kit.pads[selPad]=null; buffers[selPad]=null; storeKit();
+          restyle(); rebuildPane(); toast('Pad '+(selPad+1)+' cleared.'); }));
+        el.appendChild(row);
+        if(buffers[selPad]){
+          const d=document.createElement('div');
+          d.style.cssText='color:rgba(255,255,255,0.4);font:12px sans-serif';
+          d.textContent='Length: '+buffers[selPad].duration.toFixed(1)+' s';
+          el.appendChild(d);
+        }
+      }
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Whole kit'; el.appendChild(h2);
+      const krow=document.createElement('div'); krow.className='chips';
+      krow.appendChild(chip('💾 Save kit to a file',false,exportKit));
+      krow.appendChild(chip('📂 Load a kit file',false,importKit));
+      el.appendChild(krow);
+    },
+    // 🎛️ Sound tab
+    buildSound(el){
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
+      el.appendChild(makeToggle('Icons on pads','showLabels',()=>{ buildBands(); restyle(); }));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    onCell(col,row){
+      pokeSim();                       // keeps frame() (hold tracking) running
+      const idx=padOf(col,row);
+      if(recMode){ selPad=idx; rebuildPane(); return; }   // record path handles sound
+      playPad(idx); fxCell(col,row);
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      applyLayout();
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      trackRecord(performance.now());
+      // re-style fresh cells whenever the framework rebuilt the band grid
+      const first=bandsEl.firstChild;
+      if(first&&!first._styled) restyle();
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

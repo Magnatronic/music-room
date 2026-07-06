@@ -131,7 +131,7 @@ Voice Visuals proves the mic pipeline.
 
 ---
 
-## 7. 📼 Sampler Pads — `sampler.html` (M)
+## 7. 📼 Sampler Pads — `sampler.html` ✅ BUILT
 
 **Concept.** Koala-lite: 6–9 big pads. Hold a pad to record (MediaRecorder from the mic),
 tap to play. Per-pad colour + icon; per-pad pitch/speed slider; optional loop toggle.
