@@ -84,26 +84,67 @@ const Anim = (() => {
                label:names[pc], amp:0, phase:Math.random()*6.28, lastHit:0 }; });
   }
 
-  // ── Karplus-Strong plucks, rendered once per pitch/timbre and cached ──
+  // ── String voices: plucked (Karplus-Strong) and struck (additive partials),
+  //    all rendered once per pitch/timbre into cached AudioBuffers ──
+  // ks: bright/ring scale the user sliders; pick = pick-position comb (0 = none).
+  // add: parts = [ratio, gain, decay×ring]; oct shifts the whole voice.
+  const STRVOICES={
+    harp:    {label:'🎼 Harp',      type:'ks',  bright:1.0,  ring:1.0,  pick:0},
+    nylon:   {label:'🎸 Nylon',     type:'ks',  bright:0.45, ring:0.9,  pick:0.32},
+    banjo:   {label:'🪕 Banjo',     type:'ks',  bright:1.6,  ring:0.4,  pick:0.12},
+    koto:    {label:'🎋 Koto',      type:'ks',  bright:0.8,  ring:0.65, pick:0.5},
+    musicbox:{label:'🎐 Music box', type:'add', oct:1, ring:0.55,
+      parts:[[1,1,1],[3.4,0.34,0.35],[6.76,0.12,0.18]]},
+    bell:    {label:'🔔 Bell',      type:'add', oct:0, ring:0.9,
+      parts:[[1,1,1],[2.76,0.45,0.6],[5.4,0.2,0.35]]},
+  };
+  function strVoice(){ return STRVOICES[SETTINGS.strVoice]||STRVOICES.harp; }
+
   const bufCache=new Map();
-  function ksBuf(ac,freq){
-    const bright=Math.max(0.15,Math.min(1,SETTINGS.bright||0.6));
-    const ring=Math.max(0.5,Math.min(4,SETTINGS.ring||2.2));
-    const key=freq.toFixed(1)+'|'+bright.toFixed(2)+'|'+ring.toFixed(1);
-    const hit=bufCache.get(key); if(hit) return hit;
-    if(bufCache.size>120) bufCache.clear();
-    const sr=ac.sampleRate, N=Math.max(2,Math.round(sr/freq));
-    const len=Math.floor(sr*ring*1.1)+N+2;
-    const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
-    let lp=0;   // one-pole lowpass on the excitation noise = pluck brightness
-    for(let i=0;i<N;i++){ lp=bright*(Math.random()*2-1)+(1-bright)*lp; d[i]=lp; }
-    const rho=Math.pow(0.001,1/(ring*sr));   // ~-60 dB at the ring time
-    for(let i=N;i<len;i++){ const a=d[i-N], b=i-N-1>=0?d[i-N-1]:0; d[i]=rho*0.5*(a+b); }
+  function finishBuf(d,len,sr){
     let peak=0; for(let i=0;i<len;i++){ const a=Math.abs(d[i]); if(a>peak) peak=a; }
     const g=peak>0?0.9/peak:1;
     for(let i=0;i<len;i++) d[i]*=g;
     const fade=Math.min(len,Math.floor(sr*0.05));   // declick the hard buffer end
     for(let i=0;i<fade;i++) d[len-1-i]*=i/fade;
+  }
+  function renderKS(ac,freq,V,bright,ring){
+    ring*=V.ring; bright=Math.max(0.08,Math.min(1,bright*V.bright));
+    const sr=ac.sampleRate, N=Math.max(2,Math.round(sr/freq));
+    const len=Math.floor(sr*ring*1.1)+N+2;
+    const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
+    const ex=new Float32Array(N); let lp=0;   // lowpassed noise = pluck brightness
+    for(let i=0;i<N;i++){ lp=bright*(Math.random()*2-1)+(1-bright)*lp; ex[i]=lp; }
+    if(V.pick){   // comb the excitation = where along the string it's plucked
+      const D=Math.max(1,Math.round(N*V.pick));
+      for(let i=N-1;i>=0;i--) ex[i]-= i-D>=0?ex[i-D]:0;
+    }
+    for(let i=0;i<N;i++) d[i]=ex[i];
+    const rho=Math.pow(0.001,1/(ring*sr));   // ~-60 dB at the ring time
+    for(let i=N;i<len;i++){ const a=d[i-N], b=i-N-1>=0?d[i-N-1]:0; d[i]=rho*0.5*(a+b); }
+    finishBuf(d,len,sr); return buf;
+  }
+  function renderAdd(ac,freq,V,bright,ring){
+    ring*=V.ring;
+    const sr=ac.sampleRate, f0=freq*Math.pow(2,V.oct||0);
+    const len=Math.floor(sr*(ring*1.1+0.1));
+    const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
+    V.parts.forEach((p,pi)=>{
+      const f=f0*p[0]; if(f>sr*0.45) return;
+      const g=p[1]*(pi===0?1:0.25+bright);   // brightness tilts the upper partials
+      const k=-1/(Math.max(0.05,ring*p[2])*sr), w=2*Math.PI*f/sr;
+      for(let i=0;i<len;i++) d[i]+=g*Math.exp(k*i)*Math.sin(w*i);
+    });
+    finishBuf(d,len,sr); return buf;
+  }
+  function pluckBuf(ac,freq){
+    const V=strVoice();
+    const bright=Math.max(0.15,Math.min(1,SETTINGS.bright||0.6));
+    const ring=Math.max(0.5,Math.min(4,SETTINGS.ring||2.2));
+    const key=(SETTINGS.strVoice||'harp')+'|'+freq.toFixed(1)+'|'+bright.toFixed(2)+'|'+ring.toFixed(1);
+    const hit=bufCache.get(key); if(hit) return hit;
+    if(bufCache.size>120) bufCache.clear();
+    const buf=V.type==='add'?renderAdd(ac,freq,V,bright,ring):renderKS(ac,freq,V,bright,ring);
     bufCache.set(key,buf); return buf;
   }
 
@@ -115,7 +156,7 @@ const Anim = (() => {
     const ac=getAudio(); if(!ac||!masterGain) return;
     if(active.size>=60) return;         // runaway-gliss safety cap
     const t=ac.currentTime+0.012+(delay||0);   // scheduling headroom, see framework
-    const src=ac.createBufferSource(); src.buffer=ksBuf(ac,s.freq);
+    const src=ac.createBufferSource(); src.buffer=pluckBuf(ac,s.freq);
     const g=ac.createGain(); g.gain.value=0.5*Math.min(1.2,vol);
     const pan=ac.createStereoPanner(); pan.pan.value=(s.x*2-1)*0.6;
     src.connect(g); g.connect(pan); pan.connect(masterGain);
@@ -229,7 +270,7 @@ const Anim = (() => {
     themes:{ harp:{label:'🎸 Harp', colors:[[1,0.35,0.55],[0.95,0.8,0.2],[0.2,0.7,0.7],[0.55,0.4,0.85],[0.3,0.75,0.4]]} },
     defaults:{ theme:'harp', stringCount:15, curChord:'I',
       chord_I:true, chord_ii:false, chord_iii:false, chord_IV:true, chord_V:true, chord_vi:true,
-      autoStrum:true, bright:0.6, ring:2.2, velSense:true,
+      autoStrum:true, strVoice:'harp', bright:0.6, ring:2.2, velSense:true,
       mode:'flow', paint:true, yAxis:'none', colorMode:'note', showLabels:false, scale:'major' },
     schema:[],
     // 🎸 Chords tab — key, register, strings, which chord buttons are offered
@@ -248,6 +289,7 @@ const Anim = (() => {
     },
     // 🎛️ Sound tab — pluck shaping + effects (no Voice: the strings are the voice)
     buildSound(el){
+      el.appendChild(makeChips('Strings sound','strVoice',STRVOICES,preview));
       el.appendChild(makeSlider({key:'bright',label:'Brightness (soft ↔ bright)',min:0.15,max:1,step:0.01,dp:2,onChange:preview}));
       el.appendChild(makeSlider({key:'ring',label:'Ring time (short ↔ long)',min:0.6,max:4,step:0.1,dp:1,onChange:preview}));
       el.appendChild(makeToggle('Louder with faster sweeps','velSense'));
