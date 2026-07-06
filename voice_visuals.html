@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Voice Visuals – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Mic gate — the one thing that must be tapped before anything works */
+#vvGate{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
+  align-items:center;justify-content:center;z-index:5;pointer-events:none}
+#vvGate.hidden{display:none}
+#vvGate button{pointer-events:auto;font-family:sans-serif;font-size:clamp(18px,3.2vh,26px);
+  font-weight:700;color:#fff;background:rgba(0,0,0,0.55);border:2px solid rgba(255,255,255,0.45);
+  border-radius:26px;padding:20px 34px;cursor:pointer;backdrop-filter:blur(8px);
+  -webkit-tap-highlight-color:transparent;touch-action:manipulation;
+  text-shadow:0 1px 4px rgba(0,0,0,0.8);transition:transform 0.15s,border-color 0.2s}
+#vvGate button:hover{border-color:#fff;transform:scale(1.04)}
+#vvGate .msg{pointer-events:none;font:15px sans-serif;color:rgba(255,255,255,0.75);
+  background:rgba(0,0,0,0.5);padding:8px 16px;border-radius:14px;max-width:70vw;text-align:center}
+/* Live level meter in the Voice tab */
+#vvMeter{height:12px;background:rgba(255,255,255,0.12);border-radius:6px;overflow:hidden;margin:6px 0 14px}
+#vvMeterFill{height:100%;width:0;background:linear-gradient(90deg,#3bb54a,#f5d117,#e2641c);transition:width 0.12s}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Voice Visuals — vocalize and the room responds with light. Loudness = size
+   and brightness, pitch = height and Boomwhacker note colour. Rewards
+   vocalization for non-verbal students; "whisper" sensitivity makes tiny
+   sounds produce big rewards.
+
+   LISTEN-ONLY by design: the microphone signal is analysed and never routed
+   to the speakers, so feedback is impossible. The framework audio chain is
+   created (a user gesture unlocks the context) but nothing is played.
+
+   Pitch via autocorrelation on the time-domain buffer (fine for voice);
+   a light 10 Hz poll keeps running while the render loop sleeps so the
+   first sound after a silence wakes the visuals instantly.
+*/
+const Anim = (() => {
+
+  const BW={0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+  function colOf(pc){ if(BW[pc]) return BW[pc];
+    const b=BW[(pc+11)%12]||[200,200,200]; return b.map(v=>Math.round(v*0.7)); }
+
+  const SENS={ whisper:{label:'🤫 Whisper',mul:60}, talk:{label:'🙂 Talking',mul:18}, sing:{label:'📣 Singing',mul:6} };
+  const VISMODES={ bloom:{label:'🌟 Bloom'}, ripples:{label:'💧 Ripples'},
+                   fountain:{label:'⛲ Fountain'}, aurora:{label:'🌌 Aurora'} };
+  const GATE=0.05;
+
+  let ctx=null, t=0;
+  let micState='off';               // off | starting | on | denied | error
+  let micStream=null, analyser=null, pollId=null, pollCount=0;
+  const ABUF=new Float32Array(2048);
+  let level=0, meterLvl=0, pitch01=0.4, tp01=0.4;   // smoothed + target pitch height
+  let col=[120,200,255], tcol=[120,200,255];  // smoothed + target colour
+  let lastPitchAt=0;
+  let rings=[], parts=[], touchRings=[], rippleTimer=0, emitAcc=0;
+
+  // ── microphone ──
+  function micOn(){ return micState==='on'; }
+  function rawLevel(){
+    if(!analyser) return 0;
+    analyser.getFloatTimeDomainData(ABUF);
+    let s=0; for(let i=0;i<ABUF.length;i++) s+=ABUF[i]*ABUF[i];
+    const rms=Math.sqrt(s/ABUF.length);
+    const mul=(SENS[SETTINGS.sensitivity]||SENS.talk).mul*(SETTINGS.boost||1);
+    return Math.min(1,rms*mul);
+  }
+  function enableMic(){
+    if(micState==='starting'||micOn()) return;
+    micState='starting'; updateMicUI();
+    const ac=getAudio();   // user gesture unlocks the context; output stays silent
+    navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+      .then(stream=>{
+        micStream=stream;
+        const src=ac.createMediaStreamSource(stream);
+        analyser=ac.createAnalyser(); analyser.fftSize=2048;
+        src.connect(analyser);        // analyser only — NEVER connected to the output
+        const tr=stream.getAudioTracks()[0];
+        if(tr) tr.onended=()=>{ disableMic(); micState='error'; updateMicUI(); };
+        micState='on'; pokeSim(); updateMicUI();
+        // sim-sleep-proof wake: poll level cheaply, poke the loop when there's sound
+        pollId=setInterval(()=>{
+          pollCount++;
+          const r=rawLevel();
+          if(r>GATE) pokeSim();
+          // peak-hold with a gentle fall, fed by the frame-smoothed level too so the
+          // meter shows exactly what the visuals respond to (10 Hz snapshots alone
+          // miss short sounds between ticks)
+          meterLvl=Math.max(Math.min(1,r),level,meterLvl*0.82);
+          const f=document.getElementById('vvMeterFill');
+          if(f) f.style.width=Math.round(meterLvl*100)+'%';
+        },100);
+      })
+      .catch(()=>{ micState='denied'; updateMicUI(); });
+  }
+  function disableMic(){
+    if(pollId){ clearInterval(pollId); pollId=null; }
+    if(micStream){ micStream.getTracks().forEach(tr=>{ tr.onended=null; tr.stop(); }); micStream=null; }
+    analyser=null; level=0; micState='off'; updateMicUI();
+  }
+  function updateMicUI(){
+    const gate=document.getElementById('vvGate'); if(!gate) return;
+    gate.classList.toggle('hidden',micOn());
+    const btn=gate.querySelector('button'), msg=gate.querySelector('.msg');
+    if(micState==='starting'){ btn.textContent='🎤 Starting…'; msg.textContent=''; }
+    else if(micState==='denied'){ btn.textContent='🎤 Try again';
+      msg.textContent='The microphone was blocked — allow it in the browser, then tap again.'; }
+    else if(micState==='error'){ btn.textContent='🎤 Tap to restart the microphone';
+      msg.textContent='The microphone stopped (unplugged?).'; }
+    else { btn.textContent='🎤 Tap to turn on the microphone';
+      msg.textContent='Nothing is ever played out loud — this app only listens.'; }
+    refreshRailButtons();
+    if(currentQuickMode==='instrument') buildInstrumentPanel();
+  }
+
+  // ── analysis: smoothed level + autocorrelation pitch → height/colour ──
+  function analyse(dt){
+    if(!analyser){ level=Math.max(0,level-dt); return; }
+    const raw=rawLevel();
+    const target=raw>GATE?(raw-GATE)/(1-GATE):0;
+    const k=1-Math.exp(-dt/(target>level?0.05:0.35));   // fast attack, slow release
+    level+=(target-level)*k;
+    const now=performance.now();
+    if(target>0.02 && now-lastPitchAt>50){ lastPitchAt=now; detectPitch(); }
+    if(SETTINGS.colorMode==='single'&&SETTINGS.lockedColor)
+      tcol=SETTINGS.lockedColor.map(v=>Math.min(1,v)*255);
+    const ck=1-Math.exp(-dt/0.15);
+    pitch01+=(tp01-pitch01)*ck;
+    for(let i=0;i<3;i++) col[i]+=(tcol[i]-col[i])*ck;
+  }
+  function detectPitch(){
+    const sr=audioCtx.sampleRate;
+    const minLag=Math.max(2,Math.floor(sr/600)), maxLag=Math.min(1000,Math.floor(sr/75));
+    let e=1e-9; for(let i=0;i<1024;i+=2) e+=ABUF[i]*ABUF[i];
+    let best=0,bl=0;
+    for(let lag=minLag;lag<=maxLag;lag++){
+      let c=0;
+      for(let i=0;i<1024;i+=2) c+=ABUF[i]*ABUF[i+lag];
+      if(c>best){ best=c; bl=lag; }
+    }
+    if(bl>0 && best/e>0.3){         // voiced enough to trust
+      const f=sr/bl;
+      tp01=Math.max(0,Math.min(1,Math.log2(f/80)/Math.log2(800/80)));
+      const midi=Math.round(69+12*Math.log2(f/440));
+      tcol=colOf(((midi%12)+12)%12);
+    }
+  }
+
+  // ── visual modes (all additive glow over a fading background) ──
+  function colStr(a){ return 'rgba('+(col[0]|0)+','+(col[1]|0)+','+(col[2]|0)+','+a.toFixed(3)+')'; }
+  function voiceY(H){ return H*(0.8-0.6*pitch01); }
+  function drawBloom(W,H){
+    if(level<=0.005) return;
+    const cx=W/2+Math.sin(t*0.8)*W*0.02, cy=voiceY(H);
+    const R=(0.10+0.45*level)*Math.min(W,H)*(1+0.03*Math.sin(t*6));
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
+    g.addColorStop(0,colStr(0.12+0.5*level));
+    g.addColorStop(0.6,colStr(0.05+0.25*level));
+    g.addColorStop(1,colStr(0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
+  }
+  function drawRipples(W,H,dt){
+    rippleTimer-=dt;
+    if(level>0.02&&rippleTimer<=0){
+      rippleTimer=0.4-0.3*level;
+      rings.push({x:W/2,y:voiceY(H),r:Math.min(W,H)*0.02,
+        v:(0.25+0.7*level)*Math.min(W,H),a:0.25+0.55*level,c:col.slice()});
+    }
+    const lim=Math.hypot(W,H);
+    rings=rings.filter(g=>{
+      g.r+=g.v*dt; g.a*=Math.pow(0.25,dt);
+      if(g.a<0.01||g.r>lim) return false;
+      ctx.strokeStyle='rgba('+(g.c[0]|0)+','+(g.c[1]|0)+','+(g.c[2]|0)+','+g.a.toFixed(3)+')';
+      ctx.lineWidth=Math.max(2,H*0.012);
+      ctx.beginPath(); ctx.arc(g.x,g.y,g.r,0,Math.PI*2); ctx.stroke();
+      return true;
+    });
+  }
+  function drawFountain(W,H,dt){
+    const cap=activeQuality()==='high'?400:activeQuality()==='med'?250:120;
+    emitAcc+=dt*level*(cap*0.55);
+    while(emitAcc>=1&&parts.length<cap){
+      emitAcc--;
+      parts.push({x:W/2+(Math.random()-0.5)*W*0.08,y:H,
+        vx:(Math.random()-0.5)*W*0.25,
+        vy:-(0.55+0.9*level+0.8*pitch01+Math.random()*0.25)*H,
+        size:(2+Math.random()*4)*(H/800)*(1+level),c:col.slice(),life:1});
+    }
+    emitAcc=Math.min(emitAcc,3);
+    parts=parts.filter(p=>{
+      p.vy+=H*0.9*dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*0.5;
+      if(p.life<=0||p.y>H+30) return false;
+      ctx.fillStyle='rgba('+(p.c[0]|0)+','+(p.c[1]|0)+','+(p.c[2]|0)+','+(p.life*0.8).toFixed(3)+')';
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+      return true;
+    });
+  }
+  function drawAurora(W,H){
+    if(level<=0.004) return;
+    for(let b=0;b<3;b++){
+      const yc=voiceY(H)+(b-1)*H*0.07;
+      const amp=H*(0.02+0.10*level)*(1+b*0.25);
+      ctx.strokeStyle=colStr(0.06+0.3*level*(1-b*0.22));
+      ctx.lineWidth=H*(0.035-b*0.007)*(1+level*0.8);
+      ctx.beginPath();
+      for(let k=0;k<=32;k++){
+        const xt=k/32, x=xt*W;
+        const y=yc+Math.sin(xt*5.5+t*(1.2+b*0.4)+b*2.1)*amp+Math.sin(xt*11+t*0.7)*amp*0.4;
+        if(k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+  }
+  function drawTouchRings(W,H,dt){
+    touchRings=touchRings.filter(g=>{
+      g.r+=g.v*dt; g.a*=Math.pow(0.2,dt);
+      if(g.a<0.01) return false;
+      ctx.strokeStyle='rgba('+(g.c[0]|0)+','+(g.c[1]|0)+','+(g.c[2]|0)+','+g.a.toFixed(3)+')';
+      ctx.lineWidth=Math.max(2,H*0.006);
+      ctx.beginPath(); ctx.arc(g.x,g.y,g.r,0,Math.PI*2); ctx.stroke();
+      return true;
+    });
+  }
+
+  return {
+    sectionLabel:'Voice',
+    lockMode:'flow',
+    noVoices:true,                    // listen-only: touch never makes sound either
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🎤 Voice', sound:'🔇 Sound' },
+    themes:{ voice:{label:'🎤 Voice', colors:[[0.5,0.8,1],[1,0.6,0.8],[0.6,1,0.7],[1,0.9,0.5],[0.8,0.7,1]]} },
+    defaults:{ theme:'voice', sensitivity:'talk', boost:1, visMode:'bloom',
+      mode:'flow', paint:true, yAxis:'none', colorMode:'note', showLabels:false },
+    schema:[],
+    railButtons:[
+      { id:'vvmic', icon:()=>micOn()?'🎤':'🎙️',
+        title:()=>micOn()?'Microphone is on — tap to turn it off':'Turn the microphone on',
+        active:()=>micOn(),
+        onClick(){ if(micOn()) disableMic(); else enableMic(); } },
+    ],
+    // expose read-only internals for automated verification (no UI)
+    _dbg(){ return {mic:micState, level:+level.toFixed(3), pitch:+pitch01.toFixed(3),
+      meter:+meterLvl.toFixed(3), polls:pollCount}; },
+    // 🎤 Voice tab
+    buildInstrument(el){
+      const row=document.createElement('div'); row.className='chips';
+      const mb=document.createElement('div'); mb.className='chip'+(micOn()?' active':'');
+      mb.textContent=micOn()?'🎤 Microphone is ON — tap to turn off':'🎙️ Turn the microphone on';
+      mb.addEventListener('click',e=>{ e.stopPropagation(); if(micOn()) disableMic(); else enableMic(); });
+      row.appendChild(mb); el.appendChild(row);
+      const mh=document.createElement('div'); mh.className='sectn'; mh.textContent='Hearing you now'; el.appendChild(mh);
+      const meter=document.createElement('div'); meter.id='vvMeter';
+      const fill=document.createElement('div'); fill.id='vvMeterFill'; meter.appendChild(fill);
+      el.appendChild(meter);
+      el.appendChild(makeChips('Sensitivity (Whisper: tiny sounds → big rewards)','sensitivity',SENS));
+      el.appendChild(makeSlider({key:'boost',label:'Extra boost',min:0.5,max:3,step:0.05,dp:2}));
+    },
+    // 🔇 Sound tab — listen-only by design
+    buildSound(el){
+      const note=document.createElement('div');
+      note.style.cssText='color:rgba(255,255,255,0.65);font:14px/1.6 sans-serif;padding:4px 0 10px';
+      note.textContent='Voice Visuals only listens — the microphone is never played through the '+
+        'speakers, so there is no feedback howl and nothing to set here. Loudness controls the '+
+        'size and brightness of the visuals; the pitch of the voice sets the height and colour.';
+      el.appendChild(note);
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('Visual style','visMode',VISMODES));
+      el.appendChild(makeChips('Colour','colorMode',
+        {note:{label:'🌈 Follows the voice pitch'},single:{label:'⬤ One colour'}},buildVisualsPanel));
+      if(SETTINGS.colorMode==='single'){
+        const row=document.createElement('div'); row.className='swrow';
+        STANDARD_SWATCHES.forEach(c=>{
+          const sw=document.createElement('div'); sw.className='swatch'; sw.style.background=rgbCss(c);
+          const lk=SETTINGS.lockedColor;
+          if(lk) sw.classList.toggle('active',Math.abs(c[0]-lk[0])<0.05&&Math.abs(c[1]-lk[1])<0.05&&Math.abs(c[2]-lk[2])<0.05);
+          sw.addEventListener('click',e=>{ e.stopPropagation();
+            SETTINGS.lockedColor=c.slice(); saveSettings(); buildVisualsPanel(); });
+          row.appendChild(sw);
+        });
+        el.appendChild(row);
+      }
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('vvGate')){
+        const g=document.createElement('div'); g.id='vvGate';
+        const b=document.createElement('button');
+        b.addEventListener('click',e=>{ e.stopPropagation(); enableMic(); });
+        const m=document.createElement('div'); m.className='msg';
+        g.appendChild(b); g.appendChild(m); document.body.appendChild(g);
+      }
+      updateMicUI();
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    // touches make a small silent ripple in any mode — the screen still responds
+    splat(x,y,dx,dy,color){
+      if(touchRings.length>=24) return;
+      touchRings.push({x:x*canvas.width,y:(1-y)*canvas.height,r:4,
+        v:0.18*Math.min(canvas.width,canvas.height),a:0.35,
+        c:color.map(v=>Math.min(1,v)*255)});
+    },
+    frame(dt){
+      analyse(dt);
+      if(!ctx) return;
+      t+=dt;
+      const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
+      const fade={bloom:0.12,ripples:0.22,fountain:0.16,aurora:0.20}[mode]||0.15;
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
+      ctx.fillRect(0,0,W,H);
+      ctx.globalCompositeOperation='lighter';
+      if(mode==='ripples') drawRipples(W,H,dt);
+      else if(mode==='fountain') drawFountain(W,H,dt);
+      else if(mode==='aurora') drawAurora(W,H);
+      else drawBloom(W,H);
+      drawTouchRings(W,H,dt);
+      ctx.globalCompositeOperation='source-over';
+      if(level>0.01||rings.length||parts.length||touchRings.length) pokeSim();
+    },
+    reset(){
+      if(!ctx) return;
+      rings=[]; parts=[]; touchRings=[];
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

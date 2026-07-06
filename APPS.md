@@ -99,7 +99,7 @@ voice); strings tuned to the current chord's notes across 2–3 octaves.
 
 ---
 
-## 5. 🎤 Voice Visuals — `voice_visuals.html` (M)
+## 5. 🎤 Voice Visuals — `voice_visuals.html` ✅ BUILT
 
 **Concept.** Microphone-driven visuals: vocalize and the room responds with light. Loudness =
 size/brightness, pitch = colour/height. Visual modes: bloom (a glow that swells), ripples,
