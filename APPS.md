@@ -23,7 +23,7 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
 - Mic apps require the room's external microphone and never output the mic signal to the
   speakers unless the app is explicitly designed for it (feedback risk).
 
-## Custom song import (framework feature, planned)
+## Custom song import (framework feature) ✅ BUILT
 
 Therapists should be able to add their own songs to the shared library (`songs.js` powers Song
 Grid, Big Switch, Echo Bird, and Music Bubbles' song mode). Import format: **ABC notation** —
@@ -171,7 +171,7 @@ chirps for birds; the existing pad voice for the drone in the current key) — n
 
 ---
 
-## 9. 🦜 Echo Bird — `echo_bird.html` (S/M)
+## 9. 🦜 Echo Bird — `echo_bird.html` ✅ BUILT
 
 **Concept.** Call-and-response on the note grid. The app (a friendly bird character) plays a
 short phrase — 2–4 notes, cells lighting as they sound — then waits. The student replies on the

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Echo Bird – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="songs.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Echo Bird — call-and-response on the note grid. A friendly bird plays a short
+   phrase (cells light as it sounds), then waits for the student's reply. In Free
+   mode ANY reply is celebrated (a matching one gets the big shimmer); in Copycat
+   mode the called cells stay haloed and matching them in order triggers the
+   celebration — stray notes still sound and are never punished. Calls come from
+   made-up tunes in the current scale or step through a real song phrase by
+   phrase (songs.js — custom ABC imports included).
+
+   The classic music-therapy turn-taking interaction: the app models a call, the
+   student answers, the bird always responds warmly. No fail states, no timers —
+   the bird waits forever.
+*/
+const Anim = (() => {
+
+  const SONGS = window.MUSIC_SONGS;   // shared library — see songs.js
+  const FROM_OPTS={random:{label:'🎲 Made-up tunes'},song:{label:'🎵 A song'}};
+  const GAME_OPTS={free:{label:'💬 Any reply is great'},copy:{label:'🎯 Copy the call'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  // state: idle → calling (bird plays) → waiting (student replies) → after (bird responds) → calling …
+  let state='idle', convo=false;
+  let call=[], callPos=0, wait=0;      // current call as [[col,beats],...]
+  let reply=[], copyPos=0;
+  let songPos=0;                        // song mode: how far through the song the calls have got
+  let ctx=null, birdEl=null, ringEl=null, progEl=null;
+
+  function song(){ return SONGS[SETTINGS.song]||SONGS.twinkle; }
+  function callBpm(){ return SETTINGS.callFrom==='song' ? song().bpm : 100; }
+  function beatSecs(b){ return b*(60/callBpm())/(SETTINGS.tempo||1); }
+  function cellEl(c){ return document.querySelector('[data-cell="'+c+'-0"]'); }
+  function setProgress(){
+    if(progEl) progEl.style.width=(SETTINGS.callFrom==='song' ? songPos/song().notes.length*100 : 0)+'%';
+  }
+  function setBird(s){
+    if(birdEl) birdEl.dataset.s=s;
+    if(ringEl) ringEl.classList.toggle('on', s==='waiting');
+  }
+  function clearHalos(){
+    document.querySelectorAll('.band.ebNext,.band.ebPart').forEach(d=>d.classList.remove('ebNext','ebPart'));
+  }
+  function showHalos(){
+    clearHalos();
+    if(SETTINGS.birdMode!=='copy' || state!=='waiting') return;
+    for(let k=copyPos;k<call.length;k++){ const d=cellEl(call[k][0]); if(d) d.classList.add('ebPart'); }
+    const nx=cellEl(call[copyPos]&&call[copyPos][0]); if(nx){ nx.classList.remove('ebPart'); nx.classList.add('ebNext'); }
+  }
+  function spawnBirdNote(col){
+    if(!birdEl) return;
+    const n=document.createElement('div'); n.className='ebNote'; n.textContent='♪';
+    n.style.color='rgb('+bandRGB255(col).join(',')+')';
+    n.style.left='calc(50% + '+((Math.random()*10-5)|0)+'vh)';
+    n.style.top='9vh';
+    n.style.setProperty('--dx',((Math.random()*8-4)|0)+'vh');
+    document.body.appendChild(n);
+    setTimeout(()=>n.remove(),1500);
+  }
+  function birdNote(col){
+    pluckNote((col+0.5)/Math.max(1,NOTES.length), 0.5, 1);
+    flashCell(col,0); fxCell(col,0); spawnBirdNote(col);
+  }
+
+  // ── call generation ──
+  function makeRandomCall(){
+    const n=NOTES.length, len=Math.max(1,Math.round(SETTINGS.phraseLen)||3);
+    let c=Math.floor(Math.random()*n);
+    const out=[[c,1]];
+    for(let k=1;k<len;k++){
+      const step=[-2,-1,-1,1,1,2][Math.floor(Math.random()*6)];
+      c=Math.max(0,Math.min(n-1,c+step));
+      out.push([c,1]);
+    }
+    out[out.length-1][1]=1.5;   // a slightly held last note reads as "phrase over, your turn"
+    return out;
+  }
+  function makeSongCall(){
+    const notes=song().notes, len=Math.max(1,Math.round(SETTINGS.phraseLen)||3);
+    return notes.slice(songPos, Math.min(songPos+len, notes.length)).map(n=>n.slice());
+  }
+  function startCall(fresh){
+    if(fresh!==false) call = SETTINGS.callFrom==='song' ? makeSongCall() : makeRandomCall();
+    if(!call.length){ songPos=0; call=makeSongCall(); }
+    reply=[]; copyPos=0; clearHalos();
+    state='calling'; callPos=0; wait=0.6;
+    setBird('calling'); getAudio(); pokeSim(); refreshRailButtons();
+  }
+  function toWaiting(){ state='waiting'; setBird('waiting'); showHalos(); }
+  function stopConvo(){ convo=false; state='idle'; clearHalos(); setBird('idle'); refreshRailButtons(); }
+
+  // ── the bird's responses (always warm — the only variable is HOW celebratory) ──
+  function nextCall(delay){
+    setTimeout(()=>{ if(convo) startCall(); }, delay||400);
+  }
+  function success(){
+    state='after'; clearHalos(); setBird('happy'); pokeSim();
+    call.forEach((n,k)=>setTimeout(()=>{ fxCell(n[0],0); flashCell(n[0],0);
+      pluckNote((n[0]+0.5)/Math.max(1,NOTES.length),0.65,0.6); spawnBirdNote(n[0]); }, 200+k*120));
+    let extra=200+call.length*120+900;
+    if(SETTINGS.callFrom==='song'){
+      songPos+=call.length; setProgress();
+      if(songPos>=song().notes.length){          // whole song answered — the big one
+        songPos=0;
+        const s=NOTES.length;
+        setTimeout(()=>{ for(let i2=0;i2<s;i2++) setTimeout(()=>{ fxCell(i2,0); flashCell(i2,0);
+          pluckNote((i2+0.5)/s,0.5,0.5); }, i2*130); }, extra);
+        extra+=s*130+1200;
+        setTimeout(setProgress, extra);
+      }
+    }
+    nextCall(extra);
+  }
+  function warm(){
+    state='after'; setBird('happy'); pokeSim();
+    // a gentle appreciative chirp — different from the match shimmer but still a reward
+    pluckNote(0.7,0.85,0.35); setTimeout(()=>pluckNote(0.85,0.9,0.3),140);
+    nextCall(1100);
+  }
+  function handleReply(col){
+    reply.push(col);
+    if(SETTINGS.birdMode==='copy'){
+      if(call[copyPos] && col===call[copyPos][0]){
+        copyPos++;
+        if(copyPos>=call.length) success(); else showHalos();
+      }
+      return;   // stray notes: heard, lit, never wrong — the halo just keeps waiting
+    }
+    if(reply.length>=call.length){
+      const match = call.every((n,k)=>reply[k]===n[0]);
+      if(match) success(); else warm();
+    }
+  }
+
+  function applySetup(){
+    stopConvo();
+    songPos=0;
+    if(SETTINGS.callFrom==='song'){
+      if(song().scaleHint && SG_SCALES[song().scaleHint]) SETTINGS.scale=song().scaleHint;
+      SETTINGS.noteCount=song().span;
+    }
+    SETTINGS.yAxis='none'; SETTINGS.mode='notes';
+    saveSettings(); refreshMusic(); setProgress();
+  }
+
+  return {
+    sectionLabel:'Echo Bird',
+    lockMode:'notes',
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🦜 Bird', sound:'🎸 Instrument' },
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', birdMode:'free', callFrom:'random', phraseLen:3, tempo:1.0,
+      song:'twinkle', pressFx:'bloom', mode:'notes', paint:false, yAxis:'none',
+      zoneLook:'tint', colorMode:'note', scale:'major', noteCount:5, showLabels:true },
+    schema:[],
+    railButtons:[
+      { id:'ebplay',
+        icon:()=>convo?'⏸':'▶',
+        title:()=>convo?'Pause the bird':'Start the bird',
+        active:()=>convo,
+        onClick(){ if(convo) stopConvo(); else { convo=true; startCall(); } }},
+      { id:'ebagain', icon:()=>'🔁', title:()=>'Hear the call again',
+        onClick(){ if(convo && call.length && state==='waiting') startCall(false); }},
+    ],
+    // 🦜 Bird tab — the conversation controls
+    buildInstrument(el){
+      el.appendChild(makeChips('Bird game','birdMode',GAME_OPTS,()=>{ clearHalos(); showHalos(); }));
+      el.appendChild(makeChips('Calls come from','callFrom',FROM_OPTS,()=>{ applySetup(); buildInstrumentPanel(); }));
+      if(SETTINGS.callFrom==='song')
+        el.appendChild(makeChips('Song','song',SONGS,applySetup));
+      el.appendChild(makeSlider({key:'phraseLen',label:'Notes per call',min:1,max:5,step:1,dp:0,
+        onChange:()=>{ if(state!=='idle') stopConvo(); }}));
+      el.appendChild(makeSlider({key:'tempo',label:'Bird speed',min:0.4,max:1.6,step:0.05,dp:2}));
+      if(SETTINGS.callFrom!=='song')
+        el.appendChild(makeSlider({key:'noteCount',label:'Number of keys',min:3,max:8,step:1,dp:0,
+          onChange:()=>{ stopConvo(); refreshMusic(); }}));
+      if(SETTINGS.callFrom==='song')
+        el.appendChild(makeSongImportUI(()=>{ applySetup(); buildInstrumentPanel(); }));
+    },
+    // 🎸 Instrument tab — tuning on top of voice/effects/volume
+    soundExtras(el){
+      el.appendChild(makeChips('Scale','scale',SG_SCALES,refreshMusic));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
+      el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    onCell(col,row){
+      fxCell(col,0);
+      if(state==='waiting'){ handleReply(col); return; }
+      // first touch wakes the bird — no button needed once the screen is locked
+      if(state==='idle' && !convo){ convo=true; refreshRailButtons();
+        setTimeout(()=>{ if(convo && state==='idle') startCall(); }, 800); }
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('ebCss')){
+        const st=document.createElement('style'); st.id='ebCss';
+        st.textContent=
+          '#ebBird{position:fixed;top:1.5vh;left:50%;transform:translateX(-50%);font-size:10vh;'+
+            'line-height:1;z-index:5;pointer-events:none;'+
+            'filter:drop-shadow(0 0 2.5vh rgba(255,255,255,0.28))}'+
+          '#ebBird .b{display:inline-block}'+
+          '#ebBird[data-s="idle"] .b{animation:ebSway 3.2s ease-in-out infinite}'+
+          '#ebBird[data-s="calling"] .b{animation:ebBob 0.5s ease-in-out infinite}'+
+          '#ebBird[data-s="waiting"] .b{animation:ebSway 1.5s ease-in-out infinite}'+
+          '#ebBird[data-s="happy"] .b{animation:ebHop 0.45s ease-in-out 3}'+
+          '@keyframes ebBob{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-1.6vh) rotate(4deg)}}'+
+          '@keyframes ebSway{0%,100%{transform:rotate(-5deg)}50%{transform:rotate(5deg)}}'+
+          '@keyframes ebHop{0%,100%{transform:translateY(0) scale(1)}45%{transform:translateY(-3vh) scale(1.12)}}'+
+          '#ebRing{position:fixed;top:0.4vh;left:50%;width:13vh;height:13vh;margin-left:-6.5vh;'+
+            'border-radius:50%;z-index:4;pointer-events:none;opacity:0;'+
+            'border:0.7vh solid rgba(125,255,176,0.8);box-shadow:0 0 4vh rgba(125,255,176,0.45)}'+
+          '#ebRing.on{animation:ebRingPulse 1.4s ease-in-out infinite}'+
+          '@keyframes ebRingPulse{0%,100%{opacity:0.15;transform:scale(0.92)}50%{opacity:0.85;transform:scale(1.05)}}'+
+          '.ebNote{position:fixed;z-index:5;font-size:4.5vh;pointer-events:none;'+
+            'text-shadow:0 0 1.5vh rgba(255,255,255,0.4);animation:ebFloat 1.4s ease-out forwards}'+
+          '@keyframes ebFloat{0%{opacity:0.95;transform:translate(0,0) scale(1)}'+
+            '100%{opacity:0;transform:translate(var(--dx,0px),-16vh) scale(1.35)}}'+
+          '.band.ebPart{outline:2px dashed rgba(255,255,255,0.5);outline-offset:-6px}'+
+          '.band.ebNext{outline:3px solid rgba(255,255,255,0.95);outline-offset:-4px;'+
+            'background:rgba(var(--c),0.30)!important;animation:ebPulse 1.1s ease-in-out infinite}'+
+          '@keyframes ebPulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.9)}}'+
+          '#ebProgress{position:fixed;top:0;left:0;height:6px;width:0;z-index:6;'+
+            'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+            'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+      }
+      if(!birdEl){
+        birdEl=document.createElement('div'); birdEl.id='ebBird'; birdEl.dataset.s='idle';
+        birdEl.innerHTML='<span class="b">🦜</span>';
+        document.body.appendChild(birdEl);
+      }
+      if(!ringEl){ ringEl=document.createElement('div'); ringEl.id='ebRing'; document.body.appendChild(ringEl); }
+      if(!progEl){ progEl=document.createElement('div'); progEl.id='ebProgress'; document.body.appendChild(progEl); }
+      this.reset();
+      applySetup();
+    },
+    resize(w,h){ this.reset(); },   // a 2D canvas clears when resized
+    splat(){},                      // no painting in this app
+    frame(dt){
+      if(ctx){
+        ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+      }
+      if(state==='calling'){
+        pokeSim();
+        wait-=dt;
+        while(state==='calling' && wait<=0){
+          if(callPos<call.length){
+            const n=call[callPos];
+            birdNote(n[0]); callPos++;
+            wait+=beatSecs(n[1]);
+          } else toWaiting();
+        }
+      }
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>
