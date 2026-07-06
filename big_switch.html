@@ -51,6 +51,7 @@ const Anim = (() => {
     flashNote(col,beats);
   }
   function applySong(){
+    if(song().scaleHint && SG_SCALES[song().scaleHint]) SETTINGS.scale=song().scaleHint;
     SETTINGS.noteCount=song().span;
     SETTINGS.yAxis='none'; SETTINGS.mode='notes'; SETTINGS.zoneLook='off';
     saveSettings(); refreshMusic();
@@ -115,6 +116,7 @@ const Anim = (() => {
       if(SETTINGS.granularity==='phrase')
         el.appendChild(makeSlider({key:'tempo',label:'Phrase speed',min:0.4,max:1.6,step:0.05,dp:2}));
       el.appendChild(makeToggle('Start again when finished','loopSong'));
+      el.appendChild(makeSongImportUI(()=>{ applySong(); buildInstrumentPanel(); }));
     },
     // 🎸 Instrument tab — tuning on top of voice/effects/volume
     soundExtras(el){
