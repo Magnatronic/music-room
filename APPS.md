@@ -146,7 +146,7 @@ so students can't accidentally erase pads.
 
 ---
 
-## 8. 🌧️ Soundscape Mixer — `soundscape.html` (S/M)
+## 8. 🌧️ Soundscape Mixer — `soundscape.html` ✅ BUILT
 
 **Concept.** Big illustrated tiles (rain, ocean, birdsong, wind, campfire, soft chord drone,
 heartbeat). Touching a tile fades its loop in/out; the tile glows while active. The visuals

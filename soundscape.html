@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Soundscape Mixer – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+.band.on{animation:ssOn 3s ease-in-out infinite}
+@keyframes ssOn{0%,100%{box-shadow:inset 0 0 6vmin 0 rgba(var(--c),0.55)}50%{box-shadow:inset 0 0 10vmin 0 rgba(var(--c),0.25)}}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Soundscape Mixer — the regulation/relaxation end of the sensory diet.
+   Big tiles (rain, ocean, birds, campfire, wind, chord drone, heartbeat,
+   chimes); touching a tile fades its loop in, touching again fades it out.
+   The tile glows while active and the visuals blend the active layers
+   (rain streaks + ember glow + ...). Students compose their own calming
+   environment; the 🌙 rail button fades everything out for wind-down.
+
+   Every sound is synthesized live (filtered-noise recipes, scheduled chirps
+   and thumps, a pad drone in the chosen key) — no samples, fully offline.
+   Idle layers cost nothing: nodes exist only while a tile is on.
+*/
+const Anim = (() => {
+
+  // ── shared noise ──
+  let noiseBuf=null;
+  function mkNoise(ac){
+    if(!noiseBuf){
+      noiseBuf=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate);
+      const d=noiseBuf.getChannelData(0);
+      for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    }
+    const s=ac.createBufferSource(); s.buffer=noiseBuf; s.loop=true; return s;
+  }
+  function lfo(ac,rate,depth,param){
+    const o=ac.createOscillator(); o.frequency.value=rate;
+    const g=ac.createGain(); g.gain.value=depth;
+    o.connect(g); g.connect(param); o.start();
+    return ()=>{ try{o.stop();o.disconnect();g.disconnect();}catch(e){} };
+  }
+
+  // visual one-shot events fed by the audio schedulers
+  let birdsV=[], twinkles=[], heartPulse=0;
+
+  // ── the layers: make(ac,out) wires the sound and returns a stop() ──
+  // `level` balances the layers against each other at the outer fade gain.
+  const LAYERS={
+    rain:{icon:'🌧️',name:'Rain',color:[110,160,230],level:0.35,make(ac,out){
+      const n=mkNoise(ac);
+      const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=500;
+      const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=4200;
+      n.connect(hp); hp.connect(lp); lp.connect(out); n.start();
+      return ()=>{ try{n.stop();n.disconnect();hp.disconnect();lp.disconnect();}catch(e){} };
+    }},
+    ocean:{icon:'🌊',name:'Ocean',color:[28,169,169],level:0.55,make(ac,out){
+      const n=mkNoise(ac);
+      const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=520;
+      const g=ac.createGain(); g.gain.value=0.55;
+      n.connect(lp); lp.connect(g); g.connect(out); n.start();
+      const l1=lfo(ac,0.07,0.35,g.gain), l2=lfo(ac,0.07,260,lp.frequency);
+      return ()=>{ l1(); l2(); try{n.stop();n.disconnect();lp.disconnect();g.disconnect();}catch(e){} };
+    }},
+    wind:{icon:'🌬️',name:'Wind',color:[185,200,215],level:0.4,make(ac,out){
+      const n=mkNoise(ac);
+      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=520; bp.Q.value=1.1;
+      const g=ac.createGain(); g.gain.value=0.7;
+      n.connect(bp); bp.connect(g); g.connect(out); n.start();
+      const l1=lfo(ac,0.06,260,bp.frequency), l2=lfo(ac,0.21,90,bp.frequency), l3=lfo(ac,0.1,0.2,g.gain);
+      return ()=>{ l1(); l2(); l3(); try{n.stop();n.disconnect();bp.disconnect();g.disconnect();}catch(e){} };
+    }},
+    birds:{icon:'🐦',name:'Birdsong',color:[150,210,80],level:0.5,make(ac,out){
+      let on=true,tm=null;
+      const chirp=()=>{
+        if(!on) return;
+        const t0=ac.currentTime+0.05;
+        const o=ac.createOscillator(); o.type='sine';
+        const base=2000+Math.random()*2200;
+        o.frequency.setValueAtTime(base,t0);
+        let tt=t0;
+        const hops=2+Math.floor(Math.random()*3);
+        for(let i=0;i<hops;i++){ tt+=0.04+Math.random()*0.06;
+          o.frequency.exponentialRampToValueAtTime(base*(0.8+Math.random()*0.5),tt); }
+        const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
+        g.gain.linearRampToValueAtTime(0.35,t0+0.02);
+        g.gain.exponentialRampToValueAtTime(0.0008,tt+0.08);
+        const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.6-0.8;
+        o.connect(g); g.connect(p); p.connect(out);
+        o.start(t0); o.stop(tt+0.15);
+        birdsV.push({x:0.1+Math.random()*0.8,y:0.15+Math.random()*0.35,age:0}); pokeSim();
+        tm=setTimeout(chirp,900+Math.random()*3500);
+      };
+      tm=setTimeout(chirp,300);
+      return ()=>{ on=false; clearTimeout(tm); };
+    }},
+    fire:{icon:'🔥',name:'Campfire',color:[240,130,40],level:0.5,make(ac,out){
+      const n=mkNoise(ac);
+      const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=200;
+      const g=ac.createGain(); g.gain.value=0.7;
+      n.connect(lp); lp.connect(g); g.connect(out); n.start();
+      const l1=lfo(ac,0.35,0.2,g.gain);
+      let on=true,tm=null;
+      const crackle=()=>{
+        if(!on) return;
+        const t0=ac.currentTime+0.03;
+        const nb=mkNoise(ac);
+        const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1800+Math.random()*1600;
+        const cg=ac.createGain(); cg.gain.setValueAtTime(0.0001,t0);
+        cg.gain.linearRampToValueAtTime(0.10+Math.random()*0.20,t0+0.004);
+        cg.gain.exponentialRampToValueAtTime(0.0008,t0+0.05+Math.random()*0.04);
+        nb.connect(hp); hp.connect(cg); cg.connect(out);
+        nb.start(t0); nb.stop(t0+0.12);
+        tm=setTimeout(crackle,120+Math.random()*550);
+      };
+      crackle();
+      return ()=>{ on=false; clearTimeout(tm); l1();
+        try{n.stop();n.disconnect();lp.disconnect();g.disconnect();}catch(e){} };
+    }},
+    drone:{icon:'🎶',name:'Soft drone',color:[125,79,181],level:0.30,make(ac,out){
+      buildScale();
+      const f=(NOTES[0]?NOTES[0].freq:261.6)/2;   // root of the chosen key, one octave down
+      const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=900;
+      const g=ac.createGain(); g.gain.value=0.8;
+      lp.connect(g); g.connect(out);
+      const oscs=[[f,'triangle',1],[f*1.5,'sine',0.55],[f*2,'sine',0.4],[f*1.006,'triangle',0.5]]
+        .map(sp=>{ const o=ac.createOscillator(); o.type=sp[1]; o.frequency.value=sp[0];
+          const og=ac.createGain(); og.gain.value=sp[2];
+          o.connect(og); og.connect(lp); o.start(); return {o,og}; });
+      const l1=lfo(ac,0.09,0.14,g.gain);
+      return ()=>{ l1(); oscs.forEach(x=>{try{x.o.stop();x.o.disconnect();x.og.disconnect();}catch(e){}});
+        try{lp.disconnect();g.disconnect();}catch(e){} };
+    }},
+    heartbeat:{icon:'💓',name:'Heartbeat',color:[226,70,90],level:0.65,make(ac,out){
+      let on=true,tm=null;
+      const thump=(t0,vol)=>{
+        const o=ac.createOscillator(); o.type='sine';
+        o.frequency.setValueAtTime(68,t0); o.frequency.exponentialRampToValueAtTime(42,t0+0.14);
+        const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
+        g.gain.linearRampToValueAtTime(vol,t0+0.015);
+        g.gain.exponentialRampToValueAtTime(0.0008,t0+0.22);
+        o.connect(g); g.connect(out); o.start(t0); o.stop(t0+0.3);
+      };
+      const beat=()=>{
+        if(!on) return;
+        const t0=ac.currentTime+0.06;
+        thump(t0,1.0); thump(t0+0.30,0.6);
+        setTimeout(()=>{ heartPulse=1; pokeSim(); },60);
+        tm=setTimeout(beat,1100);
+      };
+      beat();
+      return ()=>{ on=false; clearTimeout(tm); };
+    }},
+    chimes:{icon:'🎐',name:'Chimes',color:[240,220,140],level:0.5,make(ac,out){
+      let on=true,tm=null;
+      const ding=()=>{
+        if(!on) return;
+        buildScale();
+        const note=NOTES[Math.floor(Math.random()*NOTES.length)]||{freq:523};
+        const f=note.freq*2, t0=ac.currentTime+0.05;
+        const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.4-0.7; p.connect(out);
+        [[1,0.30],[2.76,0.10]].forEach(sp=>{
+          const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f*sp[0];
+          const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
+          g.gain.linearRampToValueAtTime(sp[1],t0+0.01);
+          g.gain.exponentialRampToValueAtTime(0.0008,t0+2.4);
+          o.connect(g); g.connect(p); o.start(t0); o.stop(t0+2.6);
+        });
+        twinkles.push({x:0.15+Math.random()*0.7,y:0.1+Math.random()*0.5,age:0}); pokeSim();
+        tm=setTimeout(ding,2500+Math.random()*5500);
+      };
+      tm=setTimeout(ding,500);
+      return ()=>{ on=false; clearTimeout(tm); };
+    }},
+  };
+  const ALLKEYS=Object.keys(LAYERS);
+  const DEFAULT_TILES=['rain','ocean','birds','fire','wind','drone','heartbeat','chimes'];
+
+  let ctx=null, t=0, active={}, drops=[], sparks=[];
+
+  // ── fade in/out ──
+  function fadeTC(){ return Math.max(0.4,Math.min(4,SETTINGS.fade||1.2))/3; }
+  function isOn(key){ return !!(active[key]&&!active[key].off); }
+  function toggle(key){
+    const L=LAYERS[key]; if(!L) return;
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    const a=active[key];
+    if(a&&!a.off){                                   // fade out, then tear down
+      a.off=true;
+      a.gain.gain.setTargetAtTime(0,ac.currentTime,fadeTC());
+      const entry=a;
+      a.cleanupT=setTimeout(()=>{
+        if(active[key]===entry){ entry.stop(); delete active[key]; restyle(); }
+      },fadeTC()*7000+300);
+    } else if(a&&a.off){                             // caught mid-fade-out: bring it back
+      clearTimeout(a.cleanupT); a.off=false;
+      a.gain.gain.setTargetAtTime(L.level,ac.currentTime,fadeTC());
+    } else {
+      const g=ac.createGain(); g.gain.value=0;
+      const stop=L.make(ac,g);
+      g.connect(masterGain);
+      g.gain.setTargetAtTime(L.level,ac.currentTime+0.02,fadeTC());
+      active[key]={gain:g,off:false,stop(){ try{stop();}catch(e){} try{g.disconnect();}catch(e){} }};
+    }
+    pokeSim(); restyle();
+  }
+  function fadeAllOut(){ ALLKEYS.forEach(k=>{ if(isOn(k)) toggle(k); }); }
+  function intensity(key){
+    const a=active[key]; if(!a) return 0;
+    return Math.max(0,Math.min(1,a.gain.gain.value/LAYERS[key].level));
+  }
+
+  // ── tiles on the framework grid (sampler pattern) ──
+  const TC={'2':{label:'2 big',cols:2,rows:1},'4':{label:'4',cols:2,rows:2},
+            '6':{label:'6',cols:3,rows:2},'8':{label:'8',cols:4,rows:2}};
+  function layout(){ return TC[SETTINGS.tileCount]||TC['4']; }
+  function tileCount(){ const L=layout(); return L.cols*L.rows; }
+  function tileSounds(){
+    const arr=Array.isArray(SETTINGS.tileSounds)?SETTINGS.tileSounds:DEFAULT_TILES;
+    return arr.slice(0,tileCount());
+  }
+  function tileOf(col,row){ const rows=gridRowCount(); return (rows-1-row)*NOTES.length+col; }
+  function applyLayout(){
+    const L=layout();
+    SETTINGS.noteCount=L.cols;
+    if(L.rows>1){ SETTINGS.yAxis='octaves'; SETTINGS.octaveRows=String(L.rows); }
+    else SETTINGS.yAxis='none';
+    saveSettings(); refreshMusic(); restyle();
+  }
+  function restyle(){
+    const rows=gridRowCount(), cols=NOTES.length, snd=tileSounds();
+    bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
+      const cr=d.dataset.cell.split('-'), idx=(rows-1-cr[1])*cols+ +cr[0];
+      const key=snd[idx], L=LAYERS[key];
+      d._styled=true;
+      if(!L) return;
+      d.style.setProperty('--c',L.color.join(','));
+      d.style.setProperty('--a',isOn(key)?'0.30':'0.08');
+      d.classList.toggle('on',isOn(key));
+      const l=d.querySelector('.lbl');
+      if(l) l.textContent=L.icon;
+    });
+  }
+
+  // ── blended visuals, one effect per active layer ──
+  function alpha(c,a){ return 'rgba('+c[0]+','+c[1]+','+c[2]+','+a.toFixed(3)+')'; }
+  function drawRain(W,H,dt,I){
+    const cap=activeQuality()==='high'?160:activeQuality()==='med'?100:50;
+    for(let i=0;i<I*8&&drops.length<cap;i++)
+      drops.push({x:Math.random()*W,y:-20,v:(0.6+Math.random()*0.5)*H,l:H*(0.03+Math.random()*0.03)});
+    ctx.strokeStyle=alpha(LAYERS.rain.color,0.30*I); ctx.lineWidth=Math.max(1,H*0.0016);
+    ctx.beginPath();
+    drops=drops.filter(p=>{ p.y+=p.v*dt;
+      if(p.y>H+20) return false;
+      ctx.moveTo(p.x,p.y); ctx.lineTo(p.x-p.l*0.12,p.y+p.l); return true; });
+    ctx.stroke();
+  }
+  function drawOcean(W,H,I){
+    for(let b=0;b<2;b++){
+      const yc=H*(0.84+b*0.07), amp=H*0.025*I*(1+b*0.4);
+      ctx.strokeStyle=alpha(LAYERS.ocean.color,0.22*I*(1-b*0.3));
+      ctx.lineWidth=H*0.02;
+      ctx.beginPath();
+      for(let k=0;k<=24;k++){ const xt=k/24;
+        const y=yc+Math.sin(xt*4.5+t*(0.5+b*0.2)+b*2)*amp;
+        if(k===0) ctx.moveTo(xt*W,y); else ctx.lineTo(xt*W,y); }
+      ctx.stroke();
+    }
+  }
+  function drawWind(W,H,I){
+    for(let b=0;b<3;b++){
+      const yc=H*(0.25+b*0.18), amp=H*0.02*(1+b*0.3);
+      ctx.strokeStyle=alpha(LAYERS.wind.color,(0.05+0.10*I)*(1-b*0.2));
+      ctx.lineWidth=H*0.008;
+      ctx.beginPath();
+      for(let k=0;k<=24;k++){ const xt=k/24;
+        const y=yc+Math.sin(xt*3+t*(0.35+b*0.12)+b*2.4)*amp;
+        if(k===0) ctx.moveTo(xt*W,y); else ctx.lineTo(xt*W,y); }
+      ctx.stroke();
+    }
+  }
+  function drawFire(W,H,dt,I){
+    const flick=0.75+0.25*Math.sin(t*9+Math.sin(t*23)*2);
+    const g=ctx.createRadialGradient(W/2,H*1.05,0,W/2,H*1.05,H*0.55);
+    g.addColorStop(0,alpha(LAYERS.fire.color,0.30*I*flick));
+    g.addColorStop(1,alpha(LAYERS.fire.color,0));
+    ctx.fillStyle=g; ctx.fillRect(0,H*0.4,W,H*0.6);
+    const cap=activeQuality()==='low'?30:80;
+    for(let i=0;i<I*2&&sparks.length<cap;i++)
+      sparks.push({x:W/2+(Math.random()-0.5)*W*0.35,y:H,vy:-(0.12+Math.random()*0.22)*H,life:1,s:Math.random()*10});
+    sparks=sparks.filter(p=>{ p.y+=p.vy*dt; p.x+=Math.sin(t*6+p.s)*H*0.05*dt; p.life-=dt*0.55;
+      if(p.life<=0) return false;
+      ctx.fillStyle=alpha(LAYERS.fire.color,p.life*0.55*I);
+      ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(1.5,H*0.003),0,Math.PI*2); ctx.fill(); return true; });
+  }
+  function drawDrone(W,H,I){
+    const R=Math.min(W,H)*(0.28+0.05*Math.sin(t*0.5));
+    const g=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,R);
+    g.addColorStop(0,alpha(LAYERS.drone.color,0.16*I));
+    g.addColorStop(1,alpha(LAYERS.drone.color,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(W/2,H/2,R,0,Math.PI*2); ctx.fill();
+  }
+  function drawHeart(W,H,dt,I){
+    heartPulse*=Math.pow(0.02,dt);
+    if(heartPulse<0.01) return;
+    ctx.strokeStyle=alpha(LAYERS.heartbeat.color,heartPulse*0.4*I);
+    ctx.lineWidth=H*0.02;
+    ctx.beginPath();
+    ctx.arc(W/2,H/2,Math.min(W,H)*(0.30+0.08*(1-heartPulse)),0,Math.PI*2);
+    ctx.stroke();
+  }
+  function drawBirdsV(W,H,dt,I){
+    birdsV=birdsV.filter(b=>{ b.age+=dt/1.4;
+      if(b.age>=1) return false;
+      const a=(1-b.age)*0.7*I, x=b.x*W+b.age*W*0.06, y=b.y*H-b.age*H*0.05;
+      ctx.strokeStyle=alpha(LAYERS.birds.color,a); ctx.lineWidth=Math.max(1.5,H*0.004);
+      const w=H*0.012*(1+Math.sin(b.age*25)*0.4);
+      ctx.beginPath(); ctx.moveTo(x-w,y); ctx.quadraticCurveTo(x,y-w,x,y);
+      ctx.quadraticCurveTo(x,y-w,x+w,y); ctx.stroke(); return true; });
+  }
+  function drawTwinkles(W,H,dt,I){
+    twinkles=twinkles.filter(s=>{ s.age+=dt/1.8;
+      if(s.age>=1) return false;
+      const a=(1-s.age)*0.8*I, x=s.x*W, y=s.y*H, r=H*0.014*(1-s.age*0.5);
+      ctx.strokeStyle=alpha(LAYERS.chimes.color,a); ctx.lineWidth=Math.max(1,H*0.0025);
+      ctx.beginPath();
+      ctx.moveTo(x-r,y); ctx.lineTo(x+r,y); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r);
+      ctx.stroke(); return true; });
+  }
+
+  return {
+    sectionLabel:'Soundscape',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🌿 Scene', sound:'🎛️ Sound' },
+    themes:{ calm:{label:'🌿 Calm', colors:[[0.4,0.7,0.9],[0.2,0.7,0.7],[0.6,0.8,0.4],[0.9,0.6,0.3],[0.6,0.5,0.8]]} },
+    defaults:{ theme:'calm', tileCount:'4', fade:1.2, visFx:true,
+      tileSounds:DEFAULT_TILES,
+      mode:'notes', paint:false, yAxis:'octaves', octaveRows:'2', noteCount:2,
+      zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major', pressFx:'none' },
+    schema:[],
+    railButtons:[
+      { id:'ssmoon', icon:()=>'🌙', title:()=>'Fade every sound out (wind-down)',
+        onClick(){ fadeAllOut(); } },
+    ],
+    _dbg(){ const o={}; ALLKEYS.forEach(k=>{ if(active[k]) o[k]=+active[k].gain.gain.value.toFixed(3); });
+      return {on:ALLKEYS.filter(isOn),gains:o}; },
+    // 🌿 Scene tab
+    buildInstrument(el){
+      const note=document.createElement('div');
+      note.style.cssText='color:rgba(255,255,255,0.5);font:13px/1.5 sans-serif;margin-bottom:12px';
+      note.textContent='Touch a tile to fade its sound in; touch it again to fade it out. The 🌙 button fades everything out.';
+      el.appendChild(note);
+      el.appendChild(makeChips('How many tiles','tileCount',TC,applyLayout));
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Tile sounds (tap to change)'; el.appendChild(h);
+      tileSounds().forEach((cur,i)=>{
+        const row=document.createElement('div'); row.className='chips';
+        ALLKEYS.forEach(k=>{
+          const c=document.createElement('div'); c.className='chip'+(k===cur?' active':'');
+          c.textContent=LAYERS[k].icon; c.title=LAYERS[k].name;
+          c.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+            const full=(Array.isArray(SETTINGS.tileSounds)?SETTINGS.tileSounds:DEFAULT_TILES).slice();
+            full[i]=k; SETTINGS.tileSounds=full; saveSettings();
+            restyle(); buildInstrumentPanel(); });
+          row.appendChild(c);
+        });
+        el.appendChild(row);
+      });
+    },
+    // 🎛️ Sound tab
+    buildSound(el){
+      el.appendChild(makeSlider({key:'fade',label:'Fade in/out time (seconds)',min:0.4,max:4,step:0.1,dp:1}));
+      const kh=document.createElement('div'); kh.className='sectn'; kh.textContent='Drone & chimes key (used at the next fade-in)'; el.appendChild(kh);
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Moving pictures with the sounds','visFx'));
+      el.appendChild(makeToggle('Icons on tiles','showLabels',()=>{ buildBands(); restyle(); }));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    onCell(col,row){
+      pokeSim();
+      const key=tileSounds()[tileOf(col,row)];
+      if(key) toggle(key);
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      applyLayout();
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      const first=bandsEl.firstChild;
+      if(first&&!first._styled) restyle();
+      if(!ctx) return;
+      t+=dt;
+      const W=canvas.width,H=canvas.height;
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+',0.16)';
+      ctx.fillRect(0,0,W,H);
+      let busy=false;
+      if(SETTINGS.visFx!==false){
+        ctx.globalCompositeOperation='lighter';
+        const I={}; ALLKEYS.forEach(k=>{ I[k]=intensity(k); if(I[k]>0.01) busy=true; });
+        if(I.rain>0.01)  drawRain(W,H,dt,I.rain);
+        if(I.ocean>0.01) drawOcean(W,H,I.ocean);
+        if(I.wind>0.01)  drawWind(W,H,I.wind);
+        if(I.fire>0.01)  drawFire(W,H,dt,I.fire);
+        if(I.drone>0.01) drawDrone(W,H,I.drone);
+        if(I.heartbeat>0.001) drawHeart(W,H,dt,I.heartbeat);
+        if(I.birds>0.01) drawBirdsV(W,H,dt,I.birds);
+        if(I.chimes>0.01) drawTwinkles(W,H,dt,I.chimes);
+        ctx.globalCompositeOperation='source-over';
+      } else ALLKEYS.forEach(k=>{ if(intensity(k)>0.01) busy=true; });
+      if(busy||drops.length||sparks.length||birdsV.length||twinkles.length) pokeSim();
+    },
+    reset(){
+      if(!ctx) return;
+      drops=[]; sparks=[]; birdsV=[]; twinkles=[];
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>
