@@ -219,7 +219,7 @@ crystal — pick voice to match).
 
 ---
 
-## 11. 🫧 Music Bubbles — `bubbles.html` (M)
+## 11. 🫧 Music Bubbles — `bubbles.html` ✅ BUILT
 
 **Concept.** Bubbles drift up (or across) the screen, each tinted a Boomwhacker note colour.
 Pop one and it bursts into sparkles and sounds its note. Escaped bubbles simply recycle — no

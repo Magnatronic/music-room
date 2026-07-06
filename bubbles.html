@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Music Bubbles – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="songs.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Music Bubbles — bubbles drift across the screen, each tinted a Boomwhacker
+   note colour. Pop one (tap or sweep through it) and it bursts into sparkles
+   and sounds its note. Escaped bubbles simply recycle — no misses, no score.
+   The only app in the suite where the targets MOVE: drift speed, bubble size
+   and density are therapist controls that map directly to a student's visual
+   tracking and reach.
+
+   Song bubbles: bubbles carry the upcoming notes of a chosen song (imports
+   included); popping ANY bubble plays the next song note — the song always
+   progresses — and popping the haloed one adds extra sparkle.
+
+   Game mode (therapist-enabled, off by default): soft goals only. "Fill the
+   rainbow" counts every pop into a meter; "Pop the colour" fills it with pops
+   of the shown colour (other pops still sound and sparkle). Meter full =
+   celebration burst. No lives, no game-over, no timers.
+*/
+const Anim = (() => {
+
+  const SONGS=window.MUSIC_SONGS;
+  const MODE_OPTS={free:{label:'🫧 Free pop'},song:{label:'🎵 Song bubbles'}};
+  const GAME_OPTS={off:{label:'Off'},meter:{label:'🌈 Fill the rainbow'},colour:{label:'🎯 Pop the colour'}};
+  const DIR_OPTS={up:{label:'⬆ Floating up'},side:{label:'➡ Drifting across'},snow:{label:'⬇ Falling like snow'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  let ctx=null, bubbles=[], parts=[], time=0, spawnAcc=0, sig='';
+  let songPos=0, nextAssign=0, celebrating=0;
+  let gm=0, targetIdx=0;
+  let noiseBuf=null, progEl=null;
+  let W=0,H=0;
+
+  function song(){ return SONGS[SETTINGS.song]||SONGS.twinkle; }
+  function inSong(){ return SETTINGS.bubMode==='song'; }
+  function nCols(){ return Math.max(1,NOTES.length); }
+  function colOf(i){ return bandRGB255(i); }
+  function setProgress(){ if(progEl) progEl.style.width=(inSong()? songPos/song().notes.length*100 : 0)+'%'; }
+
+  // ── spawning / recycling ──
+  function baseR(){ return H*(0.045+SETTINGS.size*0.075)*(0.85+Math.random()*0.3); }
+  function baseV(){ return H*(0.05+SETTINGS.speed*0.16); }
+  function placeAtEdge(b){
+    const d=SETTINGS.dir, r=b.r;
+    if(d==='side'){ b.x=-r; b.y=H*(0.12+Math.random()*0.72); b.vx=baseV(); b.vy=0; }
+    else if(d==='snow'){ b.x=W*(0.06+Math.random()*0.88); b.y=-r; b.vx=0; b.vy=baseV()*0.75; }
+    else { b.x=W*(0.06+Math.random()*0.88); b.y=H+r; b.vx=0; b.vy=-baseV(); }
+  }
+  function spawn(){
+    const b={ r:baseR(), phase:Math.random()*6.28, wob:0.5+Math.random()*0.7, idx:0, pos:undefined, dead:false };
+    if(inSong()){
+      const notes=song().notes, len=notes.length;
+      if(nextAssign<songPos) nextAssign=songPos;
+      // the haloed "next note" bubble always exists or is on its way
+      let p=-1;
+      if(songPos<len && !bubbles.some(x=>x.pos===songPos)) p=songPos;
+      else if(nextAssign<len){ p=nextAssign; }
+      if(p<0) return;                      // song nearly over — no new bubbles until it wraps
+      if(p===nextAssign) nextAssign++;
+      b.pos=p; b.idx=notes[p][0];
+    } else {
+      b.idx=Math.floor(Math.random()*nCols());
+    }
+    placeAtEdge(b);
+    bubbles.push(b);
+  }
+  function targetCount(){ return Math.round(4+SETTINGS.density*8); }
+
+  // ── sound ──
+  function popNoise(nx, vel){
+    try{
+      const ac=getAudio(); if(!ac||!masterGain) return;
+      if(!noiseBuf){
+        const len=Math.floor(ac.sampleRate*0.03);
+        noiseBuf=ac.createBuffer(1,len,ac.sampleRate);
+        const d=noiseBuf.getChannelData(0);
+        for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2);
+      }
+      const t=ac.currentTime+0.012;
+      const src=ac.createBufferSource(); src.buffer=noiseBuf;
+      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=900+Math.random()*500; bp.Q.value=1;
+      const g=ac.createGain(); g.gain.value=0.07*vel;
+      const pan=ac.createStereoPanner(); pan.pan.value=(nx*2-1)*0.6;
+      src.connect(bp); bp.connect(g); g.connect(pan); pan.connect(masterGain);
+      src.start(t);
+      src.onended=()=>{ try{g.disconnect();pan.disconnect();}catch(e){} };
+    }catch(e){}
+  }
+  function playIdx(i,gain){ pluckNote((i+0.5)/nCols(), 0.5, gain!=null?gain:1); }
+
+  // ── sparkles ──
+  function burst(x,y,col,big){
+    const q=activeQuality(), cap=q==='low'?50:q==='med'?110:180;
+    const n=big?26:13;
+    parts.push({x,y,vx:0,vy:0,life:0.4,age:0,col,size:1,ring:true});
+    for(let k=0;k<n && parts.length<cap;k++){
+      const a=Math.random()*6.28, sp=(0.3+Math.random()*0.8)*(big?1.4:1)*H*0.35;
+      parts.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-H*0.06,
+        life:0.5+Math.random()*0.5,age:0,col,size:2+Math.random()*3.2});
+    }
+    pokeSim();
+  }
+  function celebrate(){
+    celebrating=1.6; pokeSim();
+    const n=nCols();
+    for(let i=0;i<n;i++) setTimeout(()=>{ playIdx(i,0.6);
+      burst(W*(i+0.5)/n, H*0.4, colOf(i), true); }, 200+i*110);
+    setTimeout(()=>playIdx(n-1,0.7), 200+n*110+150);
+  }
+
+  // ── popping ──
+  function pickTarget(){
+    if(nCols()<2) { targetIdx=0; return; }
+    let t; do{ t=Math.floor(Math.random()*nCols()); }while(t===targetIdx);
+    targetIdx=t;
+  }
+  function pop(b, vel){
+    if(b.dead) return;
+    b.dead=true;
+    const col=colOf(b.idx);
+    let extra=false;
+    if(inSong()){
+      const notes=song().notes;
+      if(songPos<notes.length){
+        playIdx(notes[songPos][0], 1);
+        extra=(b.pos===songPos);
+        songPos++;
+        setProgress();
+        if(songPos>=notes.length){        // whole song popped — celebration, then wrap
+          setTimeout(celebrate,500);
+          setTimeout(()=>{ songPos=0; nextAssign=0; bubbles.length=0; setProgress(); },2400);
+        }
+      }
+    } else {
+      playIdx(b.idx, 1);
+    }
+    popNoise(b.x/W, Math.min(1,0.4+vel*10));
+    burst(b.x,b.y,col,extra);
+    if(SETTINGS.game!=='off' && !celebrating){
+      const counts = SETTINGS.game==='meter' ||
+        (SETTINGS.game==='colour' && NOTES[b.idx] && NOTES[targetIdx] && NOTES[b.idx].pc===NOTES[targetIdx].pc);
+      if(counts){
+        gm++;
+        if(gm>=Math.round(SETTINGS.goalCount||10)){
+          gm=0; celebrate();
+          if(SETTINGS.game==='colour') setTimeout(pickTarget,2200);
+        }
+      }
+    }
+  }
+  function popAt(px,py,vel){
+    // nearest hit only — one note per tap, even where bubbles overlap
+    let best=null,bd=1e9;
+    for(const b of bubbles){
+      if(b.dead) continue;
+      const d=Math.hypot(px-b.x,py-b.y);
+      if(d<b.r*1.15+14 && d<bd){ bd=d; best=b; }
+    }
+    if(best) pop(best,vel);
+  }
+
+  function applySetup(){
+    bubbles.length=0; parts.length=0; songPos=0; nextAssign=0; gm=0; celebrating=0;
+    if(inSong()){
+      if(song().scaleHint && SG_SCALES[song().scaleHint]) SETTINGS.scale=song().scaleHint;
+      SETTINGS.noteCount=song().span;
+    }
+    SETTINGS.mode='flow'; SETTINGS.yAxis='none';
+    saveSettings(); refreshMusic(); pickTarget(); setProgress();
+  }
+  function settingsSig(){
+    return [SETTINGS.bubMode,SETTINGS.song,SETTINGS.scale,SETTINGS.rootNote,
+      SETTINGS.octave,SETTINGS.noteCount].join('|');
+  }
+
+  // ── drawing ──
+  function drawBubble(b){
+    const col=colOf(b.idx), cs='rgb('+col.join(',')+')';
+    const halo=inSong() && b.pos===songPos;
+    ctx.save();
+    if(halo && activeQuality()!=='low'){ ctx.shadowColor=cs; ctx.shadowBlur=b.r*0.8*(0.7+0.3*Math.sin(time*5)); }
+    const g=ctx.createRadialGradient(b.x-b.r*0.3,b.y-b.r*0.35,b.r*0.1,b.x,b.y,b.r);
+    g.addColorStop(0,'rgba('+col.map(v=>Math.min(255,v+120)).join(',')+',0.50)');
+    g.addColorStop(0.75,'rgba('+col.join(',')+',0.30)');
+    g.addColorStop(1,'rgba('+col.join(',')+',0.55)');
+    ctx.fillStyle=g;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.29); ctx.fill();
+    ctx.lineWidth=halo?4:2;
+    ctx.strokeStyle=halo?'rgba(255,255,255,0.95)':'rgba('+col.join(',')+',0.85)';
+    ctx.stroke();
+    // highlight
+    ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.beginPath(); ctx.ellipse(b.x-b.r*0.35,b.y-b.r*0.42,b.r*0.18,b.r*0.11,-0.6,0,6.29); ctx.fill();
+    ctx.shadowBlur=0;
+    if(SETTINGS.showLabels && NOTES[b.idx]){
+      ctx.fillStyle='rgba(255,255,255,0.9)';
+      ctx.font='700 '+Math.max(12,b.r*0.55)+'px system-ui,sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(NOTES[b.idx].label,b.x,b.y+b.r*0.06);
+    }
+    ctx.restore();
+  }
+  function drawUI(){
+    if(SETTINGS.game==='off') return;
+    const mw=W*0.34, mh=Math.max(10,H*0.02), mx=(W-mw)/2, my=H-mh*2.4;
+    ctx.fillStyle='rgba(255,255,255,0.12)';
+    ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(mx,my,mw,mh,mh/2); else ctx.rect(mx,my,mw,mh); ctx.fill();
+    const frac=Math.min(1,gm/Math.round(SETTINGS.goalCount||10));
+    if(frac>0){
+      const g=ctx.createLinearGradient(mx,0,mx+mw,0);
+      g.addColorStop(0,'#e21c1c'); g.addColorStop(0.25,'#f5d117'); g.addColorStop(0.5,'#3bb54a');
+      g.addColorStop(0.75,'#1ca9a9'); g.addColorStop(1,'#7d4fb5');
+      ctx.fillStyle=g;
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(mx,my,mw*frac,mh,mh/2); else ctx.rect(mx,my,mw*frac,mh);
+      ctx.fill();
+    }
+    if(SETTINGS.game==='colour' && NOTES[targetIdx]){
+      const col=colOf(targetIdx), r=mh*1.6, cx=mx-r*1.8, cy=my+mh/2;
+      const pul=0.85+0.15*Math.sin(time*4);
+      ctx.fillStyle='rgba('+col.join(',')+',0.9)';
+      ctx.beginPath(); ctx.arc(cx,cy,r*pul,0,6.29); ctx.fill();
+      ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.arc(cx,cy,r*pul,0,6.29); ctx.stroke();
+      ctx.fillStyle='rgba(255,255,255,0.95)';
+      ctx.font='700 '+r+'px system-ui,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(NOTES[targetIdx].label,cx,cy+r*0.06);
+    }
+  }
+
+  return {
+    sectionLabel:'Music Bubbles',
+    lockMode:'flow',
+    noVoices:true,                    // pops are the app's own notes
+    hideRail:['clear'],
+    paneLabels:{ instrument:'🫧 Bubbles' },
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', bubMode:'free', song:'twinkle', game:'off', goalCount:10,
+      dir:'up', speed:0.45, size:0.5, density:0.55, mode:'flow', paint:true,
+      yAxis:'none', colorMode:'note', scale:'major', noteCount:5, showLabels:true },
+    schema:[],
+    // 🫧 Bubbles tab
+    buildInstrument(el){
+      el.appendChild(makeChips('Bubbles','bubMode',MODE_OPTS,()=>{ applySetup(); buildInstrumentPanel(); }));
+      if(inSong()) el.appendChild(makeChips('Song','song',SONGS,applySetup));
+      el.appendChild(makeChips('Little goals','game',GAME_OPTS,()=>{ gm=0; pickTarget(); buildInstrumentPanel(); }));
+      if(SETTINGS.game!=='off')
+        el.appendChild(makeSlider({key:'goalCount',label:'Pops to fill the meter',min:5,max:20,step:1,dp:0,onChange:()=>{gm=0;}}));
+      el.appendChild(makeChips('Drift','dir',DIR_OPTS,()=>{ bubbles.length=0; }));
+      el.appendChild(makeSlider({key:'speed',label:'Drift speed',min:0,max:1,step:0.05,dp:2}));
+      el.appendChild(makeSlider({key:'size',label:'Bubble size',min:0,max:1,step:0.05,dp:2}));
+      el.appendChild(makeSlider({key:'density',label:'How many bubbles',min:0,max:1,step:0.05,dp:2}));
+      if(!inSong())
+        el.appendChild(makeSlider({key:'noteCount',label:'Number of notes',min:2,max:8,step:1,dp:0,onChange:refreshMusic}));
+      if(inSong()) el.appendChild(makeSongImportUI(()=>{ applySetup(); buildInstrumentPanel(); }));
+    },
+    // 🎸 Instrument tab — tuning on top of voice/effects/volume
+    soundExtras(el){
+      el.appendChild(makeChips('Scale','scale',SG_SCALES,refreshMusic));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Note letters on bubbles','showLabels'));
+      const bgRow=document.createElement('div'); bgRow.className='swrow';
+      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+      bgpk.textContent='Background colour';
+      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
+      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
+      bgpk.addEventListener('click',e=>e.stopPropagation());
+      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      W=canvas.width; H=canvas.height;
+      if(!progEl){
+        const st=document.createElement('style');
+        st.textContent='#mbProgress{position:fixed;top:0;left:0;height:6px;width:0;z-index:6;'+
+          'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+          'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+        progEl=document.createElement('div'); progEl.id='mbProgress'; document.body.appendChild(progEl);
+      }
+      // precise tap-to-pop on the down event (sub-frame taps never reach splat)
+      const dpr=()=>canvas.width/canvas.clientWidth;
+      canvas.addEventListener('mousedown',e=>{ getAudio(); popAt(e.offsetX*dpr(),e.offsetY*dpr(),0.02); });
+      canvas.addEventListener('touchstart',e=>{ getAudio();
+        const r=canvas.getBoundingClientRect(), k=dpr();
+        for(const t of e.changedTouches) popAt((t.clientX-r.left)*k,(t.clientY-r.top)*k,0.02);
+      },{passive:false});
+      sig=settingsSig();
+      applySetup();
+    },
+    resize(w,h){ W=w; H=h; bubbles.length=0; },
+    // sweep path: pop everything the finger passes through (skip the tap-splat —
+    // the down listener above already handled that point precisely)
+    splat(x,y,dx,dy,color,opts){
+      if(opts && opts.velScale===0) return;
+      popAt(x*W,(1-y)*H,Math.hypot(dx,dy));
+    },
+    frame(dt){
+      time+=dt; pokeSim();   // bubbles are always drifting — this app never sleeps
+      const s2=settingsSig();
+      if(s2!==sig){ sig=s2; applySetup(); }
+      if(celebrating>0) celebrating-=dt;
+      // spawn towards the density target
+      const alive=bubbles.filter(b=>!b.dead).length;
+      if(alive<targetCount()){
+        spawnAcc+=dt*(0.5+SETTINGS.density*1.5);
+        if(spawnAcc>=1){ spawnAcc=0; spawn(); }
+      }
+      // move + recycle
+      const sway=H*0.03;
+      for(const b of bubbles){
+        if(b.dead) continue;
+        b.x+=b.vx*dt; b.y+=b.vy*dt;
+        if(SETTINGS.dir==='side') b.y+=Math.sin(time*b.wob+b.phase)*sway*dt;
+        else b.x+=Math.sin(time*b.wob+b.phase)*sway*dt;
+        // stale song bubbles (someone popped past them) gently shrink away
+        if(b.pos!==undefined && b.pos<songPos){ b.r*=Math.pow(0.2,dt); if(b.r<6) b.dead=true; continue; }
+        const out = SETTINGS.dir==='side' ? b.x-b.r>W :
+                    SETTINGS.dir==='snow' ? b.y-b.r>H : b.y+b.r<0;
+        if(out){
+          if(b.pos!==undefined) placeAtEdge(b);   // song note comes back around
+          else b.dead=true;                        // free bubble recycles as a fresh one
+        }
+      }
+      bubbles=bubbles.filter(b=>!b.dead);
+      // particles
+      for(const p of parts){
+        p.age+=dt;
+        if(!p.ring){ p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=H*0.25*dt; }
+      }
+      parts=parts.filter(p=>p.age<p.life);
+      // draw
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,W,H);
+      for(const b of bubbles) drawBubble(b);
+      for(const p of parts){
+        const k=1-p.age/p.life;
+        if(p.ring){
+          ctx.strokeStyle='rgba('+p.col.join(',')+','+(k*0.9).toFixed(3)+')';
+          ctx.lineWidth=3*k+1;
+          ctx.beginPath(); ctx.arc(p.x,p.y,(1-k)*H*0.09+8,0,6.29); ctx.stroke();
+        } else {
+          ctx.fillStyle='rgba('+p.col.join(',')+','+(k*0.95).toFixed(3)+')';
+          ctx.beginPath(); ctx.arc(p.x,p.y,p.size*k+0.5,0,6.29); ctx.fill();
+        }
+      }
+      drawUI();
+    },
+    reset(){ bubbles.length=0; parts.length=0; },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>
