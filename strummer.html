@@ -86,13 +86,16 @@ const Anim = (() => {
 
   // ── String voices: plucked (Karplus-Strong) and struck (additive partials),
   //    all rendered once per pitch/timbre into cached AudioBuffers ──
-  // ks: bright/ring scale the user sliders; pick = pick-position comb (0 = none).
+  // ks: bright/ring scale the user sliders; pick = pick-position comb (0 = none);
+  //     passes = extra excitation lowpassing (rounder); stretch<1 keeps the highs
+  //     ringing (metallic); snap = unpitched attack transient.
   // add: parts = [ratio, gain, decay×ring]; oct shifts the whole voice.
   const STRVOICES={
     harp:    {label:'🎼 Harp',      type:'ks',  bright:1.0,  ring:1.0,  pick:0},
-    nylon:   {label:'🎸 Nylon',     type:'ks',  bright:0.45, ring:0.9,  pick:0.32},
-    banjo:   {label:'🪕 Banjo',     type:'ks',  bright:1.6,  ring:0.4,  pick:0.12},
-    koto:    {label:'🎋 Koto',      type:'ks',  bright:0.8,  ring:0.65, pick:0.5},
+    nylon:   {label:'🎸 Nylon',     type:'ks',  bright:0.3,  ring:1.0,  pick:0.35, passes:2},
+    banjo:   {label:'🪕 Banjo',     type:'ks',  bright:2.2,  ring:0.5,  pick:0.08, stretch:0.35, snap:0.7},
+    marimba: {label:'🪵 Marimba',   type:'add', oct:0, ring:0.45,
+      parts:[[1,1,0.6],[3.93,0.5,0.12],[9.2,0.18,0.05]]},
     musicbox:{label:'🎐 Music box', type:'add', oct:1, ring:0.55,
       parts:[[1,1,1],[3.4,0.34,0.35],[6.76,0.12,0.18]]},
     bell:    {label:'🔔 Bell',      type:'add', oct:0, ring:0.9,
@@ -113,15 +116,24 @@ const Anim = (() => {
     const sr=ac.sampleRate, N=Math.max(2,Math.round(sr/freq));
     const len=Math.floor(sr*ring*1.1)+N+2;
     const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
-    const ex=new Float32Array(N); let lp=0;   // lowpassed noise = pluck brightness
-    for(let i=0;i<N;i++){ lp=bright*(Math.random()*2-1)+(1-bright)*lp; ex[i]=lp; }
+    const ex=new Float32Array(N);
+    for(let i=0;i<N;i++) ex[i]=Math.random()*2-1;
+    for(let p=0;p<(V.passes||1);p++){   // lowpassed noise = pluck brightness
+      let lp=0;
+      for(let i=0;i<N;i++){ lp=bright*ex[i]+(1-bright)*lp; ex[i]=lp; }
+    }
     if(V.pick){   // comb the excitation = where along the string it's plucked
       const D=Math.max(1,Math.round(N*V.pick));
       for(let i=N-1;i>=0;i--) ex[i]-= i-D>=0?ex[i-D]:0;
     }
     for(let i=0;i<N;i++) d[i]=ex[i];
     const rho=Math.pow(0.001,1/(ring*sr));   // ~-60 dB at the ring time
-    for(let i=N;i<len;i++){ const a=d[i-N], b=i-N-1>=0?d[i-N-1]:0; d[i]=rho*0.5*(a+b); }
+    const S=V.stretch!==undefined?V.stretch:1;   // <1 = highs survive = metallic
+    for(let i=N;i<len;i++){ const a=d[i-N], b=i-N-1>=0?d[i-N-1]:0; d[i]=rho*(S*0.5*(a+b)+(1-S)*a); }
+    if(V.snap){   // unpitched attack transient on top of the string (banjo thwack)
+      const M=Math.floor(sr*0.012);
+      for(let i=0;i<Math.min(M,len);i++) d[i]+=V.snap*(Math.random()*2-1)*(1-i/M);
+    }
     finishBuf(d,len,sr); return buf;
   }
   function renderAdd(ac,freq,V,bright,ring){
