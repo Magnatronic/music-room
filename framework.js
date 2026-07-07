@@ -41,6 +41,8 @@ function initSettings(){
   try { SETTINGS = Object.assign(SETTINGS, JSON.parse(localStorage.getItem(STORE_KEY)||'{}')); } catch(e){}
   const themeKeys = Object.keys(Anim.themes);
   currentTheme = themeKeys.includes(SETTINGS.theme) ? SETTINGS.theme : themeKeys[0];
+  // Saved settings may hold a retired press effect (smoke/pixel/ripple/press)
+  if(SETTINGS.pressFx && !PRESSFX_OPTS[SETTINGS.pressFx]) SETTINGS.pressFx='bloom';
   bgRGB = hexToRGB(SETTINGS.bg);
   perfLevel = (SETTINGS.quality && SETTINGS.quality!=='auto') ? SETTINGS.quality : 'high';
 }
@@ -141,18 +143,23 @@ function flashCell(c,r){
   d.classList.add('flash');
   clearTimeout(d._ft); d._ft=setTimeout(()=>d.classList.remove('flash'),220);
 }
-// Press effect inside a cell, driven by SETTINGS.pressFx ('bloom'|'smoke'|'pixel'|
-// 'ripple'|'none'; apps opt in by putting pressFx in their defaults and exposing
-// the chips). Styles live in framework.css. Contained by design — the reward
+// Press effect inside a cell, driven by SETTINGS.pressFx ('bloom'|'glow'|'pop'|
+// 'none'; apps opt in by putting pressFx in their defaults and exposing the
+// chips). Styles live in framework.css. Contained by design — the reward
 // happens exactly where the student is looking, nothing competes with the grid.
+// Three distinct options for different sensory needs: bloom (brightness + a
+// little motion, default), glow (colour only, no motion), pop (motion only,
+// no brightness change).
+const PRESSFX_SELF={bloom:450,pop:250};   // cell-class effects + removal delay
 function fxCell(c,r){
-  const style=SETTINGS.pressFx||'none';
+  let style=SETTINGS.pressFx||'none';
+  if(!PRESSFX_OPTS[style]) style='bloom';   // retired effect in saved settings
   if(style==='none') return;
   const d=bandsEl.querySelector('[data-cell="'+c+'-'+(r||0)+'"]'); if(!d) return;
-  if(style==='bloom'){
-    d.classList.remove('bloom'); void d.offsetWidth;   // restart the animation
-    d.classList.add('bloom');
-    clearTimeout(d._bt); d._bt=setTimeout(()=>d.classList.remove('bloom'),600);
+  if(PRESSFX_SELF[style]){
+    d.classList.remove(style); void d.offsetWidth;   // restart the animation
+    d.classList.add(style);
+    clearTimeout(d._bt); d._bt=setTimeout(()=>d.classList.remove(style),PRESSFX_SELF[style]);
     return;
   }
   if(d.querySelectorAll('.fx').length>2) return;   // cap overlay pile-up on fast swipes
@@ -163,8 +170,7 @@ function fxCell(c,r){
   setTimeout(()=>{ if(o.parentNode) o.remove(); },1600);   // safety net
 }
 const PRESSFX_OPTS={
-  bloom:{label:'🌟 Bloom'}, smoke:{label:'💨 Smoke'},
-  pixel:{label:'🟦 Pixelate'}, ripple:{label:'💧 Ripple'}, none:{label:'Off'},
+  bloom:{label:'🌟 Bloom'}, glow:{label:'✨ Glow'}, pop:{label:'🎈 Pop'}, none:{label:'Off'},
 };
 // Zones stay lit for as long as a touch is holding them (instrument-key feedback).
 function updateHeldCells(){
