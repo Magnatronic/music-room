@@ -29,9 +29,14 @@
 'use strict';
 /* ===== ANIMATION START =====
    Voice Visuals — vocalize and the room responds with light. Loudness = size
-   and brightness, pitch = height and Boomwhacker note colour. Rewards
-   vocalization for non-verbal students; "whisper" sensitivity makes tiny
-   sounds produce big rewards.
+   and brightness, pitch = height and colour. Rewards vocalization for
+   non-verbal students; "whisper" sensitivity makes tiny sounds huge.
+
+   Visual design (see fx research notes in git history): frequency → colour,
+   amplitude → size/brightness, feedback immediate (the cause-effect loop IS
+   the therapy). Each mode has a calm slow baseline that the voice energises,
+   sensory-room style. Colour comes from a palette THEME (Prism etc.), from
+   Boomwhacker note colours, or a single locked colour.
 
    LISTEN-ONLY by design: the microphone signal is analysed and never routed
    to the speakers, so feedback is impossible. The framework audio chain is
@@ -39,27 +44,50 @@
 
    Pitch via autocorrelation on the time-domain buffer (fine for voice);
    a light 10 Hz poll keeps running while the render loop sleeps so the
-   first sound after a silence wakes the visuals instantly.
+   first sound after a silence wakes the visuals instantly. The render loop
+   keeps a ~20 s tail after the last sound so decays/twinkles wind down,
+   then the sim sleeps (last frame stays on screen).
 */
 const Anim = (() => {
 
   const BW={0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],7:[28,169,169],9:[125,79,181],11:[224,90,156]};
-  function colOf(pc){ if(BW[pc]) return BW[pc];
+  function bwOf(pc){ if(BW[pc]) return BW[pc];
     const b=BW[(pc+11)%12]||[200,200,200]; return b.map(v=>Math.round(v*0.7)); }
 
+  // Palette themes: pitch (or band index / position) sweeps across the list.
+  const THEMES={
+    prism: {label:'🌈 Prism',  colors:[[255,40,70],[255,140,0],[255,225,40],[60,255,140],[40,160,255],[170,70,255]]},
+    ocean: {label:'🌊 Ocean',  colors:[[0,70,160],[0,150,205],[60,215,220],[130,255,205],[220,255,245]]},
+    sunset:{label:'🌅 Sunset', colors:[[90,0,130],[205,45,105],[255,105,60],[255,185,65],[255,240,170]]},
+    aurora:{label:'✨ Aurora', colors:[[0,230,150],[0,190,210],[110,130,255],[190,90,255],[120,255,200]]},
+    candy: {label:'🍬 Candy',  colors:[[255,90,160],[255,170,220],[170,130,255],[130,220,255],[255,225,240]]},
+  };
+  function palAt(x){
+    const cols=(THEMES[SETTINGS.theme]||THEMES.prism).colors;
+    const f=Math.max(0,Math.min(0.999,x))*(cols.length-1);
+    const i=f|0, u=f-i, a=cols[i], b=cols[i+1]||a;
+    return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u];
+  }
+  function mix(a,b,u){ return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u]; }
+  function rgba(c,a){ return 'rgba('+(c[0]|0)+','+(c[1]|0)+','+(c[2]|0)+','+Math.max(0,a).toFixed(3)+')'; }
+
   const SENS={ whisper:{label:'🤫 Whisper',mul:60}, talk:{label:'🙂 Talking',mul:18}, sing:{label:'📣 Singing',mul:6} };
-  const VISMODES={ bloom:{label:'🌟 Bloom'}, ripples:{label:'💧 Ripples'},
-                   fountain:{label:'⛲ Fountain'}, aurora:{label:'🌌 Aurora'} };
+  const VISMODES={ bloom:{label:'🌟 Nebula'}, mandala:{label:'💠 Mandala'},
+                   ripples:{label:'💧 Ripples'}, fountain:{label:'🎆 Fireworks'},
+                   aurora:{label:'🌌 Silk'}, stars:{label:'⭐ Starfield'} };
   const GATE=0.05;
 
-  let ctx=null, t=0;
+  let ctx=null, t=0, lastActive=-99;
   let micState='off';               // off | starting | on | denied | error
   let micStream=null, analyser=null, pollId=null, pollCount=0;
   const ABUF=new Float32Array(2048);
-  let level=0, meterLvl=0, pitch01=0.4, tp01=0.4;   // smoothed + target pitch height
-  let col=[120,200,255], tcol=[120,200,255];  // smoothed + target colour
-  let lastPitchAt=0;
-  let rings=[], parts=[], touchRings=[], rippleTimer=0, emitAcc=0;
+  let FBUF=null, bands=null;
+  let level=0, meterLvl=0, pitch01=0.4, tp01=0.4, prevLevel=0, lastBurst=-9;
+  let noteCol=[120,200,255];                  // last Boomwhacker colour from pitch
+  let col=[120,200,255], tcol=[120,200,255];  // smoothed + target display colour
+  let lastPitchAt=0, rot=0;
+  let rings=[], parts=[], touchRings=[], shoots=[], stars=[];
+  let rippleTimer=0, emitAcc=0;
 
   // ── microphone ──
   function micOn(){ return micState==='on'; }
@@ -120,16 +148,23 @@ const Anim = (() => {
   }
 
   // ── analysis: smoothed level + autocorrelation pitch → height/colour ──
-  function analyse(dt){
-    if(!analyser){ level=Math.max(0,level-dt); return; }
-    const raw=rawLevel();
-    const target=raw>GATE?(raw-GATE)/(1-GATE):0;
-    const k=1-Math.exp(-dt/(target>level?0.05:0.35));   // fast attack, slow release
-    level+=(target-level)*k;
-    const now=performance.now();
-    if(target>0.02 && now-lastPitchAt>50){ lastPitchAt=now; detectPitch(); }
+  function voiceTargetCol(){
     if(SETTINGS.colorMode==='single'&&SETTINGS.lockedColor)
-      tcol=SETTINGS.lockedColor.map(v=>Math.min(1,v)*255);
+      return SETTINGS.lockedColor.map(v=>Math.min(1,v)*255);
+    if(SETTINGS.colorMode==='note') return noteCol;
+    return palAt(tp01);
+  }
+  function analyse(dt){
+    if(!analyser){ level=Math.max(0,level-dt); }
+    else{
+      const raw=rawLevel();
+      const target=raw>GATE?(raw-GATE)/(1-GATE):0;
+      const k=1-Math.exp(-dt/(target>level?0.05:0.35));   // fast attack, slow release
+      level+=(target-level)*k;
+      const now=performance.now();
+      if(target>0.02 && now-lastPitchAt>50){ lastPitchAt=now; detectPitch(); }
+    }
+    tcol=voiceTargetCol();
     const ck=1-Math.exp(-dt/0.15);
     pitch01+=(tp01-pitch01)*ck;
     for(let i=0;i<3;i++) col[i]+=(tcol[i]-col[i])*ck;
@@ -148,80 +183,258 @@ const Anim = (() => {
       const f=sr/bl;
       tp01=Math.max(0,Math.min(1,Math.log2(f/80)/Math.log2(800/80)));
       const midi=Math.round(69+12*Math.log2(f/440));
-      tcol=colOf(((midi%12)+12)%12);
+      noteCol=bwOf(((midi%12)+12)%12);
+    }
+  }
+  // Log-spaced FFT bands with fast attack / slow release (Mandala).
+  function updateBands(n,dt){
+    if(!bands||bands.length!==n) bands=new Float32Array(n);
+    if(!analyser){ for(let i=0;i<n;i++) bands[i]*=Math.pow(0.05,dt); return; }
+    if(!FBUF||FBUF.length!==analyser.frequencyBinCount) FBUF=new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(FBUF);
+    const nyq=audioCtx.sampleRate/2, T=FBUF.length, fmin=90, fmax=6500;
+    for(let i=0;i<n;i++){
+      const f0=fmin*Math.pow(fmax/fmin,i/n), f1=fmin*Math.pow(fmax/fmin,(i+1)/n);
+      let a=(f0/nyq*T)|0, b=Math.max(a+1,Math.ceil(f1/nyq*T));
+      let m=0; for(let k=a;k<b&&k<T;k++) if(FBUF[k]>m) m=FBUF[k];
+      const v=Math.max(0,m/255-0.14)/0.86;
+      const k2=1-Math.exp(-dt/(v>bands[i]?0.03:0.22));
+      bands[i]+=(v-bands[i])*k2;
+    }
+  }
+  // Onset = sharp level attack; drives Fireworks bursts and shooting stars.
+  function onset(){
+    const hit=level-prevLevel>0.10 && level>0.16 && t-lastBurst>0.3;
+    if(hit) lastBurst=t;
+    return hit;
+  }
+
+  function voiceY(H){ return H*(0.8-0.6*pitch01); }
+
+  // ── 🌟 Nebula: layered living glow — calm core in silence, blooms with voice ──
+  function drawNebula(W,H,dt){
+    const m=Math.min(W,H);
+    const cx=W/2+Math.sin(t*0.21)*W*0.04, cy=voiceY(H);
+    // soft rotating rays behind everything
+    const rays=5; rot+=dt*(0.05+level*0.35);
+    for(let i=0;i<rays;i++){
+      const a=rot+i*Math.PI*2/rays;
+      ctx.save(); ctx.translate(cx,cy); ctx.rotate(a); ctx.scale(1,0.16);
+      const L=m*(0.28+0.45*level);
+      const g=ctx.createRadialGradient(0,0,0,0,0,L);
+      g.addColorStop(0,rgba(col,0.05+0.10*level)); g.addColorStop(1,rgba(col,0));
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,L,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+    // halo (hue-shifted when a palette theme drives colour)
+    const halo=SETTINGS.colorMode==='theme'?palAt(Math.min(1,tp01+0.18)):mix(col,[40,60,160],0.35);
+    const R2=m*(0.20+0.42*level)*(1+0.02*Math.sin(t*2.1));
+    let g=ctx.createRadialGradient(cx,cy,0,cx,cy,R2);
+    g.addColorStop(0,rgba(halo,0.05+0.16*level)); g.addColorStop(1,rgba(halo,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R2,0,Math.PI*2); ctx.fill();
+    // main body
+    const R1=m*(0.10+0.30*level)*(1+0.03*Math.sin(t*5));
+    g=ctx.createRadialGradient(cx,cy,0,cx,cy,R1);
+    g.addColorStop(0,rgba(col,0.10+0.40*level));
+    g.addColorStop(0.65,rgba(col,0.04+0.18*level));
+    g.addColorStop(1,rgba(col,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R1,0,Math.PI*2); ctx.fill();
+    // hot core
+    const R0=R1*0.38, core=mix(col,[255,255,255],0.65);
+    g=ctx.createRadialGradient(cx,cy,0,cx,cy,R0);
+    g.addColorStop(0,rgba(core,0.08+0.5*level)); g.addColorStop(1,rgba(core,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── 💠 Mandala: mirrored radial spectrum — the palette showcase ──
+  function drawMandala(W,H,dt){
+    const q=activeQuality(), N=q==='high'?56:q==='med'?40:28;
+    updateBands(N,dt);
+    rot+=dt*(0.06+level*0.4);
+    const cx=W/2, cy=H/2, m=Math.min(W,H);
+    const R0=m*0.13*(1+0.18*level), Rmax=m*0.33;
+    // breathing centre
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,R0*1.5);
+    g.addColorStop(0,rgba(col,0.05+0.30*level)); g.addColorStop(1,rgba(col,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R0*1.5,0,Math.PI*2); ctx.fill();
+    // base ring so the mandala exists even in silence
+    ctx.strokeStyle=rgba(col,0.10+0.15*level); ctx.lineWidth=Math.max(1.5,m*0.004);
+    ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.stroke();
+    ctx.lineCap='round';
+    const bw=2*Math.PI*R0/N*0.42;
+    for(let i=0;i<N;i++){
+      const v=bands?bands[i]:0; if(v<0.03) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],v*0.4);
+      const len=Math.pow(v,1.5)*Rmax+bw*0.5;
+      const ang=rot+i/N*Math.PI*2;
+      ctx.strokeStyle=rgba(c,0.18+0.65*v);
+      ctx.lineWidth=bw*(0.55+0.65*v);
+      for(const s of [1,-1]){   // vertical mirror → kaleidoscope symmetry
+        const ca=Math.cos(ang)*s, sa=Math.sin(ang);
+        ctx.beginPath();
+        ctx.moveTo(cx+ca*R0,cy+sa*R0);
+        ctx.lineTo(cx+ca*(R0+len),cy+sa*(R0+len));
+        ctx.stroke();
+      }
     }
   }
 
-  // ── visual modes (all additive glow over a fading background) ──
-  function colStr(a){ return 'rgba('+(col[0]|0)+','+(col[1]|0)+','+(col[2]|0)+','+a.toFixed(3)+')'; }
-  function voiceY(H){ return H*(0.8-0.6*pitch01); }
-  function drawBloom(W,H){
-    if(level<=0.005) return;
-    const cx=W/2+Math.sin(t*0.8)*W*0.02, cy=voiceY(H);
-    const R=(0.10+0.45*level)*Math.min(W,H)*(1+0.03*Math.sin(t*6));
-    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
-    g.addColorStop(0,colStr(0.12+0.5*level));
-    g.addColorStop(0.6,colStr(0.05+0.25*level));
-    g.addColorStop(1,colStr(0));
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
-  }
+  // ── 💧 Ripples: dual-stroke gradient rings from the voice point ──
   function drawRipples(W,H,dt){
     rippleTimer-=dt;
     if(level>0.02&&rippleTimer<=0){
       rippleTimer=0.4-0.3*level;
-      rings.push({x:W/2,y:voiceY(H),r:Math.min(W,H)*0.02,
-        v:(0.25+0.7*level)*Math.min(W,H),a:0.25+0.55*level,c:col.slice()});
+      rings.push({x:W/2+Math.sin(t*0.6)*W*0.05,y:voiceY(H),r:Math.min(W,H)*0.02,
+        v:(0.25+0.7*level)*Math.min(W,H),a:0.30+0.55*level,c:col.slice()});
+    }
+    // soft source glow where rings are born
+    if(level>0.01){
+      const R=Math.min(W,H)*(0.03+0.10*level);
+      const g=ctx.createRadialGradient(W/2,voiceY(H),0,W/2,voiceY(H),R);
+      g.addColorStop(0,rgba(col,0.10+0.35*level)); g.addColorStop(1,rgba(col,0));
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(W/2,voiceY(H),R,0,Math.PI*2); ctx.fill();
     }
     const lim=Math.hypot(W,H);
-    rings=rings.filter(g=>{
-      g.r+=g.v*dt; g.a*=Math.pow(0.25,dt);
-      if(g.a<0.01||g.r>lim) return false;
-      ctx.strokeStyle='rgba('+(g.c[0]|0)+','+(g.c[1]|0)+','+(g.c[2]|0)+','+g.a.toFixed(3)+')';
-      ctx.lineWidth=Math.max(2,H*0.012);
-      ctx.beginPath(); ctx.arc(g.x,g.y,g.r,0,Math.PI*2); ctx.stroke();
+    rings=rings.filter(gg=>{
+      gg.r+=gg.v*dt; gg.a*=Math.pow(0.25,dt);
+      if(gg.a<0.01||gg.r>lim) return false;
+      const w=Math.max(2,H*0.010);
+      ctx.strokeStyle=rgba(gg.c,gg.a*0.35); ctx.lineWidth=w*3;      // soft outer
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle=rgba(mix(gg.c,[255,255,255],0.3),gg.a);       // bright core
+      ctx.lineWidth=w;
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
       return true;
     });
   }
-  function drawFountain(W,H,dt){
-    const cap=activeQuality()==='high'?400:activeQuality()==='med'?250:120;
-    emitAcc+=dt*level*(cap*0.55);
+
+  // ── 🎆 Fireworks: quiet sounds = rising embers, sharp sounds = comet bursts ──
+  function drawFireworks(W,H,dt){
+    const q=activeQuality(), cap=q==='high'?450:q==='med'?280:140;
+    emitAcc+=dt*level*55;
     while(emitAcc>=1&&parts.length<cap){
       emitAcc--;
-      parts.push({x:W/2+(Math.random()-0.5)*W*0.08,y:H,
-        vx:(Math.random()-0.5)*W*0.25,
-        vy:-(0.55+0.9*level+0.8*pitch01+Math.random()*0.25)*H,
-        size:(2+Math.random()*4)*(H/800)*(1+level),c:col.slice(),life:1});
+      parts.push({x:W*(0.5+(Math.random()-0.5)*0.24),y:H*0.98,
+        vx:(Math.random()-0.5)*W*0.06,
+        vy:-(0.18+0.45*level)*H*(0.7+Math.random()*0.5),
+        size:(1+Math.random()*2)*(H/800),c:col.slice(),life:1,trail:false,px:0,py:0});
     }
     emitAcc=Math.min(emitAcc,3);
+    if(onset()&&parts.length<cap-30){
+      const bx=W*(0.25+0.5*Math.random()), by=voiceY(H);
+      const n=Math.min(cap-parts.length,(24+level*56)|0);
+      const sp=(0.22+0.5*level)*Math.min(W,H);
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2, s=sp*(0.3+0.7*Math.random());
+        const c=SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],Math.random()*0.4);
+        parts.push({x:bx,y:by,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+          size:(1.2+Math.random()*2.2)*(H/800),c,life:1+Math.random()*0.4,trail:true,px:bx,py:by});
+      }
+    }
     parts=parts.filter(p=>{
-      p.vy+=H*0.9*dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*0.5;
+      p.px=p.x; p.py=p.y;
+      const drag=p.trail?Math.pow(0.30,dt):1;
+      p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt;
+      p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*(p.trail?0.8:0.45);
       if(p.life<=0||p.y>H+30) return false;
-      ctx.fillStyle='rgba('+(p.c[0]|0)+','+(p.c[1]|0)+','+(p.c[2]|0)+','+(p.life*0.8).toFixed(3)+')';
-      ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+      const a=Math.min(1,p.life)*0.85;
+      if(p.trail){
+        ctx.strokeStyle=rgba(p.c,a); ctx.lineWidth=p.size; ctx.lineCap='round';
+        ctx.beginPath(); ctx.moveTo(p.px,p.py); ctx.lineTo(p.x,p.y); ctx.stroke();
+      } else {
+        ctx.fillStyle=rgba(p.c,a);
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+      }
       return true;
     });
   }
-  function drawAurora(W,H){
+
+  // ── 🌌 Silk: gradient ribbons that breathe with the voice ──
+  function drawSilk(W,H,dt){
     if(level<=0.004) return;
-    for(let b=0;b<3;b++){
-      const yc=voiceY(H)+(b-1)*H*0.07;
-      const amp=H*(0.02+0.10*level)*(1+b*0.25);
-      ctx.strokeStyle=colStr(0.06+0.3*level*(1-b*0.22));
-      ctx.lineWidth=H*(0.035-b*0.007)*(1+level*0.8);
-      ctx.beginPath();
-      for(let k=0;k<=32;k++){
-        const xt=k/32, x=xt*W;
-        const y=yc+Math.sin(xt*5.5+t*(1.2+b*0.4)+b*2.1)*amp+Math.sin(xt*11+t*0.7)*amp*0.4;
-        if(k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    const STEPS=28;
+    for(let b=0;b<4;b++){
+      const yc=voiceY(H)+(b-1.5)*H*0.065;
+      const amp=H*(0.02+0.11*level)*(1+b*0.22);
+      const w=H*(0.015+0.045*level)*(1-b*0.12);
+      const alpha=(0.05+0.22*level)*(1-b*0.16);
+      const grad=ctx.createLinearGradient(0,0,W,0);
+      if(SETTINGS.colorMode==='theme'){
+        const sh=b*0.12+Math.sin(t*0.13)*0.1;
+        for(let s=0;s<=4;s++) grad.addColorStop(s/4,rgba(palAt(((s/4+sh)%1+1)%1),alpha));
+      } else {
+        grad.addColorStop(0,rgba(mix(col,[255,255,255],0.25),alpha*0.6));
+        grad.addColorStop(0.5,rgba(col,alpha));
+        grad.addColorStop(1,rgba(mix(col,[0,0,0],0.2),alpha*0.6));
       }
-      ctx.stroke();
+      ctx.fillStyle=grad;
+      ctx.beginPath();
+      for(let k=0;k<=STEPS;k++){
+        const xt=k/STEPS, x=xt*W;
+        const y=yc+Math.sin(xt*5.5+t*(1.1+b*0.35)+b*2.1)*amp+Math.sin(xt*11+t*0.7)*amp*0.4;
+        if(k===0) ctx.moveTo(x,y-w); else ctx.lineTo(x,y-w);
+      }
+      for(let k=STEPS;k>=0;k--){
+        const xt=k/STEPS, x=xt*W;
+        const y=yc+Math.sin(xt*5.5+t*(1.1+b*0.35)+b*2.1)*amp+Math.sin(xt*11+t*0.7)*amp*0.4;
+        ctx.lineTo(x,y+w);
+      }
+      ctx.closePath(); ctx.fill();
     }
   }
+
+  // ── ⭐ Starfield: calm twinkling sky; the voice lights a band of stars at its
+  //    pitch height, sharp sounds send a shooting star ──
+  function buildStars(W,H){
+    const q=activeQuality(), n=q==='high'?140:q==='med'?90:55;
+    stars=[];
+    for(let i=0;i<n;i++)
+      stars.push({x:Math.random()*W,y:Math.random()*H,
+        r:(0.6+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2});
+  }
+  function drawStars(W,H,dt){
+    if(!stars.length) buildStars(W,H);
+    const bandY=voiceY(H), bandW=H*0.22;
+    for(const s of stars){
+      const tw=0.14+0.12*Math.sin(t*s.sp+s.ph);
+      const d=Math.abs(s.y-bandY)/bandW;
+      const lit=level*Math.max(0,1-d*d);            // gaussian-ish band at pitch height
+      const c=lit>0.02?mix([255,255,255],col,Math.min(1,lit*1.5)):[255,255,255];
+      const a=Math.min(1,tw+lit*0.9);
+      const r=s.r*(1+lit*1.6);
+      ctx.fillStyle=rgba(c,a);
+      ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fill();
+      if(lit>0.25){                                  // cross-sparkle on bright stars
+        ctx.strokeStyle=rgba(c,a*0.5); ctx.lineWidth=1;
+        ctx.beginPath();
+        ctx.moveTo(s.x-r*3,s.y); ctx.lineTo(s.x+r*3,s.y);
+        ctx.moveTo(s.x,s.y-r*3); ctx.lineTo(s.x,s.y+r*3);
+        ctx.stroke();
+      }
+    }
+    if(onset()&&shoots.length<3){
+      const fromLeft=Math.random()<0.5;
+      shoots.push({x:fromLeft?-40:W+40,y:H*(0.08+Math.random()*0.35),
+        vx:(fromLeft?1:-1)*W*(0.55+0.4*Math.random()),vy:H*(0.06+0.10*Math.random()),
+        life:1,c:col.slice()});
+    }
+    shoots=shoots.filter(s=>{
+      const px=s.x,py=s.y;
+      s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt*0.7;
+      if(s.life<=0||s.x<-80||s.x>W+80) return false;
+      const grad=ctx.createLinearGradient(px-s.vx*0.12,py-s.vy*0.12,s.x,s.y);
+      grad.addColorStop(0,rgba(s.c,0)); grad.addColorStop(1,rgba(mix(s.c,[255,255,255],0.6),s.life*0.9));
+      ctx.strokeStyle=grad; ctx.lineWidth=Math.max(1.5,H*0.003); ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(px-s.vx*0.12,py-s.vy*0.12); ctx.lineTo(s.x,s.y); ctx.stroke();
+      return true;
+    });
+  }
+
   function drawTouchRings(W,H,dt){
     touchRings=touchRings.filter(g=>{
       g.r+=g.v*dt; g.a*=Math.pow(0.2,dt);
       if(g.a<0.01) return false;
-      ctx.strokeStyle='rgba('+(g.c[0]|0)+','+(g.c[1]|0)+','+(g.c[2]|0)+','+g.a.toFixed(3)+')';
+      ctx.strokeStyle=rgba(g.c,g.a);
       ctx.lineWidth=Math.max(2,H*0.006);
       ctx.beginPath(); ctx.arc(g.x,g.y,g.r,0,Math.PI*2); ctx.stroke();
       return true;
@@ -234,9 +447,12 @@ const Anim = (() => {
     noVoices:true,                    // listen-only: touch never makes sound either
     hideRail:['clear'],
     paneLabels:{ instrument:'🎤 Voice', sound:'🔇 Sound' },
-    themes:{ voice:{label:'🎤 Voice', colors:[[0.5,0.8,1],[1,0.6,0.8],[0.6,1,0.7],[1,0.9,0.5],[0.8,0.7,1]]} },
-    defaults:{ theme:'voice', sensitivity:'talk', boost:1, visMode:'bloom',
-      mode:'flow', paint:true, yAxis:'none', colorMode:'note', showLabels:false },
+    themes:(function(){ const o={};
+      for(const k in THEMES) o[k]={label:THEMES[k].label,
+        colors:THEMES[k].colors.map(c=>c.map(v=>v/255))};
+      return o; })(),
+    defaults:{ theme:'prism', sensitivity:'talk', boost:1, visMode:'bloom',
+      mode:'flow', paint:true, yAxis:'none', colorMode:'theme', showLabels:false },
     schema:[],
     railButtons:[
       { id:'vvmic', icon:()=>micOn()?'🎤':'🎙️',
@@ -246,7 +462,8 @@ const Anim = (() => {
     ],
     // expose read-only internals for automated verification (no UI)
     _dbg(){ return {mic:micState, level:+level.toFixed(3), pitch:+pitch01.toFixed(3),
-      meter:+meterLvl.toFixed(3), polls:pollCount}; },
+      meter:+meterLvl.toFixed(3), polls:pollCount, mode:SETTINGS.visMode,
+      parts:parts.length, rings:rings.length, stars:stars.length}; },
     // 🎤 Voice tab
     buildInstrument(el){
       const row=document.createElement('div'); row.className='chips';
@@ -272,9 +489,20 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
-      el.appendChild(makeChips('Visual style','visMode',VISMODES));
+      el.appendChild(makeChips('Visual style','visMode',VISMODES,()=>{ pokeSim(); }));
       el.appendChild(makeChips('Colour','colorMode',
-        {note:{label:'🌈 Follows the voice pitch'},single:{label:'⬤ One colour'}},buildVisualsPanel));
+        {theme:{label:'🎨 Theme colours'},note:{label:'🎵 Boomwhacker notes'},single:{label:'⬤ One colour'}},
+        buildVisualsPanel));
+      if(SETTINGS.colorMode==='theme'){
+        const tc=document.createElement('div'); tc.className='chips';
+        for(const k in THEMES){
+          const c=document.createElement('div'); c.className='chip'+(SETTINGS.theme===k?' active':'');
+          c.textContent=THEMES[k].label;
+          c.addEventListener('click',e=>{ e.stopPropagation(); setTheme(k); pokeSim(); buildVisualsPanel(); });
+          tc.appendChild(c);
+        }
+        el.appendChild(tc);
+      }
       if(SETTINGS.colorMode==='single'){
         const row=document.createElement('div'); row.className='swrow';
         STANDARD_SWATCHES.forEach(c=>{
@@ -299,6 +527,7 @@ const Anim = (() => {
     },
     init(cv){
       ctx=cv.getContext('2d');
+      if(!VISMODES[SETTINGS.visMode]) SETTINGS.visMode='bloom';
       if(!document.getElementById('vvGate')){
         const g=document.createElement('div'); g.id='vvGate';
         const b=document.createElement('button');
@@ -309,7 +538,7 @@ const Anim = (() => {
       updateMicUI();
       this.reset();
     },
-    resize(w,h){ this.reset(); },
+    resize(w,h){ stars=[]; this.reset(); },
     // touches make a small silent ripple in any mode — the screen still responds
     splat(x,y,dx,dy,color){
       if(touchRings.length>=24) return;
@@ -322,22 +551,28 @@ const Anim = (() => {
       if(!ctx) return;
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
-      const fade={bloom:0.12,ripples:0.22,fountain:0.16,aurora:0.20}[mode]||0.15;
+      const fade={bloom:0.14,mandala:0.30,ripples:0.22,fountain:0.10,aurora:0.20,stars:0.45}[mode]||0.15;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
       ctx.fillRect(0,0,W,H);
       ctx.globalCompositeOperation='lighter';
-      if(mode==='ripples') drawRipples(W,H,dt);
-      else if(mode==='fountain') drawFountain(W,H,dt);
-      else if(mode==='aurora') drawAurora(W,H);
-      else drawBloom(W,H);
+      if(mode==='mandala') drawMandala(W,H,dt);
+      else if(mode==='ripples') drawRipples(W,H,dt);
+      else if(mode==='fountain') drawFireworks(W,H,dt);
+      else if(mode==='aurora') drawSilk(W,H,dt);
+      else if(mode==='stars') drawStars(W,H,dt);
+      else drawNebula(W,H,dt);
       drawTouchRings(W,H,dt);
       ctx.globalCompositeOperation='source-over';
-      if(level>0.01||rings.length||parts.length||touchRings.length) pokeSim();
+      prevLevel=level;
+      // keep a ~20 s animated tail after the last activity, then let the sim
+      // sleep (the last frame stays on screen as a calm still)
+      if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length) lastActive=t;
+      if(t-lastActive<20) pokeSim();
     },
     reset(){
       if(!ctx) return;
-      rings=[]; parts=[]; touchRings=[];
+      rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[];
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);
