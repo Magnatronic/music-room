@@ -74,6 +74,8 @@ const Anim = (() => {
   const SENS={ whisper:{label:'🤫 Whisper',mul:60}, talk:{label:'🙂 Talking',mul:18}, sing:{label:'📣 Singing',mul:6} };
   const VISMODES={ bloom:{label:'🌟 Nebula'}, mandala:{label:'💠 Mandala'},
                    lava:{label:'🫧 Lava'}, waves:{label:'〰️ Waves'},
+                   flow:{label:'🌀 Flow'}, garden:{label:'🌻 Garden'},
+                   spiro:{label:'🖋 Pendulum'},
                    ripples:{label:'💧 Ripples'}, fountain:{label:'🎆 Fireworks'},
                    aurora:{label:'🌌 Silk'}, stars:{label:'⭐ Starfield'} };
   const GATE=0.05;
@@ -88,7 +90,11 @@ const Anim = (() => {
   let col=[120,200,255], tcol=[120,200,255];  // smoothed + target display colour
   let lastPitchAt=0, rot=0;
   let rings=[], parts=[], touchRings=[], shoots=[], stars=[], blobs=[];
-  let rippleTimer=0, emitAcc=0, wave=null;
+  let rippleTimer=0, emitAcc=0, wave=null, wave2=null;
+  let nebs=[], curNeb=null, quietT=0;        // Nebula: field of living/remembered nebulae
+  let glowPatches=[], memStars=[], rippleSp=null, haze=[];
+  let flows=[], flowers=[], curFlower=null;  // Flow field particles; phyllotaxis flowers
+  const spiro={th:0,px:0,py:0,started:false,f2:2.0};
 
   // ── microphone ──
   function micOn(){ return micState==='on'; }
@@ -211,64 +217,100 @@ const Anim = (() => {
   }
 
   function voiceY(H){ return H*(0.8-0.6*pitch01); }
-
-  // ── 🌟 Nebula: layered living glow — calm core in silence, blooms with voice ──
-  function drawNebula(W,H,dt){
-    const m=Math.min(W,H);
-    const cx=W/2+Math.sin(t*0.21)*W*0.04, cy=voiceY(H);
-    // soft rotating rays behind everything
-    const rays=5; rot+=dt*(0.05+level*0.35);
-    for(let i=0;i<rays;i++){
-      const a=rot+i*Math.PI*2/rays;
-      ctx.save(); ctx.translate(cx,cy); ctx.rotate(a); ctx.scale(1,0.16);
-      const L=m*(0.28+0.45*level);
-      const g=ctx.createRadialGradient(0,0,0,0,0,L);
-      g.addColorStop(0,rgba(col,0.05+0.10*level)); g.addColorStop(1,rgba(col,0));
-      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,L,0,Math.PI*2); ctx.fill();
-      ctx.restore();
-    }
-    // halo (hue-shifted when a palette theme drives colour)
-    const halo=SETTINGS.colorMode==='theme'?palAt(Math.min(1,tp01+0.18)):mix(col,[40,60,160],0.35);
-    const R2=m*(0.20+0.42*level)*(1+0.02*Math.sin(t*2.1));
-    let g=ctx.createRadialGradient(cx,cy,0,cx,cy,R2);
-    g.addColorStop(0,rgba(halo,0.05+0.16*level)); g.addColorStop(1,rgba(halo,0));
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R2,0,Math.PI*2); ctx.fill();
-    // main body
-    const R1=m*(0.10+0.30*level)*(1+0.03*Math.sin(t*5));
-    g=ctx.createRadialGradient(cx,cy,0,cx,cy,R1);
-    g.addColorStop(0,rgba(col,0.10+0.40*level));
-    g.addColorStop(0.65,rgba(col,0.04+0.18*level));
-    g.addColorStop(1,rgba(col,0));
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R1,0,Math.PI*2); ctx.fill();
-    // hot core
-    const R0=R1*0.38, core=mix(col,[255,255,255],0.65);
-    g=ctx.createRadialGradient(cx,cy,0,cx,cy,R0);
-    g.addColorStop(0,rgba(core,0.08+0.5*level)); g.addColorStop(1,rgba(core,0));
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.fill();
+  function vI(){ return SETTINGS.visIntensity||1; }
+  // Scene build-up: how much the screen accumulates (therapist setting) —
+  // caps on remembered nebulae / afterglow / memory stars.
+  function buCap(offV,gentleV,fullV){
+    const b=SETTINGS.buildup||'full';
+    return b==='off'?offV:b==='gentle'?gentleV:fullV;
+  }
+  function glowDisc(x,y,R,c,a){
+    if(a<=0.002||R<=0) return;
+    const g=ctx.createRadialGradient(x,y,0,x,y,R);
+    g.addColorStop(0,rgba(c,a)); g.addColorStop(0.6,rgba(c,a*0.45)); g.addColorStop(1,rgba(c,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2); ctx.fill();
   }
 
-  // ── 💠 Mandala: mirrored radial spectrum — the palette showcase ──
+  // ── 🌟 Nebula: a FIELD of nebulae. Each phrase of voice grows its own nebula
+  //    (position spread across the screen, colour captured from the voice);
+  //    when the voice pauses it is released — it drifts, breathes and slowly
+  //    fades while new ones join it. Many colours and sizes live together. ──
+  function drawNebula(W,H,dt){
+    const m=Math.min(W,H);
+    const cap=buCap(1,4,activeQuality()==='low'?5:8);
+    if(level>0.02){
+      quietT=0;
+      if(!curNeb){
+        curNeb={x:W*(0.15+0.7*Math.random()),y:voiceY(H),R:m*0.05,c:col.slice(),
+          halo:SETTINGS.colorMode==='theme'?palAt(Math.min(1,tp01+0.18)):mix(col,[40,60,160],0.35),
+          ph:Math.random()*6.28,rot:Math.random()*6.28,life:1,
+          vx:(Math.random()-0.5)*m*0.012,vy:(Math.random()-0.5)*m*0.009};
+        nebs.push(curNeb);
+        while(nebs.filter(n=>!n.dying).length>cap){   // soft cap: oldest fades out fast
+          const old=nebs.find(n=>!n.dying&&n!==curNeb); if(!old) break; old.dying=true;
+        }
+      }
+      // the active nebula grows with sustained voice and follows pitch/colour
+      curNeb.R=Math.min(m*0.30,curNeb.R+dt*m*0.11*level);
+      const kf=1-Math.exp(-dt/0.5);
+      curNeb.y+=(voiceY(H)-curNeb.y)*kf;
+      for(let i=0;i<3;i++) curNeb.c[i]+=(col[i]-curNeb.c[i])*kf*0.6;
+    } else {
+      quietT+=dt;
+      if(curNeb&&quietT>0.8) curNeb=null;   // release into the field
+    }
+    nebs=nebs.filter(n=>{
+      const active=n===curNeb;
+      if(!active){
+        n.life-=dt/(n.dying?2.5:26);
+        n.x+=n.vx*dt; n.y+=n.vy*dt;
+        if(n.x<-n.R) n.x=W+n.R; else if(n.x>W+n.R) n.x=-n.R;
+      }
+      if(n.life<=0) return false;
+      n.rot+=dt*(active?0.22:0.05);
+      const breathe=1+0.05*Math.sin(t*1.1+n.ph);
+      const R=n.R*breathe*(active?1+0.10*level:1);
+      const A=vI()*n.life*(active?0.42+0.20*level:0.38);
+      if(active){   // soft rotating rays only behind the one being sung into
+        const rays=activeQuality()==='high'?5:3;
+        for(let i=0;i<rays;i++){
+          ctx.save(); ctx.translate(n.x,n.y); ctx.rotate(n.rot+i*Math.PI*2/rays); ctx.scale(1,0.16);
+          glowDisc(0,0,R*1.9,n.c,0.035+0.05*level);
+          ctx.restore();
+        }
+      }
+      glowDisc(n.x,n.y,R*1.7,n.halo,A*0.18);                    // hue-shifted halo
+      glowDisc(n.x,n.y,R,n.c,A*0.40);                           // body
+      glowDisc(n.x,n.y,R*0.30,mix(n.c,[255,255,255],0.6),A*0.32); // hot core
+      return true;
+    });
+  }
+
+  // ── 💠 Mandala: three layers — bass glow washing the whole screen, the main
+  //    mirrored spectrum ring, and a counter-rotating outer ring of highs ──
   function drawMandala(W,H,dt){
     const q=activeQuality(), N=q==='high'?56:q==='med'?40:28;
     updateBands(N,dt);
     rot+=dt*(0.06+level*0.4);
     const cx=W/2, cy=H/2, m=Math.min(W,H);
-    const R0=m*0.13*(1+0.18*level), Rmax=m*0.33;
+    const R0=m*0.13*(1+0.18*level), Rmax=m*0.30;
+    // LAYER 1: bass fills the room — a huge slow glow behind everything
+    let bass=0; if(bands){ const nb=Math.max(2,N/6|0); for(let i=0;i<nb;i++) bass+=bands[i]; bass/=nb; }
+    glowDisc(cx,cy,m*0.62,SETTINGS.colorMode==='theme'?palAt(0.06):col,vI()*(0.02+0.12*bass));
     // breathing centre
-    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,R0*1.5);
-    g.addColorStop(0,rgba(col,0.05+0.30*level)); g.addColorStop(1,rgba(col,0));
-    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,R0*1.5,0,Math.PI*2); ctx.fill();
+    glowDisc(cx,cy,R0*1.5,col,vI()*(0.05+0.30*level));
     // base ring so the mandala exists even in silence
-    ctx.strokeStyle=rgba(col,0.10+0.15*level); ctx.lineWidth=Math.max(1.5,m*0.004);
+    ctx.strokeStyle=rgba(col,vI()*(0.10+0.15*level)); ctx.lineWidth=Math.max(1.5,m*0.004);
     ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.stroke();
     ctx.lineCap='round';
+    // LAYER 2: main mirrored spectrum
     const bw=2*Math.PI*R0/N*0.42;
     for(let i=0;i<N;i++){
       const v=bands?bands[i]:0; if(v<0.03) continue;
       const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],v*0.4);
       const len=Math.pow(v,1.5)*Rmax+bw*0.5;
       const ang=rot+i/N*Math.PI*2;
-      ctx.strokeStyle=rgba(c,0.18+0.65*v);
+      ctx.strokeStyle=rgba(c,vI()*(0.18+0.65*v));
       ctx.lineWidth=bw*(0.55+0.65*v);
       for(const s of [1,-1]){   // vertical mirror → kaleidoscope symmetry
         const ca=Math.cos(ang)*s, sa=Math.sin(ang);
@@ -278,41 +320,57 @@ const Anim = (() => {
         ctx.stroke();
       }
     }
+    // LAYER 3: outer ring of the high bands, counter-rotating, reaching the edges
+    const Ro=m*0.40;
+    for(let i=N>>1;i<N;i++){
+      const v=bands?bands[i]:0; if(v<0.05) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],0.5);
+      const len=Math.pow(v,1.5)*m*0.16+bw*0.3;
+      const ang=-rot*1.4+(i-(N>>1))/(N>>1)*Math.PI*2;
+      ctx.strokeStyle=rgba(c,vI()*(0.10+0.40*v));
+      ctx.lineWidth=bw*0.4;
+      for(const s of [1,-1]){
+        const ca=Math.cos(ang)*s, sa=Math.sin(ang);
+        ctx.beginPath();
+        ctx.moveTo(cx+ca*Ro,cy+sa*Ro);
+        ctx.lineTo(cx+ca*(Ro+len),cy+sa*(Ro+len));
+        ctx.stroke();
+      }
+    }
   }
 
   // ── 🫧 Lava: drifting glow blobs, each swelling with its own frequency band —
   //    the software lava lamp (grew out of the soundpanel prototype) ──
   function buildBlobs(W,H){
-    const q=activeQuality(), n=q==='high'?14:q==='med'?10:7;
+    const q=activeQuality(), n=q==='high'?16:q==='med'?11:8;
     const m=Math.min(W,H);
     blobs=[];
-    for(let i=0;i<n;i++)
-      blobs.push({x:Math.random()*W,y:Math.random()*H,
-        vx:(Math.random()-0.5)*m*0.05,vy:(Math.random()-0.5)*m*0.05,
-        r:0.06+Math.random()*0.05,ph:Math.random()*Math.PI*2,sp:0.15+Math.random()*0.45});
+    for(let i=0;i<n;i++){
+      const big=i<n*0.4;   // depth: big slow background blobs behind small lively ones
+      blobs.push({big,x:Math.random()*W,y:Math.random()*H,
+        vx:(Math.random()-0.5)*m*(big?0.02:0.05),vy:(Math.random()-0.5)*m*(big?0.02:0.05),
+        r:(big?0.13:0.05)+Math.random()*(big?0.07:0.04),
+        ph:Math.random()*Math.PI*2,sp:(big?0.08:0.15)+Math.random()*(big?0.2:0.45)});
+    }
   }
   function drawLava(W,H,dt){
     if(!blobs.length) buildBlobs(W,H);
     updateBands(blobs.length,dt);
     const m=Math.min(W,H);
     for(let i=0;i<blobs.length;i++){
-      const b=blobs[i], v=bands?bands[i]:0;
-      b.vx+=Math.sin(t*b.sp+b.ph)*m*0.05*dt;
-      b.vy+=Math.cos(t*b.sp*0.9+b.ph*1.7)*m*0.05*dt;
+      const b=blobs[i], v=bands?bands[i]:0, slow=b.big?0.45:1;
+      b.vx+=Math.sin(t*b.sp+b.ph)*m*0.05*dt*slow;
+      b.vy+=Math.cos(t*b.sp*0.9+b.ph*1.7)*m*0.05*dt*slow;
       b.vx*=Math.pow(0.5,dt); b.vy*=Math.pow(0.5,dt);
       b.x+=b.vx*dt*(1+level*1.5); b.y+=b.vy*dt*(1+level*1.5);
-      const R=m*b.r*(0.8+0.2*Math.sin(t*0.5+b.ph))*(1+1.3*v+0.5*level);
+      const R=m*b.r*(0.8+0.2*Math.sin(t*0.5+b.ph))*(1+(b.big?0.7:1.3)*v+0.5*level);
       if(b.x<-R) b.x=W+R; else if(b.x>W+R) b.x=-R;   // wrap softly
       if(b.y<-R) b.y=H+R; else if(b.y>H+R) b.y=-R;
       const c=SETTINGS.colorMode==='theme'
         ?palAt(i/(blobs.length-1))
         :mix(col,[255,255,255],(i%4)*0.12);
-      const a=0.06+0.10*level+0.28*v;
-      const g=ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,R);
-      g.addColorStop(0,rgba(c,a));
-      g.addColorStop(0.65,rgba(c,a*0.45));
-      g.addColorStop(1,rgba(c,0));
-      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(b.x,b.y,R,0,Math.PI*2); ctx.fill();
+      const a=vI()*(b.big?0.55:1)*(0.06+0.10*level+0.28*v);
+      glowDisc(b.x,b.y,R,c,a);
     }
   }
 
@@ -321,15 +379,16 @@ const Anim = (() => {
   function drawWaves(W,H,dt){
     if(level<=0.004) return;
     const N=110;
-    if(!wave||wave.length!==N) wave=new Float32Array(N);
-    const step=(ABUF.length/N)|0, k=1-Math.exp(-dt/0.06);
+    if(!wave||wave.length!==N){ wave=new Float32Array(N); wave2=new Float32Array(N); }
+    const step=(ABUF.length/N)|0, k=1-Math.exp(-dt/0.06), k2=1-Math.exp(-dt/0.5);
     for(let i=0;i<N;i++){
       let s=0,c=0;
       for(let j=0;j<step;j+=4){ s+=ABUF[i*step+j]; c++; }
       wave[i]+=(s/c-wave[i])*k;
+      wave2[i]+=(wave[i]-wave2[i])*k2;   // slow "memory" envelope
     }
     const mul=(SENS[SETTINGS.sensitivity]||SENS.talk).mul*(SETTINGS.boost||1);
-    const cy=H/2, amp=H*0.30;
+    const cy=H/2;
     const grad=ctx.createLinearGradient(0,0,W,0);
     if(SETTINGS.colorMode==='theme'){
       for(let s=0;s<=4;s++) grad.addColorStop(s/4,rgba(palAt(s/4),1));
@@ -338,38 +397,45 @@ const Anim = (() => {
       grad.addColorStop(0.5,rgba(col,1));
       grad.addColorStop(1,rgba(mix(col,[255,255,255],0.3),1));
     }
-    const trace=()=>{
+    const trace=(buf,amp,flip)=>{
       ctx.beginPath();
       for(let i=0;i<N;i++){
         const x=i/(N-1)*W;
-        const y=cy+Math.max(-1,Math.min(1,wave[i]*mul))*amp;
+        const y=cy+(flip?-1:1)*Math.max(-1,Math.min(1,buf[i]*mul))*amp;
         if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
       }
       ctx.stroke();
     };
     ctx.lineJoin='round'; ctx.lineCap='round';
     ctx.strokeStyle=grad;
-    ctx.globalAlpha=0.10+0.18*level; ctx.lineWidth=Math.max(6,H*0.022); trace();   // halo
-    ctx.globalAlpha=0.25+0.45*level; ctx.lineWidth=Math.max(2.5,H*0.007); trace(); // body
-    ctx.globalAlpha=Math.min(1,0.5+0.5*level); ctx.lineWidth=1.5; trace();         // core
+    // LAYER 1: the slow memory of the last phrase, huge and soft, filling the screen
+    ctx.globalAlpha=vI()*(0.05+0.10*level); ctx.lineWidth=Math.max(10,H*0.05);
+    trace(wave2,H*0.44,false);
+    // LAYER 2: mirrored ghost — symmetric, sculptural
+    ctx.globalAlpha=vI()*(0.10+0.16*level); ctx.lineWidth=Math.max(2.5,H*0.007);
+    trace(wave,H*0.30,true);
+    // LAYER 3: the live trace, halo + body + bright core
+    ctx.globalAlpha=vI()*(0.10+0.18*level); ctx.lineWidth=Math.max(6,H*0.022); trace(wave,H*0.30,false);
+    ctx.globalAlpha=vI()*(0.25+0.45*level); ctx.lineWidth=Math.max(2.5,H*0.007); trace(wave,H*0.30,false);
+    ctx.globalAlpha=Math.min(1,vI()*(0.5+0.5*level)); ctx.lineWidth=1.5; trace(wave,H*0.30,false);
     ctx.globalAlpha=1;
   }
 
-  // ── 💧 Ripples: dual-stroke gradient rings from the voice point ──
+  // ── 💧 Ripples: each phrase rains from its own spot — the pool fills with
+  //    intersecting rings of different colours ──
   function drawRipples(W,H,dt){
+    if(!rippleSp) rippleSp={x:W/2,y:H/2};
+    if(onset()) rippleSp.x=W*(0.15+0.7*Math.random());   // new phrase, new place
+    rippleSp.y+=(voiceY(H)-rippleSp.y)*(1-Math.exp(-dt/0.4));
     rippleTimer-=dt;
     if(level>0.02&&rippleTimer<=0){
       rippleTimer=0.4-0.3*level;
-      rings.push({x:W/2+Math.sin(t*0.6)*W*0.05,y:voiceY(H),r:Math.min(W,H)*0.02,
-        v:(0.25+0.7*level)*Math.min(W,H),a:0.30+0.55*level,c:col.slice()});
+      rings.push({x:rippleSp.x,y:rippleSp.y,r:Math.min(W,H)*0.02,
+        v:(0.25+0.7*level)*Math.min(W,H),a:vI()*(0.30+0.55*level),c:col.slice()});
     }
     // soft source glow where rings are born
-    if(level>0.01){
-      const R=Math.min(W,H)*(0.03+0.10*level);
-      const g=ctx.createRadialGradient(W/2,voiceY(H),0,W/2,voiceY(H),R);
-      g.addColorStop(0,rgba(col,0.10+0.35*level)); g.addColorStop(1,rgba(col,0));
-      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(W/2,voiceY(H),R,0,Math.PI*2); ctx.fill();
-    }
+    if(level>0.01)
+      glowDisc(rippleSp.x,rippleSp.y,Math.min(W,H)*(0.03+0.10*level),col,vI()*(0.10+0.35*level));
     const lim=Math.hypot(W,H);
     rings=rings.filter(gg=>{
       gg.r+=gg.v*dt; gg.a*=Math.pow(0.25,dt);
@@ -384,20 +450,31 @@ const Anim = (() => {
     });
   }
 
-  // ── 🎆 Fireworks: quiet sounds = rising embers, sharp sounds = comet bursts ──
+  // ── 🎆 Fireworks: quiet sounds = rising embers across the whole skyline,
+  //    sharp sounds = comet bursts that leave a lingering glow in the sky ──
   function drawFireworks(W,H,dt){
     const q=activeQuality(), cap=q==='high'?450:q==='med'?280:140;
+    // afterglow: bursts stain the sky, slowly fading (build-up)
+    glowPatches=glowPatches.filter(p=>{
+      p.life-=dt/8;
+      if(p.life<=0) return false;
+      glowDisc(p.x,p.y,p.R,p.c,vI()*p.life*0.10);
+      return true;
+    });
     emitAcc+=dt*level*55;
     while(emitAcc>=1&&parts.length<cap){
       emitAcc--;
-      parts.push({x:W*(0.5+(Math.random()-0.5)*0.24),y:H*0.98,
+      parts.push({x:W*Math.random(),y:H*0.98,
         vx:(Math.random()-0.5)*W*0.06,
         vy:-(0.18+0.45*level)*H*(0.7+Math.random()*0.5),
         size:(1+Math.random()*2)*(H/800),c:col.slice(),life:1,trail:false,px:0,py:0});
     }
     emitAcc=Math.min(emitAcc,3);
     if(onset()&&parts.length<cap-30){
-      const bx=W*(0.25+0.5*Math.random()), by=voiceY(H);
+      const bx=W*(0.15+0.7*Math.random()), by=voiceY(H);
+      const gCap=buCap(0,4,10);
+      if(gCap){ glowPatches.push({x:bx,y:by,R:Math.min(W,H)*(0.15+0.2*level),c:col.slice(),life:1});
+        while(glowPatches.length>gCap) glowPatches.shift(); }
       const n=Math.min(cap-parts.length,(24+level*56)|0);
       const sp=(0.22+0.5*level)*Math.min(W,H);
       for(let i=0;i<n;i++){
@@ -425,15 +502,17 @@ const Anim = (() => {
     });
   }
 
-  // ── 🌌 Silk: gradient ribbons that breathe with the voice ──
+  // ── 🌌 Silk: a voice-following ribbon cluster over two slow background
+  //    curtains near the top and bottom — the whole screen breathes ──
   function drawSilk(W,H,dt){
     if(level<=0.004) return;
     const STEPS=28;
-    for(let b=0;b<4;b++){
-      const yc=voiceY(H)+(b-1.5)*H*0.065;
-      const amp=H*(0.02+0.11*level)*(1+b*0.22);
-      const w=H*(0.015+0.045*level)*(1-b*0.12);
-      const alpha=(0.05+0.22*level)*(1-b*0.16);
+    for(let b=-2;b<4;b++){
+      const back=b<0;   // b=-2,-1: fixed background curtains
+      const yc=back?H*(b===-2?0.22:0.78):voiceY(H)+(b-1.5)*H*0.065;
+      const amp=back?H*(0.05+0.06*level):H*(0.02+0.11*level)*(1+b*0.22);
+      const w=back?H*(0.05+0.03*level):H*(0.015+0.045*level)*(1-b*0.12);
+      const alpha=vI()*(back?(0.03+0.08*level):(0.05+0.22*level)*(1-b*0.16));
       const grad=ctx.createLinearGradient(0,0,W,0);
       if(SETTINGS.colorMode==='theme'){
         const sh=b*0.12+Math.sin(t*0.13)*0.1;
@@ -463,32 +542,48 @@ const Anim = (() => {
   //    pitch height, sharp sounds send a shooting star ──
   function buildStars(W,H){
     const q=activeQuality(), n=q==='high'?140:q==='med'?90:55;
-    stars=[];
+    stars=[]; haze=[];
     for(let i=0;i<n;i++)
       stars.push({x:Math.random()*W,y:Math.random()*H,
         r:(0.6+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2});
+    for(let i=0;i<3;i++)   // faint fixed nebula haze behind the sky
+      haze.push({x:W*(0.15+0.7*Math.random()),y:H*(0.15+0.7*Math.random()),
+        R:Math.min(W,H)*(0.25+0.2*Math.random()),ci:0.15+0.35*i});
   }
   function drawStars(W,H,dt){
     if(!stars.length) buildStars(W,H);
+    for(const hz of haze)
+      glowDisc(hz.x,hz.y,hz.R,SETTINGS.colorMode==='theme'?palAt(hz.ci):col,vI()*0.035);
     const bandY=voiceY(H), bandW=H*0.22;
-    for(const s of stars){
-      const tw=0.14+0.12*Math.sin(t*s.sp+s.ph);
+    const star=(s,base,c0)=>{
+      const tw=base+0.12*Math.sin(t*s.sp+s.ph);
       const d=Math.abs(s.y-bandY)/bandW;
       const lit=level*Math.max(0,1-d*d);            // gaussian-ish band at pitch height
-      const c=lit>0.02?mix([255,255,255],col,Math.min(1,lit*1.5)):[255,255,255];
-      const a=Math.min(1,tw+lit*0.9);
+      const c=lit>0.02?mix(c0,col,Math.min(1,lit*1.5)):c0;
+      const a=Math.min(1,vI()*(tw+lit*0.9));
       const r=s.r*(1+lit*1.6);
       ctx.fillStyle=rgba(c,a);
       ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fill();
-      if(lit>0.25){                                  // cross-sparkle on bright stars
+      if(lit>0.25||(s.mem&&a>0.4)){                  // cross-sparkle on bright stars
         ctx.strokeStyle=rgba(c,a*0.5); ctx.lineWidth=1;
         ctx.beginPath();
         ctx.moveTo(s.x-r*3,s.y); ctx.lineTo(s.x+r*3,s.y);
         ctx.moveTo(s.x,s.y-r*3); ctx.lineTo(s.x,s.y+r*3);
         ctx.stroke();
       }
+    };
+    for(const s of stars) star(s,0.14,[255,255,255]);
+    // memory stars: every sharp sound adds a NEW coloured star — the session
+    // literally builds this student's sky
+    for(const s of memStars) star(s,0.30,s.c);
+    const mCap=buCap(0,14,40), hit=onset();
+    if(hit&&mCap){
+      memStars.push({x:W*(0.05+0.9*Math.random()),y:voiceY(H)*(0.85+0.2*Math.random()),
+        r:(1.2+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,
+        sp:0.3+Math.random()*1.2,c:col.slice(),mem:true});
+      while(memStars.length>mCap) memStars.shift();
     }
-    if(onset()&&shoots.length<3){
+    if(hit&&shoots.length<3){
       const fromLeft=Math.random()<0.5;
       shoots.push({x:fromLeft?-40:W+40,y:H*(0.08+Math.random()*0.35),
         vx:(fromLeft?1:-1)*W*(0.55+0.4*Math.random()),vy:H*(0.06+0.10*Math.random()),
@@ -504,6 +599,105 @@ const Anim = (() => {
       ctx.beginPath(); ctx.moveTo(px-s.vx*0.12,py-s.vy*0.12); ctx.lineTo(s.x,s.y); ctx.stroke();
       return true;
     });
+  }
+
+  // ── 🌀 Flow: particles carried along a time-varying vector field (layered
+  //    sines standing in for curl noise) — silky weaving trails. Loudness
+  //    drives the current's speed and density; pitch steers the whole field. ──
+  function flowAng(x,y){
+    const s=2.2/Math.min(canvas.width,canvas.height);
+    return (Math.sin(y*s*1.3+t*0.35)+Math.cos(x*s*0.9-t*0.25)
+          +1.3*Math.sin((x*s*0.5+y*s*0.7)+t*0.15))*1.6+pitch01*2.5;
+  }
+  function drawFlow(W,H,dt){
+    const q=activeQuality(), cap=q==='high'?550:q==='med'?350:180;
+    emitAcc+=dt*(6+level*cap*0.45);
+    while(emitAcc>=1&&flows.length<cap){
+      emitAcc--;
+      const c=SETTINGS.colorMode==='theme'
+        ?palAt(Math.max(0,Math.min(1,tp01+(Math.random()-0.5)*0.3)))
+        :col.slice();
+      flows.push({x:Math.random()*W,y:Math.random()*H,life:2+Math.random()*2.5,c});
+    }
+    emitAcc=Math.min(emitAcc,4);
+    const sp=(0.05+0.18*level)*Math.min(W,H);
+    ctx.lineCap='round'; ctx.lineWidth=1.5;
+    flows=flows.filter(p=>{
+      const a=flowAng(p.x,p.y), px=p.x, py=p.y;
+      p.x+=Math.cos(a)*sp*dt; p.y+=Math.sin(a)*sp*dt;
+      p.life-=dt*0.45;
+      if(p.life<=0||p.x<-8||p.x>W+8||p.y<-8||p.y>H+8) return false;
+      ctx.strokeStyle=rgba(p.c,vI()*Math.min(0.55,p.life*0.25)*(0.35+1.1*level));
+      ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(p.x,p.y); ctx.stroke();
+      return true;
+    });
+  }
+
+  // ── 🌻 Garden: phyllotaxis — every phrase grows a flower, seed by seed, on
+  //    the golden angle (Vogel's spiral). Sustained voice = bigger bloom;
+  //    the session grows a garden across the screen. ──
+  const GOLD=Math.PI*(3-Math.sqrt(5));
+  function drawGarden(W,H,dt){
+    const m=Math.min(W,H);
+    const q=activeQuality(), maxN=q==='high'?240:q==='med'?170:110;
+    const cap=buCap(1,3,6);
+    if(level>0.02){
+      quietT=0;
+      if(!curFlower){
+        curFlower={x:W*(0.15+0.7*Math.random()),y:H*(0.2+0.6*Math.random()),
+          n:10,ph:Math.random()*6.28,c:col.slice(),life:1,
+          R:m*0.20*(0.8+Math.random()*0.4)};
+        flowers.push(curFlower);
+        while(flowers.filter(f=>!f.dying).length>cap){
+          const old=flowers.find(f=>!f.dying&&f!==curFlower); if(!old) break; old.dying=true;
+        }
+      }
+      curFlower.n=Math.min(maxN,curFlower.n+dt*(15+150*level));
+      const kf=1-Math.exp(-dt/0.6);
+      for(let i=0;i<3;i++) curFlower.c[i]+=(col[i]-curFlower.c[i])*kf*0.5;
+    } else { quietT+=dt; if(curFlower&&quietT>0.8) curFlower=null; }
+    flowers=flowers.filter(f=>{
+      if(f!==curFlower) f.life-=dt/(f.dying?2.5:30);
+      if(f.life<=0) return false;
+      const rotF=f.ph+t*0.03, n=f.n|0, act=f===curFlower;
+      glowDisc(f.x,f.y,f.R*0.55,mix(f.c,[255,255,255],0.4),
+        vI()*f.life*(act?0.10+0.25*level:0.08));
+      for(let i=0;i<n;i++){
+        const fr=i/maxN;
+        const r=f.R*Math.sqrt(fr), a=i*GOLD+rotF;
+        const x=f.x+Math.cos(a)*r, y=f.y+Math.sin(a)*r;
+        const c=SETTINGS.colorMode==='theme'?palAt(fr):mix(f.c,[255,255,255],fr*0.5);
+        ctx.fillStyle=rgba(c,vI()*f.life*(0.22+0.28*(1-fr))*(act?1+0.5*level:0.85));
+        ctx.beginPath(); ctx.arc(x,y,(0.9+fr*2.4)*(m/700)*1.6,0,Math.PI*2); ctx.fill();
+      }
+      return true;
+    });
+  }
+
+  // ── 🖋 Pendulum: a harmonograph — two damped virtual pendulums draw
+  //    Lissajous-family curves. The voice moves the pen (speed + brightness);
+  //    pitch slowly morphs the frequency ratio so the figure evolves. ──
+  function drawSpiro(W,H,dt){
+    const m=Math.min(W,H), cx=W/2, cy=H/2;
+    const targetF2=1+Math.round(1+pitch01*6)/2;             // 1.5 … 4 in half steps
+    spiro.f2+=(targetF2+0.0015-spiro.f2)*(1-Math.exp(-dt/3)); // slight detune → precession
+    const A=W*0.36, B=H*0.36;
+    const adv=dt*(0.15+3.2*level);
+    if(adv<=0.001) return;
+    const steps=Math.min(140,Math.max(2,(adv/0.008)|0)), dth=adv/steps;
+    const pen=th=>[cx+A*(0.62*Math.sin(th)+0.38*Math.sin(spiro.f2*th+1.2)),
+                   cy+B*(0.62*Math.sin(spiro.f2*th+0.5)+0.38*Math.sin(th*1.5+2.1))];
+    if(!spiro.started){ const p=pen(spiro.th); spiro.px=p[0]; spiro.py=p[1]; spiro.started=true; }
+    ctx.lineCap='round';
+    for(let i=0;i<steps;i++){
+      spiro.th+=dth;
+      const p=pen(spiro.th);
+      const c=SETTINGS.colorMode==='theme'?palAt((Math.sin(spiro.th*0.021)+1)/2):col;
+      ctx.strokeStyle=rgba(c,vI()*(0.20+0.55*level));
+      ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.moveTo(spiro.px,spiro.py); ctx.lineTo(p[0],p[1]); ctx.stroke();
+      spiro.px=p[0]; spiro.py=p[1];
+    }
   }
 
   function drawTouchRings(W,H,dt){
@@ -528,6 +722,7 @@ const Anim = (() => {
         colors:THEMES[k].colors.map(c=>c.map(v=>v/255))};
       return o; })(),
     defaults:{ theme:'prism', sensitivity:'talk', boost:1, visMode:'bloom',
+      buildup:'full', visIntensity:1,
       mode:'flow', paint:true, yAxis:'none', colorMode:'theme', showLabels:false },
     schema:[],
     railButtons:[
@@ -566,6 +761,10 @@ const Anim = (() => {
     // ✨ Visuals tab
     buildVisuals(el){
       el.appendChild(makeChips('Visual style','visMode',VISMODES,()=>{ pokeSim(); }));
+      el.appendChild(makeChips('Scene build-up (how much stays on screen)','buildup',
+        {off:{label:'Just one'},gentle:{label:'Gentle'},full:{label:'Full scene'}}));
+      el.appendChild(makeSlider({key:'visIntensity',label:'Visual intensity',
+        min:0.4,max:1.5,step:0.05,dp:2,onChange:pokeSim}));
       el.appendChild(makeChips('Colour','colorMode',
         {theme:{label:'🎨 Theme colours'},note:{label:'🎵 Boomwhacker notes'},single:{label:'⬤ One colour'}},
         buildVisualsPanel));
@@ -627,7 +826,9 @@ const Anim = (() => {
       if(!ctx) return;
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
-      const fade={bloom:0.14,mandala:0.30,lava:0.12,waves:0.30,ripples:0.22,fountain:0.10,aurora:0.20,stars:0.45}[mode]||0.15;
+      let fade={bloom:0.14,mandala:0.30,lava:0.12,waves:0.30,flow:0.045,garden:0.30,
+        ripples:0.22,fountain:0.10,aurora:0.20,stars:0.45}[mode]||0.15;
+      if(mode==='spiro') fade=buCap(0.06,0.02,0.008);   // pendulum drawing persists
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
       ctx.fillRect(0,0,W,H);
@@ -635,6 +836,9 @@ const Anim = (() => {
       if(mode==='mandala') drawMandala(W,H,dt);
       else if(mode==='lava') drawLava(W,H,dt);
       else if(mode==='waves') drawWaves(W,H,dt);
+      else if(mode==='flow') drawFlow(W,H,dt);
+      else if(mode==='garden') drawGarden(W,H,dt);
+      else if(mode==='spiro') drawSpiro(W,H,dt);
       else if(mode==='ripples') drawRipples(W,H,dt);
       else if(mode==='fountain') drawFireworks(W,H,dt);
       else if(mode==='aurora') drawSilk(W,H,dt);
@@ -645,12 +849,16 @@ const Anim = (() => {
       prevLevel=level;
       // keep a ~20 s animated tail after the last activity, then let the sim
       // sleep (the last frame stays on screen as a calm still)
-      if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length) lastActive=t;
+      if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
+         nebs.length||flows.length||flowers.length||glowPatches.length) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){
       if(!ctx) return;
       rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[]; blobs=[];
+      nebs=[]; curNeb=null; flows=[]; flowers=[]; curFlower=null;
+      glowPatches=[]; memStars=[]; rippleSp=null; haze=[]; wave=null; wave2=null;
+      spiro.th=0; spiro.started=false;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);
