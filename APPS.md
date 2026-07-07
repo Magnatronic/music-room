@@ -144,8 +144,11 @@ software fallback is ever wanted, the safest design was granular record-then-rep
 
 ## 7. 📼 Sampler Pads — `sampler.html` ✅ BUILT
 
-**Concept.** Koala-lite: 6–9 big pads. Hold a pad to record (MediaRecorder from the mic),
-tap to play. Per-pad colour + icon; per-pad pitch/speed slider; optional loop toggle.
+**Concept.** Koala-lite: 4–9 big pads, tap to play. The rail ✏️ button toggles edit mode:
+tapping a pad there opens an editor dialog — record from the mic (up to 20 s, silence
+auto-trimmed), trim by dragging waveform handles, per-pad label (emoji or short word),
+pitch/speed. Looping pads show tempo controls automatically (BPM starts at the loop's
+natural tempo) for simple backing tracks. Sounds export/import as a .json file.
 
 **Therapy goals.** The student's own voice/sounds become the instrument — identity, motivation,
 personalized sessions ("play YOUR sound"). Therapists can pre-record session-specific sounds.
