@@ -97,6 +97,7 @@ const Anim = (() => {
   let flows=[], flowers=[], curFlower=null;  // Flow field particles; phyllotaxis flowers
   const spiro={th:0,px:0,py:0,started:false,f2:2.0};
   let pix=null, ledPulses=[], ledChase=0;    // Pixels grid; LED strip pulses
+  let lastTouchAct=0;                        // rate-limit for discrete touch spawns
 
   // ── microphone ──
   function micOn(){ return micState==='on'; }
@@ -220,6 +221,28 @@ const Anim = (() => {
 
   function voiceY(H){ return H*(0.8-0.6*pitch01); }
   function vI(){ return SETTINGS.visIntensity||1; }
+  // Per-style fine-tuning: each mode exposes 2-3 multipliers (default 1 = the
+  // shipped look). Stored in SETTINGS.tw[mode][param] so they persist per
+  // device and are captured by ⭐ Presets — per-student tuning for therapists.
+  const TWEAKS={
+    bloom:  [['count','How many can live',0.3,1.6],['size','Size',0.4,1.8]],
+    mandala:[['detail','Detail (bars)',0.5,1.5],['reach','Reach',0.5,1.6],['bass','Bass glow',0,2]],
+    lava:   [['count','Blobs',0.4,1.8],['size','Size',0.5,2]],
+    waves:  [['height','Height',0.4,1.8],['thick','Thickness',0.4,2.2],['memory','Memory layer',0,2]],
+    flow:   [['density','Density',0.2,1.5],['speed','Speed',0.3,2],['length','Trail length',0.4,2]],
+    garden: [['count','Flowers',0.3,1.7],['size','Size',0.5,1.8],['detail','Seed detail',0.5,1.4]],
+    spiro:  [['speed','Pen speed',0.3,2.5],['size','Size',0.5,1.35],['thick','Line width',0.5,3]],
+    pixels: [['cell','Pixel size',0.6,2],['growth','Growth speed',0.3,2.5],['life','Lifetime',0.3,2.5]],
+    leds:   [['size','LED size',0.7,1.6],['chase','Chase speed',0,2.5],['eq','Equalizer height',0.4,1.5]],
+    ripples:[['rate','Ring rate',0.4,2.5],['speed','Ring speed',0.4,2],['thick','Ring width',0.4,2.5]],
+    fountain:[['embers','Embers',0,2],['burst','Burst size',0.4,2],['fall','Fall speed',0.3,2]],
+    aurora: [['ribbons','Ribbons',0.3,1.6],['height','Wave height',0.4,2],['width','Ribbon width',0.4,2]],
+    stars:  [['count','Stars',0.4,2],['twinkle','Twinkle',0.2,2],['band','Voice band',0.4,2]],
+  };
+  function tw(p){
+    const o=SETTINGS.tw&&SETTINGS.tw[SETTINGS.visMode];
+    const v=o?o[p]:null; return v==null?1:v;
+  }
   // Scene build-up: how much the screen accumulates (therapist setting) —
   // caps on remembered nebulae / afterglow / memory stars.
   function buCap(offV,gentleV,fullV){
@@ -238,12 +261,12 @@ const Anim = (() => {
   //    when the voice pauses it is released — it drifts, breathes and slowly
   //    fades while new ones join it. Many colours and sizes live together. ──
   function drawNebula(W,H,dt){
-    const m=Math.min(W,H);
-    const cap=buCap(1,4,activeQuality()==='low'?5:8);
+    const m=Math.min(W,H), sz=tw('size');
+    const cap=Math.max(1,Math.round(buCap(1,4,activeQuality()==='low'?5:8)*tw('count')));
     if(level>0.02){
       quietT=0;
       if(!curNeb){
-        curNeb={x:W*(0.15+0.7*Math.random()),y:voiceY(H),R:m*0.05,c:col.slice(),
+        curNeb={x:W*(0.15+0.7*Math.random()),y:voiceY(H),R:m*0.05*sz,c:col.slice(),
           halo:SETTINGS.colorMode==='theme'?palAt(Math.min(1,tp01+0.18)):mix(col,[40,60,160],0.35),
           ph:Math.random()*6.28,rot:Math.random()*6.28,life:1,
           vx:(Math.random()-0.5)*m*0.012,vy:(Math.random()-0.5)*m*0.009};
@@ -253,7 +276,7 @@ const Anim = (() => {
         }
       }
       // the active nebula grows with sustained voice and follows pitch/colour
-      curNeb.R=Math.min(m*0.30,curNeb.R+dt*m*0.11*level);
+      curNeb.R=Math.min(m*0.30*sz,curNeb.R+dt*m*0.11*level*sz);
       const kf=1-Math.exp(-dt/0.5);
       curNeb.y+=(voiceY(H)-curNeb.y)*kf;
       for(let i=0;i<3;i++) curNeb.c[i]+=(col[i]-curNeb.c[i])*kf*0.6;
@@ -282,8 +305,8 @@ const Anim = (() => {
         }
       }
       glowDisc(n.x,n.y,R*1.7,n.halo,A*0.18);                    // hue-shifted halo
-      glowDisc(n.x,n.y,R,n.c,A*0.40);                           // body
-      glowDisc(n.x,n.y,R*0.30,mix(n.c,[255,255,255],0.6),A*0.32); // hot core
+      glowDisc(n.x,n.y,R,n.c,A*0.38);                           // body
+      glowDisc(n.x,n.y,R*0.26,mix(n.c,[255,255,255],0.4),A*0.16); // warm centre, not a headlight
       return true;
     });
   }
@@ -291,14 +314,15 @@ const Anim = (() => {
   // ── 💠 Mandala: three layers — bass glow washing the whole screen, the main
   //    mirrored spectrum ring, and a counter-rotating outer ring of highs ──
   function drawMandala(W,H,dt){
-    const q=activeQuality(), N=q==='high'?56:q==='med'?40:28;
+    const q=activeQuality(), base=q==='high'?56:q==='med'?40:28;
+    const N=Math.max(16,Math.min(72,Math.round(base*tw('detail')/4)*4));
     updateBands(N,dt);
     rot+=dt*(0.06+level*0.4);
     const cx=W/2, cy=H/2, m=Math.min(W,H);
-    const R0=m*0.13*(1+0.18*level), Rmax=m*0.30;
+    const R0=m*0.13*(1+0.18*level), Rmax=m*0.30*tw('reach');
     // LAYER 1: bass fills the room — a huge slow glow behind everything
     let bass=0; if(bands){ const nb=Math.max(2,N/6|0); for(let i=0;i<nb;i++) bass+=bands[i]; bass/=nb; }
-    glowDisc(cx,cy,m*0.62,SETTINGS.colorMode==='theme'?palAt(0.06):col,vI()*(0.02+0.12*bass));
+    glowDisc(cx,cy,m*0.62,SETTINGS.colorMode==='theme'?palAt(0.06):col,vI()*tw('bass')*(0.02+0.12*bass));
     // breathing centre
     glowDisc(cx,cy,R0*1.5,col,vI()*(0.05+0.30*level));
     // base ring so the mandala exists even in silence
@@ -327,7 +351,7 @@ const Anim = (() => {
     for(let i=N>>1;i<N;i++){
       const v=bands?bands[i]:0; if(v<0.05) continue;
       const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],0.5);
-      const len=Math.pow(v,1.5)*m*0.16+bw*0.3;
+      const len=(Math.pow(v,1.5)*m*0.16+bw*0.3)*tw('reach');
       const ang=-rot*1.4+(i-(N>>1))/(N>>1)*Math.PI*2;
       ctx.strokeStyle=rgba(c,vI()*(0.10+0.40*v));
       ctx.lineWidth=bw*0.4;
@@ -344,7 +368,8 @@ const Anim = (() => {
   // ── 🫧 Lava: drifting glow blobs, each swelling with its own frequency band —
   //    the software lava lamp (grew out of the soundpanel prototype) ──
   function buildBlobs(W,H){
-    const q=activeQuality(), n=q==='high'?16:q==='med'?11:8;
+    const q=activeQuality();
+    const n=Math.max(3,Math.round((q==='high'?16:q==='med'?11:8)*tw('count')));
     const m=Math.min(W,H);
     blobs=[];
     for(let i=0;i<n;i++){
@@ -356,16 +381,19 @@ const Anim = (() => {
     }
   }
   function drawLava(W,H,dt){
-    if(!blobs.length) buildBlobs(W,H);
+    const q=activeQuality();
+    const want=Math.max(3,Math.round((q==='high'?16:q==='med'?11:8)*tw('count')));
+    if(blobs.length!==want) buildBlobs(W,H);
     updateBands(blobs.length,dt);
     const m=Math.min(W,H);
     for(let i=0;i<blobs.length;i++){
-      const b=blobs[i], v=bands?bands[i]:0, slow=b.big?0.45:1;
+      const b=blobs[i], v=Math.min(1,(bands?bands[i]:0)+(b.hot||0)), slow=b.big?0.45:1;
+      b.hot=Math.max(0,(b.hot||0)-dt*1.5);
       b.vx+=Math.sin(t*b.sp+b.ph)*m*0.05*dt*slow;
       b.vy+=Math.cos(t*b.sp*0.9+b.ph*1.7)*m*0.05*dt*slow;
       b.vx*=Math.pow(0.5,dt); b.vy*=Math.pow(0.5,dt);
       b.x+=b.vx*dt*(1+level*1.5); b.y+=b.vy*dt*(1+level*1.5);
-      const R=m*b.r*(0.8+0.2*Math.sin(t*0.5+b.ph))*(1+(b.big?0.7:1.3)*v+0.5*level);
+      const R=m*b.r*tw('size')*(0.8+0.2*Math.sin(t*0.5+b.ph))*(1+(b.big?0.7:1.3)*v+0.5*level);
       if(b.x<-R) b.x=W+R; else if(b.x>W+R) b.x=-R;   // wrap softly
       if(b.y<-R) b.y=H+R; else if(b.y>H+R) b.y=-R;
       const c=SETTINGS.colorMode==='theme'
@@ -410,16 +438,17 @@ const Anim = (() => {
     };
     ctx.lineJoin='round'; ctx.lineCap='round';
     ctx.strokeStyle=grad;
+    const hh=tw('height'), th=tw('thick');
     // LAYER 1: the slow memory of the last phrase, huge and soft, filling the screen
-    ctx.globalAlpha=vI()*(0.05+0.10*level); ctx.lineWidth=Math.max(10,H*0.05);
-    trace(wave2,H*0.44,false);
+    ctx.globalAlpha=vI()*tw('memory')*(0.05+0.10*level); ctx.lineWidth=Math.max(10,H*0.05)*th;
+    trace(wave2,H*0.44*hh,false);
     // LAYER 2: mirrored ghost — symmetric, sculptural
-    ctx.globalAlpha=vI()*(0.10+0.16*level); ctx.lineWidth=Math.max(2.5,H*0.007);
-    trace(wave,H*0.30,true);
+    ctx.globalAlpha=vI()*(0.10+0.16*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th;
+    trace(wave,H*0.30*hh,true);
     // LAYER 3: the live trace, halo + body + bright core
-    ctx.globalAlpha=vI()*(0.10+0.18*level); ctx.lineWidth=Math.max(6,H*0.022); trace(wave,H*0.30,false);
-    ctx.globalAlpha=vI()*(0.25+0.45*level); ctx.lineWidth=Math.max(2.5,H*0.007); trace(wave,H*0.30,false);
-    ctx.globalAlpha=Math.min(1,vI()*(0.5+0.5*level)); ctx.lineWidth=1.5; trace(wave,H*0.30,false);
+    ctx.globalAlpha=vI()*(0.10+0.18*level); ctx.lineWidth=Math.max(6,H*0.022)*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=vI()*(0.25+0.45*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=Math.min(1,vI()*(0.5+0.5*level)); ctx.lineWidth=1.5*th; trace(wave,H*0.30*hh,false);
     ctx.globalAlpha=1;
   }
 
@@ -431,9 +460,9 @@ const Anim = (() => {
     rippleSp.y+=(voiceY(H)-rippleSp.y)*(1-Math.exp(-dt/0.4));
     rippleTimer-=dt;
     if(level>0.02&&rippleTimer<=0){
-      rippleTimer=0.4-0.3*level;
+      rippleTimer=(0.4-0.3*level)/tw('rate');
       rings.push({x:rippleSp.x,y:rippleSp.y,r:Math.min(W,H)*0.02,
-        v:(0.25+0.7*level)*Math.min(W,H),a:vI()*(0.30+0.55*level),c:col.slice()});
+        v:(0.25+0.7*level)*Math.min(W,H)*tw('speed'),a:vI()*(0.30+0.55*level),c:col.slice()});
     }
     // soft source glow where rings are born
     if(level>0.01)
@@ -442,7 +471,7 @@ const Anim = (() => {
     rings=rings.filter(gg=>{
       gg.r+=gg.v*dt; gg.a*=Math.pow(0.25,dt);
       if(gg.a<0.01||gg.r>lim) return false;
-      const w=Math.max(2,H*0.010);
+      const w=Math.max(2,H*0.010)*tw('thick');
       ctx.strokeStyle=rgba(gg.c,gg.a*0.35); ctx.lineWidth=w*3;      // soft outer
       ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
       ctx.strokeStyle=rgba(mix(gg.c,[255,255,255],0.3),gg.a);       // bright core
@@ -463,7 +492,7 @@ const Anim = (() => {
       glowDisc(p.x,p.y,p.R,p.c,vI()*p.life*0.10);
       return true;
     });
-    emitAcc+=dt*level*55;
+    emitAcc+=dt*level*55*tw('embers');
     while(emitAcc>=1&&parts.length<cap){
       emitAcc--;
       parts.push({x:W*Math.random(),y:H*0.98,
@@ -477,8 +506,8 @@ const Anim = (() => {
       const gCap=buCap(0,4,10);
       if(gCap){ glowPatches.push({x:bx,y:by,R:Math.min(W,H)*(0.15+0.2*level),c:col.slice(),life:1});
         while(glowPatches.length>gCap) glowPatches.shift(); }
-      const n=Math.min(cap-parts.length,(24+level*56)|0);
-      const sp=(0.22+0.5*level)*Math.min(W,H);
+      const n=Math.min(cap-parts.length,((24+level*56)*tw('burst'))|0);
+      const sp=(0.22+0.5*level)*Math.min(W,H)*Math.sqrt(tw('burst'));
       for(let i=0;i<n;i++){
         const a=Math.random()*Math.PI*2, s=sp*(0.3+0.7*Math.random());
         const c=SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],Math.random()*0.4);
@@ -489,7 +518,7 @@ const Anim = (() => {
     parts=parts.filter(p=>{
       p.px=p.x; p.py=p.y;
       const drag=p.trail?Math.pow(0.30,dt):1;
-      p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt;
+      p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt*tw('fall');
       p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*(p.trail?0.8:0.45);
       if(p.life<=0||p.y>H+30) return false;
       const a=Math.min(1,p.life)*0.85;
@@ -508,12 +537,12 @@ const Anim = (() => {
   //    curtains near the top and bottom — the whole screen breathes ──
   function drawSilk(W,H,dt){
     if(level<=0.004) return;
-    const STEPS=28;
-    for(let b=-2;b<4;b++){
+    const STEPS=28, nMain=Math.max(1,Math.round(4*tw('ribbons')));
+    for(let b=-2;b<nMain;b++){
       const back=b<0;   // b=-2,-1: fixed background curtains
-      const yc=back?H*(b===-2?0.22:0.78):voiceY(H)+(b-1.5)*H*0.065;
-      const amp=back?H*(0.05+0.06*level):H*(0.02+0.11*level)*(1+b*0.22);
-      const w=back?H*(0.05+0.03*level):H*(0.015+0.045*level)*(1-b*0.12);
+      const yc=back?H*(b===-2?0.22:0.78):voiceY(H)+(b-(nMain-1)/2)*H*0.065;
+      const amp=(back?H*(0.05+0.06*level):H*(0.02+0.11*level)*(1+b*0.22))*tw('height');
+      const w=(back?H*(0.05+0.03*level):H*(0.015+0.045*level)*(1-b*0.12))*tw('width');
       const alpha=vI()*(back?(0.03+0.08*level):(0.05+0.22*level)*(1-b*0.16));
       const grad=ctx.createLinearGradient(0,0,W,0);
       if(SETTINGS.colorMode==='theme'){
@@ -542,8 +571,12 @@ const Anim = (() => {
 
   // ── ⭐ Starfield: calm twinkling sky; the voice lights a band of stars at its
   //    pitch height, sharp sounds send a shooting star ──
+  function starCount(){
+    const q=activeQuality();
+    return Math.round((q==='high'?140:q==='med'?90:55)*tw('count'));
+  }
   function buildStars(W,H){
-    const q=activeQuality(), n=q==='high'?140:q==='med'?90:55;
+    const n=starCount();
     stars=[]; haze=[];
     for(let i=0;i<n;i++)
       stars.push({x:Math.random()*W,y:Math.random()*H,
@@ -553,12 +586,12 @@ const Anim = (() => {
         R:Math.min(W,H)*(0.25+0.2*Math.random()),ci:0.15+0.35*i});
   }
   function drawStars(W,H,dt){
-    if(!stars.length) buildStars(W,H);
+    if(stars.length!==starCount()) buildStars(W,H);
     for(const hz of haze)
       glowDisc(hz.x,hz.y,hz.R,SETTINGS.colorMode==='theme'?palAt(hz.ci):col,vI()*0.035);
-    const bandY=voiceY(H), bandW=H*0.22;
+    const bandY=voiceY(H), bandW=H*0.22*tw('band'), twAmp=0.12*tw('twinkle');
     const star=(s,base,c0)=>{
-      const tw=base+0.12*Math.sin(t*s.sp+s.ph);
+      const tw=base+twAmp*Math.sin(t*s.sp+s.ph);
       const d=Math.abs(s.y-bandY)/bandW;
       const lit=level*Math.max(0,1-d*d);            // gaussian-ish band at pitch height
       const c=lit>0.02?mix(c0,col,Math.min(1,lit*1.5)):c0;
@@ -612,17 +645,18 @@ const Anim = (() => {
           +1.3*Math.sin((x*s*0.5+y*s*0.7)+t*0.15))*1.6+pitch01*2.5;
   }
   function drawFlow(W,H,dt){
-    const q=activeQuality(), cap=q==='high'?550:q==='med'?350:180;
+    const q=activeQuality();
+    const cap=Math.round((q==='high'?550:q==='med'?350:180)*tw('density'));
     emitAcc+=dt*(6+level*cap*0.45);
     while(emitAcc>=1&&flows.length<cap){
       emitAcc--;
       const c=SETTINGS.colorMode==='theme'
         ?palAt(Math.max(0,Math.min(1,tp01+(Math.random()-0.5)*0.3)))
         :col.slice();
-      flows.push({x:Math.random()*W,y:Math.random()*H,life:2+Math.random()*2.5,c});
+      flows.push({x:Math.random()*W,y:Math.random()*H,life:(2+Math.random()*2.5)*tw('length'),c});
     }
     emitAcc=Math.min(emitAcc,4);
-    const sp=(0.05+0.18*level)*Math.min(W,H);
+    const sp=(0.05+0.18*level)*Math.min(W,H)*tw('speed');
     ctx.lineCap='round'; ctx.lineWidth=1.5;
     flows=flows.filter(p=>{
       const a=flowAng(p.x,p.y), px=p.x, py=p.y;
@@ -641,14 +675,14 @@ const Anim = (() => {
   const GOLD=Math.PI*(3-Math.sqrt(5));
   function drawGarden(W,H,dt){
     const m=Math.min(W,H);
-    const q=activeQuality(), maxN=q==='high'?240:q==='med'?170:110;
-    const cap=buCap(1,3,6);
+    const q=activeQuality(), maxN=Math.round((q==='high'?240:q==='med'?170:110)*tw('detail'));
+    const cap=Math.max(1,Math.round(buCap(1,3,6)*tw('count')));
     if(level>0.02){
       quietT=0;
       if(!curFlower){
         curFlower={x:W*(0.15+0.7*Math.random()),y:H*(0.2+0.6*Math.random()),
           n:10,ph:Math.random()*6.28,c:col.slice(),life:1,
-          R:m*0.20*(0.8+Math.random()*0.4)};
+          R:m*0.20*tw('size')*(0.8+Math.random()*0.4)};
         flowers.push(curFlower);
         while(flowers.filter(f=>!f.dying).length>cap){
           const old=flowers.find(f=>!f.dying&&f!==curFlower); if(!old) break; old.dying=true;
@@ -683,8 +717,8 @@ const Anim = (() => {
     const m=Math.min(W,H), cx=W/2, cy=H/2;
     const targetF2=1+Math.round(1+pitch01*6)/2;             // 1.5 … 4 in half steps
     spiro.f2+=(targetF2+0.0015-spiro.f2)*(1-Math.exp(-dt/3)); // slight detune → precession
-    const A=W*0.36, B=H*0.36;
-    const adv=dt*(0.15+3.2*level);
+    const A=W*0.36*tw('size'), B=H*0.36*tw('size');
+    const adv=dt*(0.15+3.2*level)*tw('speed');
     if(adv<=0.001) return;
     const steps=Math.min(140,Math.max(2,(adv/0.008)|0)), dth=adv/steps;
     const pen=th=>[cx+A*(0.62*Math.sin(th)+0.38*Math.sin(spiro.f2*th+1.2)),
@@ -696,7 +730,7 @@ const Anim = (() => {
       const p=pen(spiro.th);
       const c=SETTINGS.colorMode==='theme'?palAt((Math.sin(spiro.th*0.021)+1)/2):col;
       ctx.strokeStyle=rgba(c,vI()*(0.20+0.55*level));
-      ctx.lineWidth=1.6;
+      ctx.lineWidth=1.6*tw('thick');
       ctx.beginPath(); ctx.moveTo(spiro.px,spiro.py); ctx.lineTo(p[0],p[1]); ctx.stroke();
       spiro.px=p[0]; spiro.py=p[1];
     }
@@ -705,13 +739,14 @@ const Anim = (() => {
   // ── 🟩 Pixels: cellular growth on a coarse grid. Each phrase plants a seed;
   //    voice makes it grow cell by cell into neighbouring squares; where two
   //    colonies meet, their colours melt together. Flat rects — very cheap. ──
+  function pixSize(W,H){ return Math.max(10,Math.round(Math.min(W,H)/34*tw('cell'))); }
   function initPix(W,H){
-    const s=Math.max(14,Math.round(Math.min(W,H)/34));
+    const s=pixSize(W,H);
     pix={s,cols:Math.ceil(W/s),rows:Math.ceil(H/s),alive:[]};
     pix.cells=new Array(pix.cols*pix.rows).fill(null);
   }
   function drawPixels(W,H,dt){
-    if(!pix||pix.s!==Math.max(14,Math.round(Math.min(W,H)/34))||pix.cols!==Math.ceil(W/pix.s)) initPix(W,H);
+    if(!pix||pix.s!==pixSize(W,H)||pix.cols!==Math.ceil(W/pix.s)) initPix(W,H);
     const P=pix, cap=Math.min(buCap(140,600,1400),(P.cols*P.rows*0.35)|0);
     const hit=onset();
     if((hit||(!P.alive.length&&level>0.03))&&P.alive.length<cap){
@@ -721,7 +756,7 @@ const Anim = (() => {
       const c=col.map(v=>Math.max(0,Math.min(255,v+(Math.random()-0.5)*70)));
       if(!P.cells[i]){ P.cells[i]={c,l:1,sh:0.7+Math.random()*0.5,b:1}; P.alive.push(i); }
     }
-    const tries=P.alive.length?Math.min(40,(1+level*28)|0):0;
+    const tries=P.alive.length?Math.min(70,((1+level*28)*tw('growth'))|0):0;
     for(let k=0;k<tries;k++){
       const idx=P.alive[(Math.random()*P.alive.length)|0];
       const cell=P.cells[idx]; if(!cell) continue;
@@ -742,7 +777,7 @@ const Anim = (() => {
     }
     for(let a=P.alive.length-1;a>=0;a--){
       const i=P.alive[a], cell=P.cells[i];
-      cell.l-=dt/36; cell.b=Math.max(0,cell.b-dt*2);   // b: birth flash on the frontier
+      cell.l-=dt/(36*tw('life')); cell.b=Math.max(0,cell.b-dt*2);   // b: birth flash on the frontier
       if(cell.l<=0){ P.cells[i]=null; P.alive[a]=P.alive[P.alive.length-1]; P.alive.pop(); continue; }
       const al=vI()*Math.min(1,cell.l*1.2)*(0.22+0.32*cell.sh+0.30*cell.b)*(0.65+0.3*level);
       ctx.fillStyle=rgba(cell.b>0.4?mix(cell.c,[255,255,255],cell.b*0.5):cell.c,al);
@@ -755,7 +790,7 @@ const Anim = (() => {
   //    sharp sounds fire pulses along the strip in both directions. In the
   //    middle, a classic LED-matrix equalizer bounces with the spectrum. ──
   function drawLeds(W,H,dt){
-    const m=Math.min(W,H), sp=Math.max(18,(m/32)|0), o=sp*0.7, L=2*(W+H);
+    const m=Math.min(W,H), sp=Math.max(14,(m/32*tw('size'))|0), o=sp*0.7, L=2*(W+H);
     const total=Math.floor(L/sp);
     const pt=s=>{
       s=((s%L)+L)%L;
@@ -764,7 +799,7 @@ const Anim = (() => {
       s-=H; if(s<W) return [W-s,o];
       s-=W; return [o,s];
     };
-    ledChase=(ledChase+dt*L*(0.04+0.35*level))%L;
+    ledChase=(ledChase+dt*L*(0.04+0.35*level)*tw('chase'))%L;
     if(onset()&&ledPulses.length<6){
       ledPulses.push({s:W/2,v:L*0.45,life:1});
       ledPulses.push({s:W/2,v:-L*0.45,life:1});
@@ -792,7 +827,7 @@ const Anim = (() => {
     }
     // LED-matrix equalizer in the middle
     const NB=16; updateBands(NB,dt);
-    const rowsN=12, colW=W*0.72/NB, x0=W*0.14, eh=H*0.42/rowsN, y0=H*0.72;
+    const rowsN=12, colW=W*0.72/NB, x0=W*0.14, eh=H*0.42*tw('eq')/rowsN, y0=H*0.72;
     for(let cnum=0;cnum<NB;cnum++){
       const v=bands?bands[cnum]:0, lit=Math.round(Math.pow(v,0.8)*rowsN);
       const c=SETTINGS.colorMode==='theme'?palAt(cnum/(NB-1)):col;
@@ -867,11 +902,43 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
-      el.appendChild(makeChips('Visual style','visMode',VISMODES,()=>{ pokeSim(); }));
+      el.appendChild(makeChips('Visual style','visMode',VISMODES,()=>{ pokeSim(); buildVisualsPanel(); }));
       el.appendChild(makeChips('Scene build-up (how much stays on screen)','buildup',
         {off:{label:'Just one'},gentle:{label:'Gentle'},full:{label:'Full scene'}}));
       el.appendChild(makeSlider({key:'visIntensity',label:'Visual intensity',
         min:0.4,max:1.5,step:0.05,dp:2,onChange:pokeSim}));
+      // fine-tune sliders for the current style
+      const defs=TWEAKS[SETTINGS.visMode];
+      if(defs){
+        const h=document.createElement('div'); h.className='sectn';
+        h.textContent='Fine-tune '+(VISMODES[SETTINGS.visMode]||{}).label; el.appendChild(h);
+        defs.forEach(d=>{
+          const [p,label,min,max]=d, mode=SETTINGS.visMode;
+          const row=document.createElement('div'); row.className='row';
+          const head=document.createElement('div'); head.className='rowhead';
+          const lab=document.createElement('label'); lab.textContent=label;
+          const val=document.createElement('span'); val.className='val';
+          const get=()=>{ const o=SETTINGS.tw&&SETTINGS.tw[mode]; const v=o?o[p]:null; return v==null?1:v; };
+          val.textContent='×'+get().toFixed(2);
+          head.appendChild(lab); head.appendChild(val);
+          const inp=document.createElement('input');
+          inp.type='range'; inp.min=min; inp.max=max; inp.step=0.05; inp.value=get();
+          inp.addEventListener('input',()=>{
+            if(!SETTINGS.tw) SETTINGS.tw={};
+            if(!SETTINGS.tw[mode]) SETTINGS.tw[mode]={};
+            SETTINGS.tw[mode][p]=parseFloat(inp.value);
+            val.textContent='×'+get().toFixed(2);
+            saveSettings(); pokeSim();
+          });
+          row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+        });
+        const rc=document.createElement('div'); rc.className='chips';
+        const r=document.createElement('div'); r.className='chip'; r.textContent='↺ Reset this style';
+        r.addEventListener('click',e=>{ e.stopPropagation();
+          if(SETTINGS.tw) delete SETTINGS.tw[SETTINGS.visMode];
+          saveSettings(); pokeSim(); buildVisualsPanel(); });
+        rc.appendChild(r); el.appendChild(rc);
+      }
       el.appendChild(makeChips('Colour','colorMode',
         {theme:{label:'🎨 Theme colours'},note:{label:'🎵 Boomwhacker notes'},single:{label:'⬤ One colour'}},
         buildVisualsPanel));
@@ -921,12 +988,100 @@ const Anim = (() => {
       this.reset();
     },
     resize(w,h){ stars=[]; blobs=[]; this.reset(); },
-    // touches make a small silent ripple in any mode — the screen still responds
+    // Touch behaves like the voice for the current style (silent, but the same
+    // visual language): feed a nebula, plant a flower, seed a pixel colony…
+    // Styles where position has no meaning fall back to a soft touch ring.
     splat(x,y,dx,dy,color){
+      const W=canvas.width, H=canvas.height, m=Math.min(W,H);
+      const X=x*W, Y=(1-y)*H, mode=SETTINGS.visMode, now=performance.now();
+      const c=color.map(v=>Math.min(1,v)*255);
+      const act=ms=>{ if(now-lastTouchAct<ms) return false; lastTouchAct=now; return true; };
+      if(mode==='bloom'){
+        let best=null,bd=1e9;
+        for(const n of nebs){ const d=Math.hypot(n.x-X,n.y-Y); if(d<bd){bd=d;best=n;} }
+        if(best&&bd<m*0.18){   // stroke a nebula and it swells, like sung-into
+          best.R=Math.min(m*0.30*tw('size'),best.R+m*0.012);
+          best.life=Math.min(1,best.life+0.08);
+        } else if(act(300)&&nebs.length<14){
+          nebs.push({x:X,y:Y,R:m*0.07*tw('size'),c,halo:mix(c,[40,60,160],0.35),
+            ph:Math.random()*6.28,rot:Math.random()*6.28,life:1,
+            vx:(Math.random()-0.5)*m*0.012,vy:(Math.random()-0.5)*m*0.009});
+        }
+        return;
+      }
+      if(mode==='lava'){       // stir the lamp: nearby blobs light up and drift away
+        for(const b of blobs){
+          const d=Math.hypot(b.x-X,b.y-Y);
+          if(d<m*0.25){ b.hot=Math.min(1,(b.hot||0)+0.6);
+            b.vx+=(b.x-X)/(d+1)*m*0.15; b.vy+=(b.y-Y)/(d+1)*m*0.15; }
+        }
+        return;
+      }
+      if(mode==='flow'){       // pour particles into the current under the finger
+        for(let i=0;i<5&&flows.length<900;i++)
+          flows.push({x:X+(Math.random()-0.5)*m*0.04,y:Y+(Math.random()-0.5)*m*0.04,
+            life:(1.5+Math.random()*2)*tw('length'),c:c.slice()});
+        return;
+      }
+      if(mode==='garden'){
+        let near=null;
+        for(const f of flowers) if(Math.hypot(f.x-X,f.y-Y)<f.R) near=f;
+        if(near){ near.n=Math.min(400,near.n+6); near.life=Math.min(1,near.life+0.05); }
+        else if(act(350))
+          flowers.push({x:X,y:Y,n:24,ph:Math.random()*6.28,c,life:1,
+            R:m*0.16*tw('size')});
+        return;
+      }
+      if(mode==='pixels'){     // plant / feed a colony at the finger
+        if(pix){
+          const cx=Math.max(0,Math.min(pix.cols-1,(X/pix.s)|0));
+          const cy=Math.max(0,Math.min(pix.rows-1,(Y/pix.s)|0));
+          const i=cy*pix.cols+cx;
+          if(!pix.cells[i]&&act(120)){
+            pix.cells[i]={c:c.slice(),l:1,sh:0.7+Math.random()*0.5,b:1};
+            pix.alive.push(i);
+          }
+        }
+        return;
+      }
+      if(mode==='leds'&&act(250)){   // fire pulses along the strip from the nearest edge
+        const dEdge=[Y,H-Y,X,W-X];   // top, bottom, left, right
+        const e=dEdge.indexOf(Math.min.apply(null,dEdge));
+        const L=2*(W+H);
+        const s=e===1?X : e===3?W+(H-Y) : e===0?W+H+(W-X) : W+H+W+Y;
+        ledPulses.push({s,v:L*0.45,life:1});
+        ledPulses.push({s,v:-L*0.45,life:1});
+        return;
+      }
+      if(mode==='ripples'){
+        if(act(150)) rings.push({x:X,y:Y,r:m*0.02,
+          v:0.5*m*tw('speed'),a:vI()*0.5,c});
+        return;
+      }
+      if(mode==='fountain'){
+        if(act(250)&&parts.length<400){
+          const n=18, sp2=m*0.3*Math.sqrt(tw('burst'));
+          for(let i=0;i<n;i++){
+            const a=Math.random()*Math.PI*2, s=sp2*(0.3+0.7*Math.random());
+            parts.push({x:X,y:Y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+              size:(1.2+Math.random()*2.2)*(H/800),c:c.slice(),
+              life:1+Math.random()*0.4,trail:true,px:X,py:Y});
+          }
+        }
+        return;
+      }
+      if(mode==='stars'){      // touch a spot in the sky and a star is born there
+        const mCap=buCap(0,14,40);
+        if(mCap&&act(250)){
+          memStars.push({x:X,y:Y,r:(1.2+Math.random()*1.6)*(H/800),
+            ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2,c:c.slice(),mem:true});
+          while(memStars.length>mCap) memStars.shift();
+          return;
+        }
+      }
+      // mandala / waves / spiro / silk: position carries no meaning — soft ring
       if(touchRings.length>=24) return;
-      touchRings.push({x:x*canvas.width,y:(1-y)*canvas.height,r:4,
-        v:0.18*Math.min(canvas.width,canvas.height),a:0.35,
-        c:color.map(v=>Math.min(1,v)*255)});
+      touchRings.push({x:X,y:Y,r:4,v:0.18*m,a:0.35,c});
     },
     frame(dt){
       analyse(dt);
