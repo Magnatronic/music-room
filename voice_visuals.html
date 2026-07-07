@@ -75,7 +75,8 @@ const Anim = (() => {
   const VISMODES={ bloom:{label:'🌟 Nebula'}, mandala:{label:'💠 Mandala'},
                    lava:{label:'🫧 Lava'}, waves:{label:'〰️ Waves'},
                    flow:{label:'🌀 Flow'}, garden:{label:'🌻 Garden'},
-                   spiro:{label:'🖋 Pendulum'},
+                   spiro:{label:'🖋 Pendulum'}, pixels:{label:'🟩 Pixels'},
+                   leds:{label:'💡 LEDs'},
                    ripples:{label:'💧 Ripples'}, fountain:{label:'🎆 Fireworks'},
                    aurora:{label:'🌌 Silk'}, stars:{label:'⭐ Starfield'} };
   const GATE=0.05;
@@ -95,6 +96,7 @@ const Anim = (() => {
   let glowPatches=[], memStars=[], rippleSp=null, haze=[];
   let flows=[], flowers=[], curFlower=null;  // Flow field particles; phyllotaxis flowers
   const spiro={th:0,px:0,py:0,started:false,f2:2.0};
+  let pix=null, ledPulses=[], ledChase=0;    // Pixels grid; LED strip pulses
 
   // ── microphone ──
   function micOn(){ return micState==='on'; }
@@ -700,6 +702,111 @@ const Anim = (() => {
     }
   }
 
+  // ── 🟩 Pixels: cellular growth on a coarse grid. Each phrase plants a seed;
+  //    voice makes it grow cell by cell into neighbouring squares; where two
+  //    colonies meet, their colours melt together. Flat rects — very cheap. ──
+  function initPix(W,H){
+    const s=Math.max(14,Math.round(Math.min(W,H)/34));
+    pix={s,cols:Math.ceil(W/s),rows:Math.ceil(H/s),alive:[]};
+    pix.cells=new Array(pix.cols*pix.rows).fill(null);
+  }
+  function drawPixels(W,H,dt){
+    if(!pix||pix.s!==Math.max(14,Math.round(Math.min(W,H)/34))||pix.cols!==Math.ceil(W/pix.s)) initPix(W,H);
+    const P=pix, cap=Math.min(buCap(140,600,1400),(P.cols*P.rows*0.35)|0);
+    const hit=onset();
+    if((hit||(!P.alive.length&&level>0.03))&&P.alive.length<cap){
+      const cx=(Math.random()*P.cols)|0;
+      const cy=Math.max(0,Math.min(P.rows-1,(voiceY(H)/P.s+(Math.random()-0.5)*3)|0));
+      const i=cy*P.cols+cx;
+      const c=col.map(v=>Math.max(0,Math.min(255,v+(Math.random()-0.5)*70)));
+      if(!P.cells[i]){ P.cells[i]={c,l:1,sh:0.7+Math.random()*0.5,b:1}; P.alive.push(i); }
+    }
+    const tries=P.alive.length?Math.min(40,(1+level*28)|0):0;
+    for(let k=0;k<tries;k++){
+      const idx=P.alive[(Math.random()*P.alive.length)|0];
+      const cell=P.cells[idx]; if(!cell) continue;
+      const x=idx%P.cols, y=(idx/P.cols)|0;
+      const d=[[1,0],[-1,0],[0,1],[0,-1]][(Math.random()*4)|0];
+      const nx=x+d[0], ny=y+d[1];
+      if(nx<0||ny<0||nx>=P.cols||ny>=P.rows) continue;
+      const ni=ny*P.cols+nx;
+      if(!P.cells[ni]){
+        if(P.alive.length>=cap) continue;
+        P.cells[ni]={c:cell.c.slice(),l:1,sh:0.7+Math.random()*0.5,b:1};
+        P.alive.push(ni);
+      } else {
+        const o=P.cells[ni];                     // colonies merge: colours melt
+        for(let q=0;q<3;q++){ const m2=(o.c[q]+cell.c[q])/2;
+          o.c[q]+=(m2-o.c[q])*0.4; cell.c[q]+=(m2-cell.c[q])*0.4; }
+      }
+    }
+    for(let a=P.alive.length-1;a>=0;a--){
+      const i=P.alive[a], cell=P.cells[i];
+      cell.l-=dt/36; cell.b=Math.max(0,cell.b-dt*2);   // b: birth flash on the frontier
+      if(cell.l<=0){ P.cells[i]=null; P.alive[a]=P.alive[P.alive.length-1]; P.alive.pop(); continue; }
+      const al=vI()*Math.min(1,cell.l*1.2)*(0.22+0.32*cell.sh+0.30*cell.b)*(0.65+0.3*level);
+      ctx.fillStyle=rgba(cell.b>0.4?mix(cell.c,[255,255,255],cell.b*0.5):cell.c,al);
+      ctx.fillRect((i%P.cols)*P.s+1,((i/P.cols)|0)*P.s+1,P.s-2,P.s-2);
+    }
+  }
+
+  // ── 💡 LEDs: the sensory-room LED strip, in software. A ring of LEDs around
+  //    the screen edge fills like a VU meter and carries a travelling chase;
+  //    sharp sounds fire pulses along the strip in both directions. In the
+  //    middle, a classic LED-matrix equalizer bounces with the spectrum. ──
+  function drawLeds(W,H,dt){
+    const m=Math.min(W,H), sp=Math.max(18,(m/32)|0), o=sp*0.7, L=2*(W+H);
+    const total=Math.floor(L/sp);
+    const pt=s=>{
+      s=((s%L)+L)%L;
+      if(s<W) return [s,H-o];
+      s-=W; if(s<H) return [W-o,H-s];
+      s-=H; if(s<W) return [W-s,o];
+      s-=W; return [o,s];
+    };
+    ledChase=(ledChase+dt*L*(0.04+0.35*level))%L;
+    if(onset()&&ledPulses.length<6){
+      ledPulses.push({s:W/2,v:L*0.45,life:1});
+      ledPulses.push({s:W/2,v:-L*0.45,life:1});
+    }
+    ledPulses=ledPulses.filter(p=>{ p.s+=p.v*dt; p.life-=dt*0.8; return p.life>0; });
+    const fillArc=level*L/2;                    // VU fill outward from bottom-centre
+    const r=sp*0.28;
+    for(let k=0;k<total;k++){
+      const s=k*sp+sp/2, p=pt(s);
+      // distance along the strip from bottom-centre (wrap-aware)
+      let d=Math.abs(s-W/2); d=Math.min(d,L-d);
+      let b=0.05;                               // idle: the strip itself stays visible
+      if(d<fillArc) b+=0.45*(1-d/(fillArc+1));
+      let dc=Math.abs(s-ledChase); dc=Math.min(dc,L-dc);
+      b+=0.6*Math.max(0,1-dc/(sp*2.5));         // travelling chase hotspot
+      for(const pu of ledPulses){
+        let dp=Math.abs(s-pu.s); dp=Math.min(dp,L-dp);
+        b+=pu.life*Math.max(0,1-dp/(sp*2));
+      }
+      b=Math.min(1,b)*vI();
+      const c=SETTINGS.colorMode==='theme'?palAt(k/(total-1)):col;
+      ctx.fillStyle=rgba(c,0.12+0.85*b);
+      ctx.beginPath(); ctx.arc(p[0],p[1],r*(1+0.5*b),0,Math.PI*2); ctx.fill();
+      if(b>0.5) glowDisc(p[0],p[1],r*4,c,(b-0.5)*0.5);
+    }
+    // LED-matrix equalizer in the middle
+    const NB=16; updateBands(NB,dt);
+    const rowsN=12, colW=W*0.72/NB, x0=W*0.14, eh=H*0.42/rowsN, y0=H*0.72;
+    for(let cnum=0;cnum<NB;cnum++){
+      const v=bands?bands[cnum]:0, lit=Math.round(Math.pow(v,0.8)*rowsN);
+      const c=SETTINGS.colorMode==='theme'?palAt(cnum/(NB-1)):col;
+      for(let j=0;j<rowsN;j++){
+        const on=j<lit, top=j===lit-1;
+        ctx.fillStyle=rgba(top?mix(c,[255,255,255],0.5):c,
+          vI()*(on?(top?0.95:0.4+0.3*(j/rowsN)):0.05));
+        ctx.beginPath();
+        ctx.arc(x0+cnum*colW+colW/2,y0-j*eh,Math.min(colW,eh)*0.26,0,Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+
   function drawTouchRings(W,H,dt){
     touchRings=touchRings.filter(g=>{
       g.r+=g.v*dt; g.a*=Math.pow(0.2,dt);
@@ -827,7 +934,7 @@ const Anim = (() => {
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
       let fade={bloom:0.14,mandala:0.30,lava:0.12,waves:0.30,flow:0.045,garden:0.30,
-        ripples:0.22,fountain:0.10,aurora:0.20,stars:0.45}[mode]||0.15;
+        pixels:0.5,leds:0.4,ripples:0.22,fountain:0.10,aurora:0.20,stars:0.45}[mode]||0.15;
       if(mode==='spiro') fade=buCap(0.06,0.02,0.008);   // pendulum drawing persists
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
@@ -839,6 +946,8 @@ const Anim = (() => {
       else if(mode==='flow') drawFlow(W,H,dt);
       else if(mode==='garden') drawGarden(W,H,dt);
       else if(mode==='spiro') drawSpiro(W,H,dt);
+      else if(mode==='pixels') drawPixels(W,H,dt);
+      else if(mode==='leds') drawLeds(W,H,dt);
       else if(mode==='ripples') drawRipples(W,H,dt);
       else if(mode==='fountain') drawFireworks(W,H,dt);
       else if(mode==='aurora') drawSilk(W,H,dt);
@@ -850,7 +959,8 @@ const Anim = (() => {
       // keep a ~20 s animated tail after the last activity, then let the sim
       // sleep (the last frame stays on screen as a calm still)
       if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
-         nebs.length||flows.length||flowers.length||glowPatches.length) lastActive=t;
+         nebs.length||flows.length||flowers.length||glowPatches.length||
+         (pix&&pix.alive.length)||ledPulses.length) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){
@@ -858,7 +968,7 @@ const Anim = (() => {
       rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[]; blobs=[];
       nebs=[]; curNeb=null; flows=[]; flowers=[]; curFlower=null;
       glowPatches=[]; memStars=[]; rippleSp=null; haze=[]; wave=null; wave2=null;
-      spiro.th=0; spiro.started=false;
+      spiro.th=0; spiro.started=false; pix=null; ledPulses=[]; ledChase=0;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);
