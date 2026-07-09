@@ -160,17 +160,24 @@ so students can't accidentally erase pads.
 
 ---
 
-## 8. 🌧️ Soundscape Mixer — `soundscape.html` ✅ BUILT
+## 8. 🌧️ Soundscape Mixer — `soundscape.html` ✅ BUILT (reworked 2026-07)
 
-**Concept.** Big illustrated tiles (rain, ocean, birdsong, wind, campfire, soft chord drone,
-heartbeat). Touching a tile fades its loop in/out; the tile glows while active. The visuals
-blend the active layers (rain streaks + ember glow...).
+**Concept.** A mynoise.net-style ambient mixer: the screen is 8 full-height slider columns,
+one per sound layer. Touching a column sets that layer's level (higher = louder, the very
+bottom switches it off) — the student literally mixes their own environment with whole-arm
+movements. **Scenes** swap in a different set of 8 layers: Calm classics, Rainstorm, Forest,
+Ocean, Night sky. The 🌙 rail button glides every slider down to silence (wind-down time is a
+therapist setting). The original tap-to-toggle tile design was replaced because levels-as-height
+gives finer agency and clearer visual state (v1 also shipped with tiles that showed no sounds).
 
 **Therapy goals.** The regulation/relaxation end of the sensory diet — students compose their
-own calming environment; useful as a session wind-down. Complements the high-stimulation apps.
+own calming environment; useful as a session wind-down. Sliders add graded control (loud/quiet
+exploration) on top of on/off cause-and-effect.
 
-**Sound.** All synthesized loops (filtered noise recipes for rain/wind/waves; randomized sine
-chirps for birds; the existing pad voice for the drone in the current key) — no samples needed.
+**Sound.** All synthesized (filtered-noise recipes; scheduled chirps, thumps, bells; key-aware
+drone/chimes/shimmer using the current root+register) — no samples, fully offline. Audio nodes
+exist only while a slider is up. Visuals blend one effect per active layer (rain streaks,
+wave lines, ember sparks, starfields...) plus per-column level bars.
 
 ---
 
