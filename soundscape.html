@@ -658,20 +658,30 @@ const Anim = (() => {
 
   // ── visuals ──
   function alpha(c,a){ return 'rgba('+c[0]+','+c[1]+','+c[2]+','+Math.max(0,Math.min(1,a)).toFixed(3)+')'; }
-  // trail-fade fill, tinted per column: each slider sits in a subtle wash of its
-  // own colour (grey when muted), strongest at the foot and fading upward
+  // trail-fade fill, tinted per column: each slider sits in a wash of its own
+  // colour (grey when muted), strongest at the foot and fading upward. The
+  // strength is a Visuals setting — bold enough to read across the room by
+  // default, with soft/off for students who need a calmer screen.
+  const WASH={ bold:{label:'Bold',k:0.30,fill:0.34}, soft:{label:'Soft',k:0.14,fill:0.20},
+               off:{label:'Off',k:0,fill:0.16} };
+  function wash(){ return WASH[SETTINGS.colWash]||WASH.bold; }
   function drawColBg(W,H){
-    const n=LYS().length, cw=W/n;
+    const n=LYS().length, cw=W/n, k0=wash().k;
     const mix=(cc,k)=>{
       const r=bgRGB[0]*255*(1-k)+cc[0]*k, g2=bgRGB[1]*255*(1-k)+cc[1]*k, b=bgRGB[2]*255*(1-k)+cc[2]*k;
       return 'rgba('+(r|0)+','+(g2|0)+','+(b|0)+',0.18)';
     };
+    if(k0===0){
+      ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+',0.18)';
+      ctx.fillRect(0,0,W,H);
+      return;
+    }
     for(let i=0;i<n;i++){
-      const cc=ch[i].m?GREY:col(i);
+      const muted=ch[i].m, cc=muted?GREY:col(i), k=muted?k0*0.3:k0;
       const g=ctx.createLinearGradient(0,H,0,0);
-      g.addColorStop(0,mix(cc,ch[i].m?0.06:0.14));
-      g.addColorStop(0.65,mix(cc,ch[i].m?0.02:0.04));
-      g.addColorStop(1,mix(cc,0));
+      g.addColorStop(0,mix(cc,k));
+      g.addColorStop(0.55,mix(cc,k*0.30));
+      g.addColorStop(1,mix(cc,k*0.06));
       ctx.fillStyle=g; ctx.fillRect(i*cw,0,cw+1,H);
     }
   }
@@ -808,15 +818,16 @@ const Anim = (() => {
       if(v<=0.004 && !held.has(i)) continue;
       const x0=i*cw+cw*0.05, w=cw*0.90;
       const yTop=(1-(LVL0+v*LVLR))*H;
+      const fa=wash().fill;
       if(v>0.004){
         const grad=ctx.createLinearGradient(0,yTop,0,H);
-        grad.addColorStop(0,alpha(cc,muted?0.05:0.16));
-        grad.addColorStop(1,alpha(cc,muted?0.01:0.03));
+        grad.addColorStop(0,alpha(cc,muted?fa*0.25:fa));
+        grad.addColorStop(1,alpha(cc,muted?fa*0.05:fa*0.2));
         ctx.fillStyle=grad; ctx.fillRect(x0,yTop,w,H*(1-LVL0*0.6)-yTop);
       }
       const hc=muted?GREY:cc;
-      ctx.fillStyle=alpha(hc,muted?0.10:0.20); ctx.fillRect(x0,yTop-H*0.009,w,H*0.018);
-      ctx.fillStyle=alpha(hc,held.has(i)?1:(muted?0.5:0.85)); ctx.fillRect(x0,yTop-H*0.0028,w,H*0.0056);
+      ctx.fillStyle=alpha(hc,muted?0.12:0.30); ctx.fillRect(x0,yTop-H*0.011,w,H*0.022);
+      ctx.fillStyle=alpha(hc,held.has(i)?1:(muted?0.5:0.9)); ctx.fillRect(x0,yTop-H*0.0035,w,H*0.007);
     }
   }
 
@@ -859,7 +870,7 @@ const Anim = (() => {
     hideRail:['clear'],
     paneLabels:{ instrument:'🌿 Scenes', sound:'🎛️ Sound' },
     themes:{ calm:{label:'🌿 Calm', colors:[[0.4,0.7,0.9],[0.2,0.7,0.7],[0.6,0.8,0.4],[0.9,0.6,0.3],[0.6,0.5,0.8]]} },
-    defaults:{ theme:'calm', scene:'calm', wind:6, visFx:true, remember:true,
+    defaults:{ theme:'calm', scene:'calm', wind:6, visFx:true, remember:true, colWash:'bold',
       mode:'notes', paint:false, yAxis:'none', octaveRows:'2', noteCount:8,
       zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major', pressFx:'none' },
     schema:[],
@@ -924,6 +935,7 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
+      el.appendChild(makeChips('Slider colours','colWash',WASH,pokeSim));
       el.appendChild(makeToggle('Moving pictures with the sounds','visFx'));
       el.appendChild(makeToggle('Icons under the sliders','showLabels',()=>{ buildBands(); restyle(); }));
       const bgRow=document.createElement('div'); bgRow.className='swrow';
