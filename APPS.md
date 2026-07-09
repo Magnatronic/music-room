@@ -174,10 +174,21 @@ gives finer agency and clearer visual state (v1 also shipped with tiles that sho
 own calming environment; useful as a session wind-down. Sliders add graded control (loud/quiet
 exploration) on top of on/off cause-and-effect.
 
-**Sound.** All synthesized (filtered-noise recipes; scheduled chirps, thumps, bells; key-aware
-drone/chimes/shimmer using the current root+register) — no samples, fully offline. Audio nodes
-exist only while a slider is up. Visuals blend one effect per active layer (rain streaks,
-wave lines, ember sparks, starfields...) plus per-column level bars.
+**Sound.** All synthesized (filtered-noise recipes; scheduled chirps, thumps, bells; the
+drone/chimes/shimmer/hum/buoy-bell/pulsar layers are key-aware via root+register) — no samples,
+fully offline. Audio nodes exist only while a slider is up. Visuals blend one effect per active
+layer (rain streaks, wave lines, ember sparks, starfields...) plus per-column level bars.
+
+**Refinements (2026-07).** Each scene has a cohesive colour palette (sliders read as one
+world) and every column sits in a subtle wash of its own colour (grey while muted); icons are
+OpenMoji SVGs embedded offline in `assets/openmoji_soundscape.js` (CC BY-SA 4.0, emoji
+fallback if missing). A control strip under every slider gives a **🔇 quick mute** (keeps the
+level, dims the column) and a **🎚 tune button** that opens that sound's editor card in place —
+1–4 sliders per sound (how often / variation / pitch / tone / movement, plus specials like
+thunder distance and heartbeat speed), applied live, stored per device and captured by
+Presets. The Scenes panel lists the same editors; session lock hides 🎚 but keeps 🔇. Event
+layers get gently denser as their slider rises. The mix (levels + mutes) is remembered per
+scene between visits ("Remember the mix" toggle) and fades back in at the first touch.
 
 ---
 

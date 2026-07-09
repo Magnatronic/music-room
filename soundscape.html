@@ -6,26 +6,51 @@
 <title>Soundscape Mixer – Music Room</title>
 <link rel="stylesheet" href="framework.css">
 <style>
-/* slider channels: icons sit low so the whole column height is mixing range */
-#bands .band .lbl{bottom:2.5vh;font-size:5vmin}
+/* slider channels: icons sit above the per-column control strip */
+#bands .band .lbl{bottom:9.5vh;font-size:5vmin;transition:opacity 0.3s}
+#bands .band .lbl svg{width:8vmin;height:8vmin;display:block;filter:drop-shadow(0 2px 8px rgba(0,0,0,0.65))}
+/* per-column controls: a quick mute and a tune button under every slider */
+#ssStrip{position:fixed;left:0;right:0;bottom:0;height:7vh;min-height:48px;
+  display:grid;grid-template-columns:repeat(8,1fr);z-index:6;pointer-events:none}
+.sscell{display:flex;align-items:center;justify-content:center;gap:1vmin;pointer-events:none}
+.ssbtn{pointer-events:auto;width:5.4vmin;height:5.4vmin;min-width:36px;min-height:36px;
+  border-radius:50%;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.28);
+  color:#fff;font-size:2.4vmin;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;padding:0;
+  transition:background 0.2s,border-color 0.2s}
+.ssbtn:active{transform:scale(1.1)}
+.ssbtn.muted{background:rgba(165,60,70,0.55);border-color:rgba(255,140,150,0.7)}
+/* per-sound editor card */
+#ssEdit{position:fixed;bottom:9vh;z-index:21;width:320px;max-width:92vw;
+  background:rgba(0,0,0,0.88);backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,0.16);border-radius:14px;padding:14px 16px;
+  font-family:sans-serif;color:#fff;max-height:70vh;overflow-y:auto}
+#ssEdit .hd{display:flex;align-items:center;gap:9px;margin-bottom:12px}
+#ssEdit .hd .nm{flex:1;font-size:14px;font-weight:600}
+#ssEdit .hd .x{background:none;border:none;color:rgba(255,255,255,0.6);font-size:18px;cursor:pointer;padding:2px 6px}
 </style>
 </head>
 <body>
 <script src="framework.js"></script>
+<script src="assets/openmoji_soundscape.js"></script>
 <script>
 'use strict';
 /* ===== ANIMATION START =====
    Soundscape Mixer — a mynoise.net-style ambient mixer for regulation and
-   wind-down. The screen is 8 full-height slider columns, one per sound layer;
-   touching a column sets that layer's level (higher = louder, the very bottom
-   switches it off), so a student literally mixes their own environment with
-   whole-arm movements. Scenes (Calm classics / Rainstorm / Forest / Ocean /
-   Night sky) swap in a different set of 8 layers; the 🌙 rail button glides
-   every slider down to silence for session wind-down.
+   wind-down. The screen is 8 full-height slider columns, one per sound layer,
+   each washed with a subtle tint of its own colour; touching a column sets
+   that layer's level. Under every slider sits a control strip: 🔇 mutes that
+   sound without losing its level, 🎚 opens the sound's editor card with its
+   fine-tuning sliders (how often / variation / pitch / tone / movement…).
+   Scenes (Calm classics / Rainstorm / Forest / Ocean / Night sky) swap in a
+   different set of 8 layers with a cohesive palette; the 🌙 rail button
+   glides every slider down to silence for session wind-down. The mix is
+   remembered per scene between visits (fades back in at the first touch).
 
-   Every sound is synthesized live (filtered-noise recipes, scheduled chirps,
-   thumps and bells, key-aware drones/chimes) — no samples, fully offline.
-   Idle layers cost nothing: audio nodes exist only while a slider is up.
+   Every sound is synthesized live — no samples, fully offline. Tuning is
+   stored per device (SETTINGS.lp) and captured by Presets. Idle layers cost
+   nothing: audio nodes exist only while a slider is up. Icons are OpenMoji
+   (assets/openmoji_soundscape.js, CC BY-SA 4.0) with system-emoji fallback.
 */
 const Anim = (() => {
 
@@ -46,44 +71,70 @@ const Anim = (() => {
     return ()=>{ try{o.stop();o.disconnect();g.disconnect();}catch(e){} };
   }
 
-  // ── channel state: v is the slider (0..1), audio follows it in setAudio ──
-  const NCH=8;
-  const ch=[...Array(NCH)].map(()=>({v:0,sent:-1,zeroAt:0}));
+  // ── channel state: v is the slider (0..1), m mutes it without losing v ──
+  const NCH=8, GREY=[150,155,165];
+  const ch=[...Array(NCH)].map(()=>({v:0,m:false,sent:-1,zeroAt:0}));
   const act=Array(NCH).fill(null);          // live audio per channel: {gain,stop}
   let windOn=false;                          // 🌙 wind-down gliding everything to 0
-  let ctx=null, t=0, lastScene=null, pools={}, fxq=[];
+  let ctx=null, t=0, lastScene=null, pools={}, fxq=[], mixRef=null;
+  let ptrack={};                             // per-pointer: ignore touches starting on the strip
+  let mBtns=[], gBtns=[], stripEl=null;      // per-column mute/tune buttons
+  let editI=-1, editEl=null;                 // open sound-editor card
+  let lastLocked=null;
 
   function scene(){ return SCENES[SETTINGS.scene]||SCENES.calm; }
   function LYS(){ return scene().layers; }
-  function col(i){ const L=LYS()[i]; return L?L.color:[255,255,255]; }
+  function rk(i){ const L=LYS()[i]; return L?L.key:null; }
+  // slider colours come from the scene palette so each scene reads as one world
+  function col(i){ const p=scene().pal; return (p&&p[i])||(LYS()[i]?LYS()[i].color:[255,255,255]); }
   function pool(i){ return pools[i]||(pools[i]=[]); }
+
+  // per-sound fine-tuning: SETTINGS.lp[recipeKey][param], 1 = the shipped sound.
+  // rate/vari/pitch are read live by the schedulers; tone/move rebuild the layer.
+  function P(key,par){
+    const o=SETTINGS.lp&&SETTINGS.lp[key], v=o?o[par]:undefined;
+    return typeof v==='number'?v:1;
+  }
+  function vr(i){ return P(rk(i),'vari'); }
+  function pt(i){ return P(rk(i),'pitch'); }
 
   // one-shot canvas events fired by the sound schedulers
   function fx(o){ o.age=0; fxq.push(o); if(fxq.length>80) fxq.shift(); pokeSim(); }
 
-  // slider geometry: bottom 6% is the off zone (where the icon sits), top 8% margin
-  const LVL0=0.06, LVLR=0.86;
+  // slider geometry: the bottom ~18% belongs to the control strip + icon, so the
+  // level range starts above it; the top 6% is margin
+  const LVL0=0.15, LVLR=0.79;
   function yToLevel(y){ const v=(y-LVL0)/LVLR; return v<0.035?0:Math.min(1,v); }
 
   // ── recipe toolkit ──
-  // noiseLayer: noise → filter chain → gain, with optional LFOs ('gain' or filter idx)
+  // noiseLayer: noise → filter chain → gain, with optional LFOs ('gain' or filter idx).
+  // tone shifts the whole filter chain darker/brighter; move scales the LFO depths.
   function noiseLayer(cfg){
-    return (ac,out)=>{
+    return (ac,out,i)=>{
+      const tone=P(rk(i),'tone'), move=P(rk(i),'move');
       const n=mkNoise(ac); let node=n; const filts=[];
       (cfg.filters||[]).forEach(f=>{
-        const b=ac.createBiquadFilter(); b.type=f[0]; b.frequency.value=f[1]; if(f[2]) b.Q.value=f[2];
+        const b=ac.createBiquadFilter(); b.type=f[0]; b.frequency.value=f[1]*tone; if(f[2]) b.Q.value=f[2];
         node.connect(b); node=b; filts.push(b); });
       const g=ac.createGain(); g.gain.value=cfg.gain!=null?cfg.gain:0.7;
       node.connect(g); g.connect(out); n.start();
-      const stops=(cfg.lfos||[]).map(l=> l[2]==='gain' ? lfo(ac,l[0],l[1],g.gain) : lfo(ac,l[0],l[1],filts[l[2]||0].frequency));
+      const stops=(cfg.lfos||[]).map(l=> l[2]==='gain'
+        ? lfo(ac,l[0],l[1]*move,g.gain)
+        : lfo(ac,l[0],l[1]*move*tone,filts[l[2]||0].frequency));
       return ()=>{ stops.forEach(s=>s()); try{n.stop();n.disconnect();filts.forEach(f=>f.disconnect());g.disconnect();}catch(e){} };
     };
   }
-  // events: fire(ac,out,i) on a randomized timer while the layer is alive
+  // events: fire(ac,out,i) on a randomized timer while the layer is alive.
+  // The 'rate' tuning scales the interval; unless the layer is steady (heartbeat,
+  // pulsar), events also come a little denser as the slider rises — a raised
+  // slider should feel like MORE forest, not just a louder one.
   function events(fire,minMs,maxMs,firstMs){
     return (ac,out,i)=>{
       let on=true,tm=null;
-      const go=()=>{ if(!on) return; fire(ac,out,i); tm=setTimeout(go,minMs+Math.random()*(maxMs-minMs)); };
+      const go=()=>{ if(!on) return; fire(ac,out,i);
+        const L=LYS()[i]||{};
+        const dens=L.steady?1:(0.7+0.6*(ch[i]?Math.max(0.15,ch[i].v):1));
+        tm=setTimeout(go,(minMs+Math.random()*(maxMs-minMs))/Math.max(0.1,P(L.key,'rate')*dens)); };
       tm=setTimeout(go, firstMs!=null?firstMs:250+Math.random()*600);
       return ()=>{ on=false; clearTimeout(tm); };
     };
@@ -92,13 +143,14 @@ const Anim = (() => {
     return (ac,out,i)=>{ const stops=makers.map(m=>m(ac,out,i)); return ()=>stops.forEach(s=>{try{s();}catch(e){}}); };
   }
 
-  // ── event sounds ──
+  // ── event sounds (vari widens the random spread — 0 = every event identical;
+  //    pitch shifts the whole voice; both are read live at each firing) ──
   function chirp(ac,out,i){
-    const t0=ac.currentTime+0.05;
+    const vv=vr(i), t0=ac.currentTime+0.05;
     const o=ac.createOscillator(); o.type='sine';
-    const base=2000+Math.random()*2200;
+    const base=(2000+Math.random()*2200*vv)*pt(i);
     o.frequency.setValueAtTime(base,t0);
-    let tt=t0; const hops=2+Math.floor(Math.random()*3);
+    let tt=t0; const hops=2+Math.floor(Math.random()*(1+2*vv));
     for(let k=0;k<hops;k++){ tt+=0.04+Math.random()*0.06;
       o.frequency.exponentialRampToValueAtTime(base*(0.8+Math.random()*0.5),tt); }
     const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
@@ -110,9 +162,9 @@ const Anim = (() => {
     fx({kind:'bird',i,x:0.1+Math.random()*0.8,y:0.15+Math.random()*0.35,c:col(i),dur:1.4});
   }
   function cricket(ac,out,i){
-    const t0=ac.currentTime+0.03, dur=0.45+Math.random()*0.6;
-    const o=ac.createOscillator(); o.type='sine'; o.frequency.value=3900+Math.random()*700;
-    const am=ac.createOscillator(); am.frequency.value=21+Math.random()*7;   // the trill
+    const vv=vr(i), t0=ac.currentTime+0.03, dur=0.45+Math.random()*0.6;
+    const o=ac.createOscillator(); o.type='sine'; o.frequency.value=(3900+Math.random()*700*vv)*pt(i);
+    const am=ac.createOscillator(); am.frequency.value=21+Math.random()*7*vv;   // the trill
     const dep=ac.createGain(); dep.gain.value=0.06; am.connect(dep);
     const g=ac.createGain(); g.gain.value=0; dep.connect(g.gain);
     g.gain.setValueAtTime(0.07,t0);
@@ -126,15 +178,15 @@ const Anim = (() => {
     fx({kind:'twinkle',i,x:Math.random(),y:0.05+Math.random()*0.12,c:col(i),dur:0.8,size:0.008});
   }
   function owlHoot(ac,out,i){
-    const t0=ac.currentTime+0.05;
-    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=650;
+    const vv=vr(i), pp=pt(i), t0=ac.currentTime+0.05;
+    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=650*pp;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.2-0.6;
     lp.connect(p); p.connect(out);
     [[0,0.42,335,0.38],[0.5,0.55,318,0.5]].forEach(h=>{
       const s=t0+h[0];
       const o=ac.createOscillator(); o.type='sine';
-      o.frequency.setValueAtTime(h[2]*(0.97+Math.random()*0.06),s);
-      o.frequency.linearRampToValueAtTime(h[2]*0.92,s+h[3]);
+      o.frequency.setValueAtTime(h[2]*pp*(1-0.03*vv+Math.random()*0.06*vv),s);
+      o.frequency.linearRampToValueAtTime(h[2]*pp*0.92,s+h[3]);
       const g=ac.createGain(); g.gain.setValueAtTime(0.0001,s);
       g.gain.linearRampToValueAtTime(h[1],s+0.06);
       g.gain.setTargetAtTime(0.0001,s+h[3]*0.55,0.09);
@@ -143,8 +195,10 @@ const Anim = (() => {
     fx({kind:'ripple',i,x:0.12+Math.random()*0.76,y:0.2+Math.random()*0.3,c:col(i),dur:1.6,size:0.05});
   }
   function woodTaps(ac,out,i){
-    const t0=ac.currentTime+0.03, n=7+Math.floor(Math.random()*8), gap=0.05+Math.random()*0.012;
-    const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1050+Math.random()*300; bp.Q.value=2.5;
+    const vv=vr(i), t0=ac.currentTime+0.03;
+    const n=7+Math.floor(Math.random()*8*vv), gap=0.05+Math.random()*0.012;
+    const bp=ac.createBiquadFilter(); bp.type='bandpass';
+    bp.frequency.value=(1050+Math.random()*300*vv)*pt(i); bp.Q.value=2.5;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.2-0.6;
     bp.connect(p); p.connect(out);
     const x=0.1+Math.random()*0.8, y=0.2+Math.random()*0.25;
@@ -158,10 +212,13 @@ const Anim = (() => {
     fx({kind:'twinkle',i,x,y,c:col(i),dur:0.9,size:0.012});
   }
   function thunderRoll(ac,out,i){
-    const t0=ac.currentTime+0.05, dur=2.2+Math.random()*2.8, peak=0.5+Math.random()*0.4;
+    // tone = distance: closer is brighter AND louder
+    const vv=vr(i), tn=P(rk(i),'tone'), t0=ac.currentTime+0.05;
+    const dur=2.2+Math.random()*2.8*vv;
+    const peak=(0.5+Math.random()*0.4*vv)*(0.55+0.45*tn);
     const n=mkNoise(ac);
     const lp=ac.createBiquadFilter(); lp.type='lowpass';
-    lp.frequency.setValueAtTime(160,t0); lp.frequency.exponentialRampToValueAtTime(70,t0+dur);
+    lp.frequency.setValueAtTime(160*tn,t0); lp.frequency.exponentialRampToValueAtTime(70*tn,t0+dur);
     const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
     g.gain.linearRampToValueAtTime(peak,t0+0.18+Math.random()*0.5);
     g.gain.setTargetAtTime(0.0001,t0+0.8,dur*0.28);
@@ -172,7 +229,7 @@ const Anim = (() => {
     fx({kind:'flash',i,x:0,y:0,c:[200,205,255],dur:1.3});
   }
   function drip(ac,out,i){
-    const t0=ac.currentTime+0.03, f=900+Math.random()*500;
+    const vv=vr(i), t0=ac.currentTime+0.03, f=(900+Math.random()*500*vv)*pt(i);
     const o=ac.createOscillator(); o.type='sine';
     o.frequency.setValueAtTime(f,t0); o.frequency.exponentialRampToValueAtTime(f*0.35,t0+0.07);
     const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
@@ -192,16 +249,16 @@ const Anim = (() => {
     o.connect(g); g.connect(out); o.start(t0); o.stop(t0+0.15);
   }
   function gullCry(ac,out,i){
-    const t0=ac.currentTime+0.05, cries=1+Math.floor(Math.random()*2);
-    const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500; bp.Q.value=0.8;
+    const vv=vr(i), pp=pt(i), t0=ac.currentTime+0.05, cries=1+Math.floor(Math.random()*2);
+    const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500*pp; bp.Q.value=0.8;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.4-0.7;
     bp.connect(p); p.connect(out);
     for(let k=0;k<cries;k++){
-      const s=t0+k*(0.55+Math.random()*0.25);
+      const s=t0+k*(0.55+Math.random()*0.25), pv=pp*(1+(Math.random()-0.5)*0.25*vv);
       const o=ac.createOscillator(); o.type='sawtooth';
-      o.frequency.setValueAtTime(950,s);
-      o.frequency.linearRampToValueAtTime(1350,s+0.12);
-      o.frequency.exponentialRampToValueAtTime(700,s+0.5);
+      o.frequency.setValueAtTime(950*pv,s);
+      o.frequency.linearRampToValueAtTime(1350*pv,s+0.12);
+      o.frequency.exponentialRampToValueAtTime(700*pv,s+0.5);
       const g=ac.createGain(); g.gain.setValueAtTime(0.0001,s);
       g.gain.linearRampToValueAtTime(0.18,s+0.05);
       g.gain.setTargetAtTime(0.0001,s+0.3,0.1);
@@ -210,7 +267,9 @@ const Anim = (() => {
     fx({kind:'bird',i,x:0.1+Math.random()*0.8,y:0.1+Math.random()*0.25,c:col(i),dur:1.4});
   }
   function buoyBell(ac,out,i){
-    const t0=ac.currentTime+0.05, f=180+Math.random()*25;
+    buildScale();   // tuned to the chosen key so it sits inside the drone/chimes world
+    const t0=ac.currentTime+0.05;
+    const f=(NOTES[0]?NOTES[0].freq:261.6)*0.75*(1+(Math.random()-0.5)*0.008);
     const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=2200;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*0.8-0.4;
     lp.connect(p); p.connect(out);
@@ -224,7 +283,8 @@ const Anim = (() => {
     fx({kind:'ripple',i,x:0.15+Math.random()*0.7,y:0.72+Math.random()*0.15,c:col(i),dur:2.2,size:0.06});
   }
   function whaleCall(ac,out,i){
-    const t0=ac.currentTime+0.05, f0=140+Math.random()*80, dur=2.2+Math.random()*1.6;
+    const vv=vr(i), t0=ac.currentTime+0.05;
+    const f0=(140+Math.random()*80*vv)*pt(i), dur=2.2+Math.random()*1.6*vv;
     const o=ac.createOscillator(); o.type='sine';
     o.frequency.setValueAtTime(f0,t0);
     o.frequency.exponentialRampToValueAtTime(f0*2.4,t0+dur*0.45);
@@ -239,10 +299,11 @@ const Anim = (() => {
     fx({kind:'ripple',i,x:0.2+Math.random()*0.6,y:0.6+Math.random()*0.25,c:col(i),dur:3.2,size:0.12});
   }
   function pulsarPing(ac,out,i){
-    const t0=ac.currentTime+0.03;
+    buildScale();   // pings on the root two-and-a-half octaves up
+    const t0=ac.currentTime+0.03, f=(NOTES[0]?NOTES[0].freq:261.6)*2.52;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*0.8-0.4; p.connect(out);
-    [[660,0.22],[1320,0.06]].forEach(sp=>{
-      const o=ac.createOscillator(); o.type='sine'; o.frequency.value=sp[0];
+    [[1,0.22],[2,0.06]].forEach(sp=>{
+      const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f*sp[0];
       const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t0);
       g.gain.linearRampToValueAtTime(sp[1],t0+0.006);
       g.gain.exponentialRampToValueAtTime(0.0008,t0+0.5);
@@ -251,7 +312,8 @@ const Anim = (() => {
     fx({kind:'ripple',i,x:0.15+Math.random()*0.7,y:0.15+Math.random()*0.45,c:col(i),dur:1.1,size:0.035});
   }
   function whoosh(ac,out,i){
-    const t0=ac.currentTime+0.05, dur=2.6+Math.random()*1.6, dir=Math.random()<0.5?1:-1;
+    const vv=vr(i), t0=ac.currentTime+0.05;
+    const dur=2.6+Math.random()*1.6*vv, dir=Math.random()<0.5?1:-1;
     const n=mkNoise(ac);
     const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=1.1;
     bp.frequency.setValueAtTime(220,t0);
@@ -268,9 +330,10 @@ const Anim = (() => {
     fx({kind:'streak',i,x:0,y:0,x0:dir>0?0.05:0.95,y0,x1:dir>0?0.95:0.05,y1:y0+0.15,c:col(i),dur});
   }
   function chimeDing(ac,out,i){
+    const vv=vr(i);
     buildScale();
     const note=NOTES[Math.floor(Math.random()*NOTES.length)]||{freq:523};
-    const f=note.freq*2, t0=ac.currentTime+0.05;
+    const f=note.freq*2*(Math.random()<0.15*vv?2:1), t0=ac.currentTime+0.05;
     const p=ac.createStereoPanner(); p.pan.value=Math.random()*1.4-0.7; p.connect(out);
     [[1,0.30],[2.76,0.10]].forEach(sp=>{
       const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f*sp[0];
@@ -281,9 +344,9 @@ const Anim = (() => {
     });
     fx({kind:'twinkle',i,x:0.15+Math.random()*0.7,y:0.1+Math.random()*0.5,c:col(i),dur:1.8});
   }
-  function crackle(ac,out){
-    const t0=ac.currentTime+0.03, nb=mkNoise(ac);
-    const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1800+Math.random()*1600;
+  function crackle(ac,out,i){
+    const vv=vr(i), t0=ac.currentTime+0.03, nb=mkNoise(ac);
+    const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1800+Math.random()*1600*vv;
     const cg=ac.createGain(); cg.gain.setValueAtTime(0.0001,t0);
     cg.gain.linearRampToValueAtTime(0.10+Math.random()*0.20,t0+0.004);
     cg.gain.exponentialRampToValueAtTime(0.0008,t0+0.05+Math.random()*0.04);
@@ -305,24 +368,26 @@ const Anim = (() => {
   }
 
   // ── continuous musical layers (key-aware, snap to the key at next start) ──
-  function droneMake(ac,out){
+  function droneMake(ac,out,i){
+    const tone=P(rk(i),'tone'), move=P(rk(i),'move');
     buildScale();
     const f=(NOTES[0]?NOTES[0].freq:261.6)/2;
-    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=900;
+    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=900*tone;
     const g=ac.createGain(); g.gain.value=0.8;
     lp.connect(g); g.connect(out);
     const oscs=[[f,'triangle',1],[f*1.5,'sine',0.55],[f*2,'sine',0.4],[f*1.006,'triangle',0.5]]
       .map(sp=>{ const o=ac.createOscillator(); o.type=sp[1]; o.frequency.value=sp[0];
         const og=ac.createGain(); og.gain.value=sp[2];
         o.connect(og); og.connect(lp); o.start(); return {o,og}; });
-    const l1=lfo(ac,0.09,0.14,g.gain);
+    const l1=lfo(ac,0.09,0.14*move,g.gain);
     return ()=>{ l1(); oscs.forEach(x=>{try{x.o.stop();x.o.disconnect();x.og.disconnect();}catch(e){}});
       try{lp.disconnect();g.disconnect();}catch(e){} };
   }
-  function humMake(ac,out){
+  function humMake(ac,out,i){
+    const tone=P(rk(i),'tone'), move=P(rk(i),'move');
     buildScale();
     const f=Math.max(35,(NOTES[0]?NOTES[0].freq:261.6)/4);
-    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=260;
+    const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=260*tone;
     const g=ac.createGain(); g.gain.value=0.9;
     lp.connect(g); g.connect(out);
     const specs=[[f,'sine',1],[f*1.5,'sine',0.3],[f*1.003,'sine',0.6]];
@@ -330,99 +395,113 @@ const Anim = (() => {
     const oscs=specs.map(sp=>{ const o=ac.createOscillator(); o.type=sp[1]; o.frequency.value=sp[0];
       const og=ac.createGain(); og.gain.value=sp[2];
       o.connect(og); og.connect(lp); o.start(); return {o,og}; });
-    const l1=lfo(ac,0.05,0.18,g.gain);
+    const l1=lfo(ac,0.05,0.18*move,g.gain);
     return ()=>{ l1(); oscs.forEach(x=>{try{x.o.stop();x.o.disconnect();x.og.disconnect();}catch(e){}});
       try{lp.disconnect();g.disconnect();}catch(e){} };
   }
-  function shimmerMake(ac,out){
+  function shimmerMake(ac,out,i){
+    const tone=P(rk(i),'tone'), move=P(rk(i),'move');
     buildScale();
     const f=(NOTES[0]?NOTES[0].freq:261.6)*4;
-    const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=900;
+    const hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=900*tone;
     const g=ac.createGain(); g.gain.value=0.5;
     hp.connect(g); g.connect(out);
     const oscs=[[f,0.5],[f*1.498,0.3],[f*1.007,0.35],[f*2,0.18]]
       .map(sp=>{ const o=ac.createOscillator(); o.type='sine'; o.frequency.value=sp[0];
         const og=ac.createGain(); og.gain.value=sp[1];
         o.connect(og); og.connect(hp); o.start(); return {o,og}; });
-    const l1=lfo(ac,0.13,0.3,g.gain);
+    const l1=lfo(ac,0.13,0.3*move,g.gain);
     return ()=>{ l1(); oscs.forEach(x=>{try{x.o.stop();x.o.disconnect();x.og.disconnect();}catch(e){}});
       try{hp.disconnect();g.disconnect();}catch(e){} };
   }
 
-  // ── recipe library: {icon,name,color,level (mix balance),vis,make(ac,out,i)} ──
+  // ── recipe library ──
+  // {icon,om,name,color,level (mix balance),vis,prm (tuning sliders),make(ac,out,i)}
+  const RATE=['rate','How often',0.3,3], VARI=['vari','Variation',0,2],
+        TONE=['tone','Deeper ↔ brighter',0.5,2], MOVE=['move','Movement / swell',0,2],
+        PITCH=['pitch','Lower ↔ higher',0.6,1.6];
   const R={
-    rain:    {icon:'🌧️',name:'Rain',            color:[90,140,220], level:0.45, vis:{k:'rain',den:1,sp:1,a:0.30},
-      make:noiseLayer({filters:[['highpass',400],['lowpass',3400]],gain:0.8})},
-    drizzle: {icon:'🌦️',name:'Gentle drizzle',  color:[140,180,230],level:0.4,  vis:{k:'rain',den:0.5,sp:0.8,a:0.18},
-      make:noiseLayer({filters:[['highpass',900],['lowpass',5200]],gain:0.5})},
-    roof:    {icon:'🏠',name:'Rain on the roof', color:[180,160,130],level:0.5,  vis:{k:'rain',den:0.7,sp:1.15,a:0.14,len:0.6},
-      make:noiseLayer({filters:[['lowpass',900]],gain:0.9,lfos:[[6,0.06,'gain']]})},
-    thunder: {icon:'⛈️',name:'Thunder',          color:[130,120,200],level:0.6,
-      make:events(thunderRoll,9000,28000,3000)},
-    wind:    {icon:'🌬️',name:'Wind',            color:[185,200,215],level:0.4,  vis:{k:'lines',y:0.25,f:3,a:0.10},
-      make:noiseLayer({filters:[['bandpass',520,1.1]],gain:0.7,lfos:[[0.06,260,0],[0.21,90,0],[0.1,0.2,'gain']]})},
-    drips:   {icon:'💧',name:'Water drips',      color:[120,210,230],level:0.5,
-      make:events(drip,350,2200)},
-    stream:  {icon:'🏞️',name:'Stream',          color:[80,190,185], level:0.4,  vis:{k:'bubbles',top:0.3,a:0.35},
+    rain:    {icon:'🌧️',om:'1F327',name:'Rain',            color:[90,140,220], level:0.45, vis:{k:'rain',den:1,sp:1,a:0.30},
+      prm:[TONE], make:noiseLayer({filters:[['highpass',400],['lowpass',3400]],gain:0.8})},
+    drizzle: {icon:'🌦️',om:'1F326',name:'Gentle drizzle',  color:[140,180,230],level:0.4,  vis:{k:'rain',den:0.5,sp:0.8,a:0.18},
+      prm:[TONE], make:noiseLayer({filters:[['highpass',900],['lowpass',5200]],gain:0.5})},
+    roof:    {icon:'☔',om:'2614', name:'Rain on the roof', color:[180,160,130],level:0.5,  vis:{k:'rain',den:0.7,sp:1.15,a:0.14,len:0.6},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['lowpass',900]],gain:0.9,lfos:[[6,0.06,'gain']]})},
+    thunder: {icon:'⛈️',om:'26C8', name:'Thunder',          color:[130,120,200],level:0.6,
+      prm:[RATE,VARI,['tone','Far away ↔ close',0.5,2]], make:events(thunderRoll,9000,28000,3000)},
+    wind:    {icon:'🌬️',om:'1F32C',name:'Wind',            color:[185,200,215],level:0.4,  vis:{k:'lines',y:0.25,f:3,a:0.10},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['bandpass',520,1.1]],gain:0.7,lfos:[[0.06,260,0],[0.21,90,0],[0.1,0.2,'gain']]})},
+    drips:   {icon:'💧',om:'1F4A7',name:'Water drips',      color:[120,210,230],level:0.5,
+      prm:[RATE,VARI,PITCH], make:events(drip,350,2200)},
+    stream:  {icon:'🏞️',om:'1F3DE',name:'Stream',          color:[80,190,185], level:0.4,  vis:{k:'bubbles',top:0.3,a:0.35},
+      prm:[['rate','Burble rate',0.3,3],TONE,MOVE],
       make:combo(noiseLayer({filters:[['bandpass',1500,0.8]],gain:0.45,lfos:[[1.1,0.12,'gain']]}),
                  events(burble,260,900))},
-    drone:   {icon:'🎶',name:'Soft drone',       color:[125,79,181], level:0.3,  vis:{k:'glow',cy:0.5,r:0.33,a:0.16},
-      make:droneMake},
-    ocean:   {icon:'🌊',name:'Ocean waves',      color:[28,169,169], level:0.55, vis:{k:'waves',y:0.84,a:0.22},
-      make:noiseLayer({filters:[['lowpass',520]],gain:0.55,lfos:[[0.07,0.35,'gain'],[0.07,260,0]]})},
-    deep:    {icon:'🌀',name:'Deep water',       color:[60,110,200], level:0.5,  vis:{k:'glow',cy:0.86,r:0.65,a:0.14},
-      make:noiseLayer({filters:[['lowpass',240]],gain:0.8,lfos:[[0.05,0.3,'gain']]})},
-    foam:    {icon:'🐚',name:'Foam & spray',     color:[200,230,240],level:0.35, vis:{k:'waves',y:0.8,a:0.12,thin:1},
-      make:noiseLayer({filters:[['highpass',2600]],gain:0.35,lfos:[[0.07,0.28,'gain']]})},
-    gulls:   {icon:'🕊️',name:'Seagulls',        color:[230,230,210],level:0.4,
-      make:events(gullCry,5000,14000,1200)},
-    buoy:    {icon:'🔔',name:'Buoy bell',        color:[230,180,90], level:0.45,
-      make:events(buoyBell,7000,16000,2500)},
-    whale:   {icon:'🐋',name:'Whale song',       color:[100,140,230],level:0.5,
-      make:events(whaleCall,11000,26000,4000)},
-    birds:   {icon:'🐦',name:'Birdsong',         color:[150,210,80], level:0.5,
-      make:events(chirp,900,4400,300)},
-    leaves:  {icon:'🍃',name:'Leaves & breeze',  color:[110,190,110],level:0.4,  vis:{k:'lines',y:0.35,f:7,a:0.09},
-      make:noiseLayer({filters:[['bandpass',2400,0.7]],gain:0.5,lfos:[[0.4,0.22,'gain'],[1.3,0.1,'gain']]})},
-    crickets:{icon:'🦗',name:'Crickets',         color:[200,220,90], level:0.35,
-      make:events(cricket,700,2000)},
-    owl:     {icon:'🦉',name:'Owl',              color:[180,150,220],level:0.5,
-      make:events(owlHoot,7000,18000,1500)},
-    wood:    {icon:'🪵',name:'Woodpecker',       color:[210,160,110],level:0.45,
-      make:events(woodTaps,5000,14000,2000)},
-    fire:    {icon:'🔥',name:'Campfire',         color:[240,130,40], level:0.5,  vis:{k:'fire'},
+    drone:   {icon:'🎶',om:'1F3B6',name:'Soft drone',       color:[125,79,181], level:0.3,  vis:{k:'glow',cy:0.5,r:0.33,a:0.16},
+      prm:[TONE,MOVE], make:droneMake},
+    ocean:   {icon:'🌊',om:'1F30A',name:'Ocean waves',      color:[28,169,169], level:0.55, vis:{k:'waves',y:0.84,a:0.22},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['lowpass',520]],gain:0.55,lfos:[[0.07,0.35,'gain'],[0.07,260,0]]})},
+    deep:    {icon:'⚓',om:'2693', name:'Deep water',       color:[60,110,200], level:0.5,  vis:{k:'glow',cy:0.86,r:0.65,a:0.14},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['lowpass',240]],gain:0.8,lfos:[[0.05,0.3,'gain']]})},
+    foam:    {icon:'🫧',om:'1FAE7',name:'Foam & spray',     color:[200,230,240],level:0.35, vis:{k:'waves',y:0.8,a:0.12,thin:1},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['highpass',2600]],gain:0.35,lfos:[[0.07,0.28,'gain']]})},
+    gulls:   {icon:'🕊️',om:'1F54A',name:'Seagulls',        color:[230,230,210],level:0.4,
+      prm:[RATE,VARI,PITCH], make:events(gullCry,5000,14000,1200)},
+    buoy:    {icon:'🛟',om:'1F6DF',name:'Buoy bell',        color:[230,180,90], level:0.45,
+      prm:[RATE], make:events(buoyBell,7000,16000,2500)},
+    whale:   {icon:'🐋',om:'1F40B',name:'Whale song',       color:[100,140,230],level:0.5,
+      prm:[RATE,VARI,PITCH], make:events(whaleCall,11000,26000,4000)},
+    birds:   {icon:'🐦',om:'1F426',name:'Birdsong',         color:[150,210,80], level:0.5,
+      prm:[RATE,VARI,PITCH], make:events(chirp,900,4400,300)},
+    leaves:  {icon:'🍃',om:'1F343',name:'Leaves & breeze',  color:[110,190,110],level:0.4,  vis:{k:'lines',y:0.35,f:7,a:0.09},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['bandpass',2400,0.7]],gain:0.5,lfos:[[0.4,0.22,'gain'],[1.3,0.1,'gain']]})},
+    crickets:{icon:'🦗',om:'1F997',name:'Crickets',         color:[200,220,90], level:0.35,
+      prm:[RATE,VARI,PITCH], make:events(cricket,700,2000)},
+    owl:     {icon:'🦉',om:'1F989',name:'Owl',              color:[180,150,220],level:0.5,
+      prm:[RATE,VARI,PITCH], make:events(owlHoot,7000,18000,1500)},
+    wood:    {icon:'🌳',om:'1F333',name:'Woodpecker',       color:[210,160,110],level:0.45,
+      prm:[RATE,VARI,PITCH], make:events(woodTaps,5000,14000,2000)},
+    fire:    {icon:'🔥',om:'1F525',name:'Campfire',         color:[240,130,40], level:0.5,  vis:{k:'fire'},
+      prm:[['rate','Crackle rate',0.3,3],['vari','Crackle variation',0,2],TONE,MOVE],
       make:combo(noiseLayer({filters:[['lowpass',200]],gain:0.7,lfos:[[0.35,0.2,'gain']]}),
                  events(crackle,120,670,100))},
-    chimes:  {icon:'🎐',name:'Wind chimes',      color:[240,220,140],level:0.5,
-      make:events(chimeDing,2500,8000,500)},
-    heart:   {icon:'💓',name:'Heartbeat',        color:[226,70,90],  level:0.65,
-      make:events(heartBeat,1100,1100,300)},
-    hum:     {icon:'🌌',name:'Deep space hum',   color:[90,80,180],  level:0.35, vis:{k:'glow',cy:0.55,r:0.5,a:0.13},
-      make:humMake},
-    shimmer: {icon:'✨',name:'Star shimmer',     color:[220,210,255],level:0.3,  vis:{k:'stars',tw:2.2,n:40,drift:0},
-      make:shimmerMake},
-    pulsar:  {icon:'📡',name:'Pulsar pings',     color:[120,220,200],level:0.45,
-      make:events(pulsarPing,1400,1700,600)},
-    solar:   {icon:'💫',name:'Solar wind',       color:[200,190,230],level:0.35, vis:{k:'stars',tw:1.0,n:60,drift:0.02},
-      make:noiseLayer({filters:[['bandpass',4200,0.5]],gain:0.28,lfos:[[0.03,0.12,'gain']]})},
-    comets:  {icon:'☄️',name:'Comets',           color:[240,200,120],level:0.45,
-      make:events(whoosh,7000,17000,2000)},
+    chimes:  {icon:'🎐',om:'1F390',name:'Wind chimes',      color:[240,220,140],level:0.5,
+      prm:[RATE,VARI], make:events(chimeDing,2500,8000,500)},
+    heart:   {icon:'💓',om:'1F493',name:'Heartbeat',        color:[226,70,90],  level:0.65, steady:true,
+      prm:[['rate','Speed',0.7,1.4]], make:events(heartBeat,1100,1100,300)},
+    hum:     {icon:'🌌',om:'1F30C',name:'Deep space hum',   color:[90,80,180],  level:0.35, vis:{k:'glow',cy:0.55,r:0.5,a:0.13},
+      prm:[TONE,MOVE], make:humMake},
+    shimmer: {icon:'✨',om:'2728', name:'Star shimmer',     color:[220,210,255],level:0.3,  vis:{k:'stars',tw:2.2,n:40,drift:0},
+      prm:[TONE,MOVE], make:shimmerMake},
+    pulsar:  {icon:'📡',om:'1F4E1',name:'Pulsar pings',     color:[120,220,200],level:0.45, steady:true,
+      prm:[['rate','Speed',0.4,2.5]], make:events(pulsarPing,1400,1700,600)},
+    solar:   {icon:'💫',om:'1F4AB',name:'Solar wind',       color:[200,190,230],level:0.35, vis:{k:'stars',tw:1.0,n:60,drift:0.02},
+      prm:[TONE,MOVE], make:noiseLayer({filters:[['bandpass',4200,0.5]],gain:0.28,lfos:[[0.03,0.12,'gain']]})},
+    comets:  {icon:'☄️',om:'2604', name:'Comets',           color:[240,200,120],level:0.45,
+      prm:[RATE,VARI], make:events(whoosh,7000,17000,2000)},
   };
+  for(const k in R) R[k].key=k;
 
-  // ── scenes: each hands the 8 sliders a different set of layers ──
+  // ── scenes: 8 layers each, plus a cohesive palette so the scene reads as one world ──
   const SCENES={
-    calm:  {icon:'🌿',label:'Calm classics', layers:[R.rain,R.ocean,R.birds,R.fire,R.wind,R.drone,R.heart,R.chimes]},
-    storm: {icon:'⛈️',label:'Rainstorm',     layers:[R.drizzle,R.rain,R.roof,R.thunder,R.wind,R.drips,R.stream,R.drone]},
-    forest:{icon:'🌲',label:'Forest',        layers:[R.birds,R.stream,R.leaves,R.crickets,R.owl,R.wood,R.fire,R.chimes]},
-    ocean: {icon:'🌊',label:'Ocean',         layers:[R.ocean,R.deep,R.foam,R.gulls,R.wind,R.buoy,R.whale,R.drone]},
-    night: {icon:'🌌',label:'Night sky',     layers:[R.hum,R.shimmer,R.pulsar,R.solar,R.comets,R.crickets,R.heart,R.chimes]},
+    calm:  {icon:'🌿',label:'Calm classics', layers:[R.rain,R.ocean,R.birds,R.fire,R.wind,R.drone,R.heart,R.chimes],
+      pal:[[110,160,230],[60,180,175],[150,210,110],[240,150,70],[190,205,220],[150,110,220],[235,110,130],[240,220,150]]},
+    storm: {icon:'⛈️',label:'Rainstorm',     layers:[R.drizzle,R.rain,R.roof,R.thunder,R.wind,R.drips,R.stream,R.drone],
+      pal:[[165,185,215],[110,145,215],[95,120,185],[140,120,220],[180,200,220],[120,200,230],[95,175,190],[150,110,200]]},
+    forest:{icon:'🌲',label:'Forest',        layers:[R.birds,R.stream,R.leaves,R.crickets,R.owl,R.wood,R.fire,R.chimes],
+      pal:[[170,215,100],[110,200,180],[120,190,110],[205,220,110],[190,160,120],[180,140,100],[235,150,80],[230,215,150]]},
+    ocean: {icon:'🌊',label:'Ocean',         layers:[R.ocean,R.deep,R.foam,R.gulls,R.wind,R.buoy,R.whale,R.drone],
+      pal:[[70,190,200],[45,110,190],[210,235,240],[230,230,215],[160,200,220],[240,190,110],[90,150,230],[130,150,220]]},
+    night: {icon:'🌌',label:'Night sky',     layers:[R.hum,R.shimmer,R.pulsar,R.solar,R.comets,R.crickets,R.heart,R.chimes],
+      pal:[[110,95,200],[225,215,255],[130,220,210],[190,180,235],[245,205,130],[150,185,150],[230,120,150],[235,220,160]]},
   };
 
-  // ── audio follows the sliders ──
+  // ── audio follows the sliders (mute keeps the level but silences the layer) ──
   function setAudio(i){
     const Ld=LYS()[i], c=ch[i]; if(!Ld) return;
-    const target=c.v*Ld.level;
-    if(c.v>0.002 && !act[i]){
+    const eff=c.m?0:c.v;
+    const target=eff*Ld.level;
+    if(eff>0.002 && !act[i]){
       if(!audioCtx||!masterGain) return;   // context is created on the touch (onCell)
       const g=audioCtx.createGain(); g.gain.value=0;
       const stop=Ld.make(audioCtx,g,i);
@@ -435,39 +514,167 @@ const Anim = (() => {
       act[i].gain.gain.setTargetAtTime(target,audioCtx.currentTime,0.09);
       c.sent=target;
     }
-    if(c.v<=0.002){   // slider at the bottom: fade done → tear the nodes down
+    if(eff<=0.002){   // silent (off or muted): fade done → tear the nodes down
       if(!c.zeroAt) c.zeroAt=Date.now();
       else if(Date.now()-c.zeroAt>700){ const a=act[i]; act[i]=null; a.stop(); c.sent=-1; c.zeroAt=0; }
     } else c.zeroAt=0;
   }
-  function killAll(){
-    ch.forEach((c,i)=>{ c.v=0; c.sent=-1; c.zeroAt=0;
+  function killAudio(){
+    ch.forEach((c,i)=>{ c.sent=-1; c.zeroAt=0;
       const a=act[i]; if(!a) return; act[i]=null;
       try{ a.gain.gain.setTargetAtTime(0,audioCtx.currentTime,0.1); }catch(e){}
       setTimeout(()=>a.stop(),600);
     });
   }
+  // a changed tone/move takes effect by rebuilding the live layer (they're cheap)
+  function rebuildLayer(key){
+    const idx=LYS().findIndex(L=>L.key===key);
+    if(idx<0||!act[idx]||!audioCtx) return;
+    const a=act[idx]; act[idx]=null; ch[idx].sent=-1;
+    try{ a.gain.gain.setTargetAtTime(0,audioCtx.currentTime,0.08); }catch(e){}
+    setTimeout(()=>a.stop(),400);
+    pokeSim();   // the frame loop recreates it at the current level
+  }
+
+  // ── per-scene mix memory: reopening a scene restores last time's sliders; the
+  //    audio fades in at the first touch (a fresh page can't start sound itself) ──
+  function saveMix(sc){
+    if(SETTINGS.remember===false) return;
+    const key=sc||SETTINGS.scene; if(!SCENES[key]) return;
+    const m=(SETTINGS.mix&&typeof SETTINGS.mix==='object')?SETTINGS.mix:{};
+    m[key]={v:ch.map(c=>+c.v.toFixed(3)),m:ch.map(c=>c.m?1:0)};
+    SETTINGS.mix=m; mixRef=m; saveSettings();
+  }
+  function loadMix(){
+    const rec=SETTINGS.remember!==false&&SETTINGS.mix?SETTINGS.mix[SETTINGS.scene]:null;
+    mixRef=SETTINGS.mix;
+    ch.forEach((c,i)=>{ c.v=rec&&rec.v?(rec.v[i]||0):0; c.m=!!(rec&&rec.m&&rec.m[i]);
+      c.sent=-1; c.zeroAt=0; });
+    refreshStrip();
+  }
+
   // scene changes arrive from the panel, presets, or reset — one sync point
   function syncScene(){
     if(SETTINGS.scene===lastScene) return;
     if(!SCENES[SETTINGS.scene]) SETTINGS.scene='calm';
+    if(lastScene&&SCENES[lastScene]) saveMix(lastScene);   // remember the outgoing mix
     lastScene=SETTINGS.scene;
-    killAll(); pools={}; fxq=[];
-    buildBands(); restyle(); pokeSim();
+    closeEditor();
+    killAudio(); pools={}; fxq=[];
+    buildBands(); restyle(); buildStrip();
+    loadMix();
+    pokeSim();
   }
   function restyle(){
     bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
       const c=+d.dataset.cell.split('-')[0], Ld=LYS()[c];
       d._ss=true;
       if(!Ld) return;
-      d.style.setProperty('--c',Ld.color.join(','));
-      // the canvas draws the level fill — the band tint stays whisper-quiet
-      d.style.setProperty('--a','0.05');
+      d.style.setProperty('--c',col(c).join(','));
+      // the canvas paints the column tint and level fill — the band overlay only
+      // supplies the held/flash touch feedback
+      d.style.setProperty('--a','0');
+      const l=d.querySelector('.lbl');
+      if(l){
+        const svg=window.SS_ICONS&&Ld.om&&window.SS_ICONS[Ld.om];
+        if(svg) l.innerHTML=svg; else l.textContent=Ld.icon;
+        l.style.opacity=ch[c].m?0.25:'';
+      }
     });
   }
+  function dimIcon(i){
+    const l=bandsEl.querySelector('[data-cell="'+i+'-0"] .lbl');
+    if(l) l.style.opacity=ch[i].m?0.25:'';
+  }
+  function toggleMute(i){
+    const c=ch[i]; if(!c) return;
+    c.m=!c.m; dimIcon(i); refreshStrip(); saveMix(); pokeSim();
+  }
+
+  // ── per-column control strip: 🔇 quick mute + 🎚 sound editor ──
+  function buildStrip(){
+    if(stripEl) stripEl.remove();
+    stripEl=document.createElement('div'); stripEl.id='ssStrip';
+    mBtns=[]; gBtns=[];
+    LYS().forEach((Ld,i)=>{
+      const cell=document.createElement('div'); cell.className='sscell';
+      const m=document.createElement('button'); m.className='ssbtn ssmute'; m.title='Mute / unmute this sound';
+      m.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); toggleMute(i); });
+      const g=document.createElement('button'); g.className='ssbtn ssgear'; g.textContent='🎚';
+      g.title='Tune this sound';
+      g.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); openEditor(i); });
+      cell.appendChild(m); cell.appendChild(g);
+      stripEl.appendChild(cell);
+      mBtns.push(m); gBtns.push(g);
+    });
+    document.body.appendChild(stripEl);
+    refreshStrip();
+    if(lastLocked) gBtns.forEach(b=>b.style.display='none');
+  }
+  function refreshStrip(){
+    LYS().forEach((Ld,i)=>{
+      const m=mBtns[i]; if(!m) return;
+      const cc=col(i);
+      m.textContent=ch[i].m?'🔇':'🔊';
+      m.classList.toggle('muted',!!ch[i].m);
+      m.style.borderColor='rgba('+cc.join(',')+',0.55)';
+      gBtns[i].style.borderColor='rgba('+cc.join(',')+',0.55)';
+    });
+  }
+  // the sound editor card: every tuning slider for one sound, next to its column
+  function openEditor(i){
+    if(editI===i){ closeEditor(); return; }
+    closeEditor();
+    const Ld=LYS()[i]; if(!Ld) return;
+    editI=i;
+    editEl=document.createElement('div'); editEl.id='ssEdit';
+    const W=window.innerWidth, w=Math.min(320,W*0.92);
+    let x=(i+0.5)/NCH*W-w/2; x=Math.max(8,Math.min(W-w-8,x));
+    editEl.style.left=x+'px'; editEl.style.width=w+'px';
+    renderEditor();
+    document.body.appendChild(editEl);
+  }
+  function renderEditor(){
+    const i=editI, Ld=LYS()[i]; if(!editEl||!Ld) return;
+    editEl.innerHTML='';
+    const hd=document.createElement('div'); hd.className='hd';
+    hd.appendChild(iconEl(Ld,26));
+    const nm=document.createElement('span'); nm.className='nm'; nm.textContent=Ld.name; hd.appendChild(nm);
+    const x=document.createElement('button'); x.className='x'; x.textContent='✕'; x.title='Close';
+    x.addEventListener('click',e=>{ e.stopPropagation(); closeEditor(); });
+    hd.appendChild(x);
+    editEl.appendChild(hd);
+    (Ld.prm||[]).forEach(pd=>editEl.appendChild(lpSlider(Ld.key,pd)));
+    if(SETTINGS.lp&&SETTINGS.lp[Ld.key]){
+      const rs=document.createElement('div'); rs.className='chip';
+      rs.style.display='inline-block'; rs.textContent='↺ Back to normal';
+      rs.addEventListener('click',e=>{ e.stopPropagation();
+        delete SETTINGS.lp[Ld.key]; saveSettings(); rebuildLayer(Ld.key);
+        renderEditor(); if(currentQuickMode==='instrument') buildInstrumentPanel(); });
+      editEl.appendChild(rs);
+    }
+  }
+  function closeEditor(){ if(editEl){ editEl.remove(); editEl=null; } editI=-1; }
 
   // ── visuals ──
   function alpha(c,a){ return 'rgba('+c[0]+','+c[1]+','+c[2]+','+Math.max(0,Math.min(1,a)).toFixed(3)+')'; }
+  // trail-fade fill, tinted per column: each slider sits in a subtle wash of its
+  // own colour (grey when muted), strongest at the foot and fading upward
+  function drawColBg(W,H){
+    const n=LYS().length, cw=W/n;
+    const mix=(cc,k)=>{
+      const r=bgRGB[0]*255*(1-k)+cc[0]*k, g2=bgRGB[1]*255*(1-k)+cc[1]*k, b=bgRGB[2]*255*(1-k)+cc[2]*k;
+      return 'rgba('+(r|0)+','+(g2|0)+','+(b|0)+',0.18)';
+    };
+    for(let i=0;i<n;i++){
+      const cc=ch[i].m?GREY:col(i);
+      const g=ctx.createLinearGradient(0,H,0,0);
+      g.addColorStop(0,mix(cc,ch[i].m?0.06:0.14));
+      g.addColorStop(0.65,mix(cc,ch[i].m?0.02:0.04));
+      g.addColorStop(1,mix(cc,0));
+      ctx.fillStyle=g; ctx.fillRect(i*cw,0,cw+1,H);
+    }
+  }
   const VIS={
     rain(i,p,c,W,H,dt,I){
       const q=activeQuality(), cap=(q==='high'?150:q==='med'?90:45)*p.den;
@@ -555,7 +762,9 @@ const Anim = (() => {
     fxq=fxq.filter(f=>{
       f.age+=dt/(f.dur||1);
       if(f.age>=1) return false;
-      const lvl=ch[f.i]?Math.max(0.2,ch[f.i].v):0.6;
+      const cc=ch[f.i];
+      const lvl=cc?Math.max(0.2,cc.m?0:cc.v):0.6;
+      if(lvl<=0) return false;   // muted mid-flight: let its visuals go too
       const a=(1-f.age)*lvl, x=(f.x||0)*W, y=(f.y||0)*H;
       if(f.kind==='twinkle'){
         const r=H*(f.size||0.014)*(1-f.age*0.5);
@@ -589,24 +798,58 @@ const Anim = (() => {
       return true;
     });
   }
-  // the slider readout: a glowing fill up to the level + a bright handle bar
+  // the slider readout: a glowing fill up to the level + a bright handle bar.
+  // Muted channels keep their height but go dim and grey — "still set, silenced".
   function drawLevels(W,H,held){
     const LY=LYS(), n=LY.length, cw=W/n;
     for(let i=0;i<n;i++){
       const Ld=LY[i]; if(!Ld) continue;
-      const v=ch[i].v;
+      const v=ch[i].v, muted=ch[i].m, cc=col(i);
       if(v<=0.004 && !held.has(i)) continue;
       const x0=i*cw+cw*0.05, w=cw*0.90;
       const yTop=(1-(LVL0+v*LVLR))*H;
       if(v>0.004){
         const grad=ctx.createLinearGradient(0,yTop,0,H);
-        grad.addColorStop(0,alpha(Ld.color,0.16));
-        grad.addColorStop(1,alpha(Ld.color,0.03));
-        ctx.fillStyle=grad; ctx.fillRect(x0,yTop,w,H-yTop);
+        grad.addColorStop(0,alpha(cc,muted?0.05:0.16));
+        grad.addColorStop(1,alpha(cc,muted?0.01:0.03));
+        ctx.fillStyle=grad; ctx.fillRect(x0,yTop,w,H*(1-LVL0*0.6)-yTop);
       }
-      ctx.fillStyle=alpha(Ld.color,0.20); ctx.fillRect(x0,yTop-H*0.009,w,H*0.018);
-      ctx.fillStyle=alpha(Ld.color,held.has(i)?1:0.85); ctx.fillRect(x0,yTop-H*0.0028,w,H*0.0056);
+      const hc=muted?GREY:cc;
+      ctx.fillStyle=alpha(hc,muted?0.10:0.20); ctx.fillRect(x0,yTop-H*0.009,w,H*0.018);
+      ctx.fillStyle=alpha(hc,held.has(i)?1:(muted?0.5:0.85)); ctx.fillRect(x0,yTop-H*0.0028,w,H*0.0056);
     }
+  }
+
+  // panel helpers: an icon span (OpenMoji if the asset file loaded, emoji otherwise)
+  function iconEl(Ld,px){
+    const s=document.createElement('span');
+    s.style.cssText='width:'+px+'px;height:'+px+'px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:'+(px-3)+'px';
+    const svg=window.SS_ICONS&&Ld.om&&window.SS_ICONS[Ld.om];
+    if(svg){ s.innerHTML=svg; s.firstChild.style.width=px+'px'; s.firstChild.style.height=px+'px'; }
+    else s.textContent=Ld.icon;
+    return s;
+  }
+  function lpSlider(key,pd){
+    const par=pd[0], min=pd[2], max=pd[3];
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=pd[1];
+    const val=document.createElement('span'); val.className='val';
+    const fmt=v=>Math.abs(v-1)<0.03?'normal':'×'+v.toFixed(2);
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=0.01; inp.value=P(key,par);
+    val.textContent=fmt(P(key,par));
+    inp.addEventListener('input',()=>{
+      const v=parseFloat(inp.value);
+      if(!SETTINGS.lp) SETTINGS.lp={};
+      (SETTINGS.lp[key]||(SETTINGS.lp[key]={}))[par]=v;
+      val.textContent=fmt(v); saveSettings();
+      // schedulers read rate/vari/pitch live; tone/move need the layer rebuilt
+      if(par==='tone'||par==='move') rebuildLayer(key);
+    });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
   }
 
   return {
@@ -616,7 +859,7 @@ const Anim = (() => {
     hideRail:['clear'],
     paneLabels:{ instrument:'🌿 Scenes', sound:'🎛️ Sound' },
     themes:{ calm:{label:'🌿 Calm', colors:[[0.4,0.7,0.9],[0.2,0.7,0.7],[0.6,0.8,0.4],[0.9,0.6,0.3],[0.6,0.5,0.8]]} },
-    defaults:{ theme:'calm', scene:'calm', wind:6, visFx:true,
+    defaults:{ theme:'calm', scene:'calm', wind:6, visFx:true, remember:true,
       mode:'notes', paint:false, yAxis:'none', octaveRows:'2', noteCount:8,
       zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major', pressFx:'none' },
     schema:[],
@@ -626,14 +869,14 @@ const Anim = (() => {
       { id:'ssmoon', icon:()=>'🌙', title:()=>'Wind-down: glide every slider to silence',
         onClick(){ windOn=true; pokeSim(); } },
     ],
-    _dbg(){ return { scene:SETTINGS.scene, wind:windOn,
-      v:ch.map(c=>+c.v.toFixed(2)),
+    _dbg(){ return { scene:SETTINGS.scene, wind:windOn, edit:editI,
+      v:ch.map(c=>+c.v.toFixed(2)), m:ch.map(c=>c.m?1:0),
       on:act.map((a,i)=>a?i:-1).filter(i=>i>=0) }; },
     // 🌿 Scenes tab
     buildInstrument(el){
       const note=document.createElement('div');
       note.style.cssText='color:rgba(255,255,255,0.5);font:13px/1.5 sans-serif;margin-bottom:12px';
-      note.textContent='Each column is one sound. Touch a column to set its level — higher is louder; the very bottom switches it off. The 🌙 button fades the whole mix out.';
+      note.textContent='Each column is one sound: touch it to set the level (higher is louder). Under every slider, 🔊 mutes that sound without losing its level and 🎚 opens its tuning controls. The 🌙 button fades the whole mix out.';
       el.appendChild(note);
       const h=document.createElement('div'); h.className='sectn'; h.textContent='Scene'; el.appendChild(h);
       const chips=document.createElement('div'); chips.className='chips';
@@ -645,23 +888,31 @@ const Anim = (() => {
         chips.appendChild(c);
       }
       el.appendChild(chips);
-      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Sounds in this scene'; el.appendChild(h2);
-      LYS().forEach(Ld=>{
+      const h2=document.createElement('div'); h2.className='sectn';
+      h2.textContent='Sounds in this scene — tap one to tune it'; el.appendChild(h2);
+      LYS().forEach((Ld,idx)=>{
+        const tuned=!!(SETTINGS.lp&&SETTINGS.lp[Ld.key]);
         const row=document.createElement('div');
-        row.style.cssText='display:flex;align-items:center;gap:9px;margin-bottom:6px;font:13px sans-serif;color:rgba(255,255,255,0.75)';
+        row.style.cssText='display:flex;align-items:center;gap:9px;margin-bottom:6px;font:13px sans-serif;'+
+          'color:rgba(255,255,255,0.8);cursor:pointer;padding:4px 6px;border-radius:9px';
         const dot=document.createElement('span');
-        dot.style.cssText='width:10px;height:10px;border-radius:50%;flex-shrink:0;background:rgb('+Ld.color.join(',')+')';
+        dot.style.cssText='width:10px;height:10px;border-radius:50%;flex-shrink:0;background:rgb('+col(idx).join(',')+')';
         row.appendChild(dot);
-        const tx=document.createElement('span'); tx.textContent=Ld.icon+'  '+Ld.name;
+        row.appendChild(iconEl(Ld,22));
+        const tx=document.createElement('span'); tx.textContent=Ld.name+(tuned?' •':''); tx.style.flex='1';
         row.appendChild(tx);
+        const ar=document.createElement('span'); ar.textContent='🎚';
+        ar.style.cssText='color:rgba(255,255,255,0.4);font-size:14px'; row.appendChild(ar);
+        row.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); openEditor(idx); });
         el.appendChild(row);
       });
+      el.appendChild(makeToggle('Remember the mix between visits','remember',()=>{ if(SETTINGS.remember) saveMix(); }));
     },
     // 🎛️ Sound tab
     buildSound(el){
       el.appendChild(makeSlider({key:'wind',label:'🌙 Wind-down time (seconds)',min:2,max:20,step:0.5,dp:1}));
       const kh=document.createElement('div'); kh.className='sectn';
-      kh.textContent='Key for musical sounds (drone, chimes… — applies when next switched on)';
+      kh.textContent='Key for musical sounds (drone, chimes, bells, pings — applies when next switched on)';
       el.appendChild(kh);
       el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
       el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
@@ -688,7 +939,10 @@ const Anim = (() => {
     onCell(colIdx){
       getAudio(); pokeSim(); windOn=false;   // a touch always cancels the wind-down
       const p=pointers.find(q=>q.down&&q.col===colIdx);
-      if(p&&colIdx<LYS().length) ch[colIdx].v=yToLevel(p.y);
+      if(p&&colIdx<LYS().length){
+        const lv=yToLevel(p.y);
+        if(lv>0) ch[colIdx].v=lv;   // touches in the strip zone belong to the buttons
+      }
     },
     init(cv){
       ctx=cv.getContext('2d');
@@ -703,6 +957,7 @@ const Anim = (() => {
       // suspended — retry the resume whenever a touch/click ends.
       ['pointerup','touchend'].forEach(ev=>window.addEventListener(ev,()=>{
         if(audioCtx&&audioCtx.state==='suspended') audioCtx.resume(); },{passive:true}));
+      window.addEventListener('beforeunload',()=>saveMix());
       saveSettings(); refreshMusic();
       syncScene();
       this.reset();
@@ -712,6 +967,13 @@ const Anim = (() => {
     frame(dt){
       if(!ctx) return;
       syncScene();
+      if(SETTINGS.mix!==mixRef) loadMix();   // a loaded preset brought its own mix
+      // session lock hides the tune buttons (students keep the quick mutes)
+      if(!!SETTINGS.locked!==lastLocked){
+        lastLocked=!!SETTINGS.locked;
+        gBtns.forEach(b=>b.style.display=lastLocked?'none':'');
+        if(lastLocked) closeEditor();
+      }
       const first=bandsEl.firstChild;
       if(first&&!first._ss) restyle();
       t+=dt;
@@ -720,26 +982,39 @@ const Anim = (() => {
       if(windOn){
         let all0=true;
         ch.forEach(c=>{ c.v=Math.max(0,c.v-dt/Math.max(1,SETTINGS.wind)); if(c.v>0) all0=false; });
-        if(all0) windOn=false;
+        if(all0){ windOn=false; saveMix(); }
       }
-      const held=new Set(); let anyDown=false;
+      const held=new Set(), live=new Set(); let anyDown=false;
       for(const p of pointers){
         if(!p.down) continue;
-        anyDown=true; windOn=false;
+        anyDown=true; windOn=false; live.add(p.id);
+        let tr=ptrack[p.id];
+        // touches that START in the strip zone are for the buttons — ignore them
+        // until they clearly become an upward drag into the slider range
+        if(!tr) tr=ptrack[p.id]={skip:yToLevel(p.y)===0};
         const i=p.col;
-        if(i>=0&&i<LYS().length){ held.add(i); ch[i].v=yToLevel(p.y); }
+        if(i<0||i>=LYS().length) continue;
+        if(tr.skip){
+          if(yToLevel(p.y)>0.1) tr.skip=false; else continue;
+        }
+        held.add(i);
+        ch[i].v=yToLevel(p.y);
+        if(ch[i].v>0&&ch[i].m){ ch[i].m=false; dimIcon(i); refreshStrip(); }   // moving a muted slider unmutes it
       }
+      let lifted=false;
+      for(const id in ptrack) if(!live.has(id)){ delete ptrack[id]; lifted=true; }
+      if(lifted) saveMix();   // a lift is the natural moment to remember the mix
       ch.forEach((c,i)=>setAudio(i));
       // draw
       ctx.globalCompositeOperation='source-over';
-      ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+',0.18)';
-      ctx.fillRect(0,0,W,H);
+      drawColBg(W,H);
       let busy=anyDown||windOn||fxq.length>0;
       const LY=LYS();
       ctx.globalCompositeOperation='lighter';
       if(SETTINGS.visFx!==false){
-        LY.forEach((Ld,i)=>{ const v=ch[i].v;
-          if(v>0.01){ busy=true; if(Ld.vis) VIS[Ld.vis.k](i,Ld.vis,Ld.color,W,H,dt,v); } });
+        LY.forEach((Ld,i)=>{ const c=ch[i], ev=c.m?0:c.v;
+          if(c.v>0.01) busy=true;
+          if(ev>0.01&&Ld.vis) VIS[Ld.vis.k](i,Ld.vis,col(i),W,H,dt,ev); });
         drawFx(W,H,dt);
       } else { fxq=[]; LY.forEach((Ld,i)=>{ if(ch[i].v>0.01) busy=true; }); }
       drawLevels(W,H,held);
