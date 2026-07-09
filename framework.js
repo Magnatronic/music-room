@@ -12,13 +12,12 @@
    Coordinates passed to splat() are normalised 0..1 with y pointing UP.
 */
 // The framework owns its DOM: inject it before any element lookups below.
-document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <button class=\"btn\" id=\"collapse\" title=\"Menu\">≡</button>\n    <div id=\"railExtra\"></div>\n  </div>\n  <div id=\"menuExpand\">\n    <div id=\"bottomRow\">\n      <button class=\"bbar\" id=\"btnInstrument\" data-mode=\"instrument\">🎵 Notes</button>\n      <button class=\"bbar\" id=\"btnSound\"      data-mode=\"sound\">🎸 Instrument</button>\n      <button class=\"bbar\" id=\"btnVisuals\"    data-mode=\"visuals\">✨ Visuals</button>\n      <button class=\"bbar\" id=\"btnPresets\"    data-mode=\"presets\">⭐ Presets</button>\n    </div>\n    <div id=\"quickRow\"></div>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
+document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <button class=\"bbar\" id=\"btnInstrument\" data-mode=\"instrument\">🎵 Notes</button>\n    <button class=\"bbar\" id=\"btnSound\"      data-mode=\"sound\">🎸 Instrument</button>\n    <button class=\"bbar\" id=\"btnVisuals\"    data-mode=\"visuals\">✨ Visuals</button>\n    <button class=\"bbar\" id=\"btnPresets\"    data-mode=\"presets\">⭐ Presets</button>\n    <div class=\"qsep\"></div>\n    <div id=\"railExtra\"></div>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
 
 
 const canvas   = document.getElementById('c');
 const ui        = document.getElementById('ui');
 const panel     = document.getElementById('panel');
-const quickRow  = document.getElementById('quickRow');
 const railExtra = document.getElementById('railExtra');
 
 const STORE_KEY = 'settings:' + location.pathname.split('/').pop();
@@ -29,6 +28,7 @@ const SHARED_DEFAULTS = {
   voice:'pure', scale:'major', reverb:false, echo:false, chorus:false, mute:false,
   mode:'notes', rootNote:'C', octave:'4', noteCount:5,
   showLabels:true, yAxis:'none', octaveRows:'2', zoneLook:'tint', paint:true, glide:'gentle',
+  paintKeys:'subtle', pressFx:'bloom',
   locked:false, quality:'auto', showStats:false,
 };
 
@@ -45,6 +45,18 @@ function initSettings(){
   if(SETTINGS.pressFx && !PRESSFX_OPTS[SETTINGS.pressFx]) SETTINGS.pressFx='bloom';
   bgRGB = hexToRGB(SETTINGS.bg);
   perfLevel = (SETTINGS.quality && SETTINGS.quality!=='auto') ? SETTINGS.quality : 'high';
+}
+
+// What painting does in the current mode. Keys mode has its own three-way
+// setting: full-screen trails smear across the zone grid and visually dissolve
+// the keys, so 'subtle' (a small, contained bloom at the fingertip) is the
+// default there; Flow keeps the simple on/off flag that motion styles use.
+// Apps that lock their mode (drums, voice visuals, …) keep the legacy flag —
+// their splats were designed for their fixed mode.
+const SUBTLE_PAINT={radius:0.06, vel:0.25};   // small blob, barely swirls
+function paintMode(){
+  if(SETTINGS.mode==='notes' && !Anim.lockMode) return SETTINGS.paintKeys||'full';
+  return SETTINGS.paint===false ? 'off' : 'full';
 }
 
 // ── Performance / quality (auto-scaling + manual override) ──────────────────────
@@ -126,7 +138,9 @@ function buildBands(){
       d.dataset.cell=c+'-'+r;
       d.style.setProperty('--c',bandRGB255(c).join(','));
       // 'Lines only' keeps the fill transparent; touches still flash in the zone colour.
-      d.style.setProperty('--a', linesOnly ? '0' : (0.05+r*0.045).toFixed(3));
+      // Resting tint must READ as coloured keys (the Boomwhacker association is the
+      // point) — 0.05 was invisible on most displays, so keys looked black until held.
+      d.style.setProperty('--a', linesOnly ? '0' : (0.18+r*0.04).toFixed(3));
       if(c<cols-1) d.style.borderRight='1px solid rgba(255,255,255,0.10)';
       if(r>0)      d.style.borderBottom='1px solid rgba(255,255,255,0.10)';
       if(SETTINGS.showLabels){
@@ -239,7 +253,7 @@ function buildScale(){
   const baseMidi=12*(octv+1)+rootPc;             // e.g. C4 = 60
   NOTES=[];
   const names=noteNames();
-  const count=Math.max(2,Math.min(8,Math.round(SETTINGS.noteCount)||5));
+  const count=Math.max(2,Math.min(12,Math.round(SETTINGS.noteCount)||5));
   for(let i=0;i<count;i++){
     const midi=baseMidi+steps[i%steps.length]+12*Math.floor(i/steps.length);
     NOTES.push({freq:noteFreq(midi), pc:midi%12, label:names[midi%12]});
@@ -519,7 +533,9 @@ function onDown(id, cx, cy){
   // Apps with their own sounds (drums, big-switch) set Anim.noVoices=true and
   // play in onCell instead of using the pitched voice engine.
   p.voice = Anim.noVoices ? 0 : startVoice(s.x,s.y);
-  if(SETTINGS.mode==='notes'){ flashCell(p.col,p.row); updateHeldCells(); if(Anim.onCell) Anim.onCell(p.col,p.row); }
+  // Apps with onCell fire their own press effect (drums, song grid, …);
+  // for the generic path the framework fires it so Keys mode gets fxCell.
+  if(SETTINGS.mode==='notes'){ flashCell(p.col,p.row); updateHeldCells(); if(Anim.onCell) Anim.onCell(p.col,p.row); else fxCell(p.col,p.row); }
 }
 function onMove(id, cx, cy){
   const p=pointers.find(p=>p.id===id);
@@ -532,7 +548,7 @@ function onMove(id, cx, cy){
       p.col=c; p.row=r; p.color=pointerColor(c);
       if(!Anim.noVoices && !retuneVoice(p.voice,s.x,s.y)) p.voice=startVoice(s.x,s.y);
       flashCell(c,r); updateHeldCells();
-      if(Anim.onCell) Anim.onCell(c,r);
+      if(Anim.onCell) Anim.onCell(c,r); else fxCell(c,r);
       return;
     }
   } else if(c!==p.col){
@@ -628,14 +644,10 @@ function makeChips(label,key,map,onChange){
   wrap.appendChild(chips); return wrap;
 }
 
-// ── Visuals panel: paint colours, motion styles, brush, performance ────────────
+// ── Visuals panel: mode-aware — Keys shows zone/key feedback, Flow shows paint ──
 const COLORMODE_OPTS={note:{label:'🌈 Note colours'},theme:{label:'🎨 Theme'},single:{label:'⬤ One colour'}};
-function buildVisualsPanel(){
-  const el=document.getElementById('visualsContent'); el.innerHTML='';
-  // An app can take over the Visuals panel (e.g. Song Grid's reward styles);
-  // QUALITY/setPerf/applyStats/applyBg and the make* helpers are in scope for it.
-  if(Anim.buildVisuals){ Anim.buildVisuals(el); return; }
-  el.appendChild(makeToggle('Paint trails','paint',buildVisualsPanel));
+const PAINTKEYS_OPTS={off:{label:'Off'},subtle:{label:'✨ Subtle'},full:{label:'🌊 Full trails'}};
+function appendColorControls(el){
   el.appendChild(makeChips('Paint colours','colorMode',COLORMODE_OPTS,()=>{
     if(SETTINGS.colorMode==='single'&&!SETTINGS.lockedColor){ SETTINGS.lockedColor=[1,1,1]; saveSettings(); }
     buildVisualsPanel();
@@ -669,7 +681,8 @@ function buildVisualsPanel(){
     pk.appendChild(inp); row.appendChild(pk);
     el.appendChild(row);
   }
-  // Background colour
+}
+function appendBgControl(el){
   const bgRow=document.createElement('div'); bgRow.className='swrow';
   const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
   bgpk.textContent='Background colour';
@@ -677,32 +690,52 @@ function buildVisualsPanel(){
   bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
   bgpk.addEventListener('click',e=>e.stopPropagation());
   bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-  // Motion styles (visual presets)
-  if(Anim.styles){
-    const h=document.createElement('div'); h.className='sectn'; h.textContent='Motion style'; el.appendChild(h);
-    const chips=document.createElement('div'); chips.className='chips';
-    const activeKey=getCurrentStyleKey();
-    for(const k in Anim.styles){
-      const c=document.createElement('div'); c.className='chip'+(k===activeKey?' active':'');
-      c.textContent=Anim.styles[k].label||k;
-      c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); applyStyle(k); });
-      chips.appendChild(c);
+}
+function buildVisualsPanel(){
+  const el=document.getElementById('visualsContent'); el.innerHTML='';
+  // An app can take over the Visuals panel (e.g. Song Grid's reward styles);
+  // QUALITY/setPerf/applyStats/applyBg and the make* helpers are in scope for it.
+  if(Anim.buildVisuals){ Anim.buildVisuals(el); return; }
+  if(SETTINGS.mode==='notes' && !Anim.lockMode){
+    // Keys mode: the grid is the instrument — feedback stays contained in the
+    // cells (zone look, press effect) and paint is an explicit choice.
+    el.appendChild(makeChips('Paint trails','paintKeys',PAINTKEYS_OPTS,()=>{ refreshRailButtons(); buildVisualsPanel(); }));
+    if(SETTINGS.paintKeys!=='off') appendColorControls(el);
+    el.appendChild(makeChips('Zone look','zoneLook',ZONE_OPTS,()=>{ buildBands(); buildVisualsPanel(); }));
+    if(SETTINGS.zoneLook!=='off')
+      el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
+    el.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
+    appendBgControl(el);
+  } else {
+    // Flow mode: painting IS the app — colours, motion styles and brush controls.
+    el.appendChild(makeToggle('Paint trails','paint',buildVisualsPanel));
+    if(SETTINGS.paint!==false) appendColorControls(el);
+    appendBgControl(el);
+    if(Anim.styles){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Motion style'; el.appendChild(h);
+      const chips=document.createElement('div'); chips.className='chips';
+      const activeKey=getCurrentStyleKey();
+      for(const k in Anim.styles){
+        const c=document.createElement('div'); c.className='chip'+(k===activeKey?' active':'');
+        c.textContent=Anim.styles[k].label||k;
+        c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); applyStyle(k); });
+        chips.appendChild(c);
+      }
+      el.appendChild(chips);
     }
-    el.appendChild(chips);
+    // Animation-specific sliders/toggles
+    const h2=document.createElement('div'); h2.className='sectn'; h2.textContent=Anim.sectionLabel||'Controls'; el.appendChild(h2);
+    (Anim.schema||[]).forEach(it=>{
+      if(it.type==='toggle') el.appendChild(makeToggle(it.label,it.key));
+      else if(it.type==='preset-chips') el.appendChild(makeChips(it.label,it.key,it.options));
+      else el.appendChild(makeSlider(it));
+    });
   }
-  // Animation-specific sliders/toggles
-  const h2=document.createElement('div'); h2.className='sectn'; h2.textContent=Anim.sectionLabel||'Controls'; el.appendChild(h2);
-  (Anim.schema||[]).forEach(it=>{
-    if(it.type==='toggle') el.appendChild(makeToggle(it.label,it.key));
-    else if(it.type==='preset-chips') el.appendChild(makeChips(it.label,it.key,it.options));
-    else el.appendChild(makeSlider(it));
-  });
   el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
   el.appendChild(makeToggle('Show performance','showStats',applyStats));
 }
 
 // ── Notes panel: which notes the student can play, and how they're laid out ─────
-const MODE_OPTS={notes:{label:'🎹 Keys (zones)'},flow:{label:'🌊 Flow (free paint)'}};
 const OCT_OPTS={'3':{label:'Low'},'4':{label:'Middle'},'5':{label:'High'}};
 const YAXIS_OPTS={octaves:{label:'▦ Octaves'},loud:{label:'Loudness'},bright:{label:'Brightness'},none:{label:'Nothing'}};
 const OCTROWS_OPTS={'2':{label:'2 octaves'},'3':{label:'3 octaves'}};
@@ -732,20 +765,22 @@ function buildInstrumentPanel(){
   // the framework helpers (makeChips/makeSlider/makeToggle, rootOptions, OCT_OPTS,
   // refreshMusic/refreshInstrument) are all in scope for it to reuse.
   if(Anim.buildInstrument){ Anim.buildInstrument(el); return; }
-  el.appendChild(makeChips('Mode','mode',MODE_OPTS,refreshInstrument));
+  // Keys/Flow is switched from the rail 🎹/🌊 button only — the open panel
+  // rebuilds itself when it changes, so no duplicate Mode chips here.
   el.appendChild(makeChips('Up / down means…','yAxis',YAXIS_OPTS,refreshInstrument));
   if(SETTINGS.yAxis==='octaves')
     el.appendChild(makeChips('How many octaves (higher on screen = higher pitch)','octaveRows',OCTROWS_OPTS,refreshMusic));
-  if(SETTINGS.mode==='notes')
-    el.appendChild(makeChips('Zone look','zoneLook',ZONE_OPTS,refreshInstrument));
-  else
+  // Zone look / note letters / press effect are appearance, not musical content —
+  // they live in the Keys-mode Visuals panel (buildVisualsPanel).
+  if(SETTINGS.mode!=='notes')
     el.appendChild(makeChips('Glide between notes','glide',GLIDE_OPTS));
   el.appendChild(makeChips('Scale','scale',SCALES,refreshInstrument));
   el.appendChild(makeChips('Starting note','rootNote',rootOptions(),refreshMusic));
   el.appendChild(makeChips('Register','octave',OCT_OPTS,refreshMusic));
-  el.appendChild(makeSlider({key:'noteCount',label:'Number of notes',min:2,max:8,step:1,dp:0,onChange:refreshMusic}));
-  if(SETTINGS.mode==='notes' && SETTINGS.zoneLook!=='off')
-    el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
+  // Up to 12: a full octave run plus a few (an octave of major = 8). Zones get
+  // narrow up there — meant for the big room screen and able hands, so the slider
+  // allows it but the default stays at 5.
+  el.appendChild(makeSlider({key:'noteCount',label:'Number of notes',min:2,max:12,step:1,dp:0,onChange:refreshMusic}));
 }
 
 // ── Instrument panel (id "sound"): what the notes sound like ────────────────────
@@ -836,7 +871,7 @@ function applyLock(){
   ui.style.display = locked?'none':'';
   document.getElementById('unlockZone').style.display = locked?'block':'none';
   if(locked){
-    ui.classList.remove('open'); currentQuickMode=null; quickRow.innerHTML='';
+    currentQuickMode=null;
     closePanel(); updateBarButtons();
     const hint=document.getElementById('lockHint');
     hint.classList.add('show');
@@ -856,20 +891,21 @@ function applyLock(){
 })();
 
 // ── Menu bar ───────────────────────────────────────────────────────────────────
-function closePanel(){ panel.classList.remove('open'); document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active')); }
+// The 'open' class on #ui keeps the rail at full opacity while a panel is open.
+function closePanel(){ ui.classList.remove('open'); panel.classList.remove('open'); document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active')); }
 const PANE_BUILDERS={instrument:buildInstrumentPanel,sound:buildSoundPanel,visuals:buildVisualsPanel,presets:buildPresetsPanel};
 const PANE_IDS={instrument:'paneInstrument',sound:'paneSound',visuals:'paneVisuals',presets:'panePresets'};
 function showPanel(name){
   const id=PANE_IDS[name]||'paneInstrument';
   document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active',p.id===id));
-  panel.classList.add('open');
+  panel.classList.add('open'); ui.classList.add('open');
 }
 function updateBarButtons(){
   document.querySelectorAll('.bbar[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===currentQuickMode));
 }
 
 // ── Rail buttons: framework-level (mode toggle, lock) + animation-provided ───────
-// Anim.railButtons: [{ id, icon():str, title():str, active():bool, key:str, onClick() }]
+// Anim.railButtons: [{ id, icon():str, title():str, active():bool, show():bool, key:str, onClick() }]
 const FRAME_RAIL=[
   { id:'mode',
     icon:()=>SETTINGS.mode==='notes'?'🎹':'🌊',
@@ -881,6 +917,7 @@ const FRAME_RAIL=[
       else if(currentQuickMode==='visuals') buildVisualsPanel();
     }},
   { id:'clear', icon:()=>'🧹', title:()=>'Clear the painting',
+    show:()=>paintMode()!=='off',   // nothing to clear when the mode isn't painting
     onClick(){ if(Anim.reset) Anim.reset(); }},
   { id:'lock', icon:()=>'🔒', title:()=>'Lock controls (hold top-left corner 3s to unlock)',
     onClick(){ setLocked(true); }},
@@ -907,6 +944,7 @@ function refreshRailButtons(){
     if(desc.icon)   b.textContent=desc.icon();
     if(desc.title)  b.title=desc.title();
     if(desc.active) b.classList.toggle('active',!!desc.active());
+    if(desc.show)   b.style.display = desc.show() ? '' : 'none';
   });
 }
 window.addEventListener('keydown',e=>{
@@ -921,15 +959,6 @@ function showQuickMode(mode){
   if(PANE_BUILDERS[mode]){ PANE_BUILDERS[mode](); showPanel(mode); }
 }
 
-document.getElementById('collapse').addEventListener('click',e=>{
-  e.stopPropagation(); getAudio();
-  if(ui.classList.contains('open')){
-    ui.classList.remove('open'); currentQuickMode=null;
-    closePanel(); updateBarButtons();
-  } else {
-    ui.classList.add('open'); showQuickMode('instrument');
-  }
-});
 document.querySelectorAll('.bbar[data-mode]').forEach(btn=>{
   btn.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); showQuickMode(btn.dataset.mode); });
 });
@@ -960,22 +989,27 @@ function loop(){
   sizeCanvas();
   const now=Date.now(), rawDt=(now-lastTime)/1000; lastTime=now;
   const dt=Math.min(rawDt,0.033);  // cap at ~30fps equivalent; prevents physics explosion without causing slow-motion
-  // painting touches keep the sim awake; Blank-style touches don't need it
-  if(SETTINGS.paint!==false && pointers.some(p=>p.down)) simWakeUntil=now+12000;
+  // painting touches keep the sim awake; non-painting touches don't need it
+  const pm=paintMode();
+  if(pm!=='off' && pointers.some(p=>p.down)) simWakeUntil=now+12000;
   const simAwake = now<simWakeUntil;
   fpsAccum+=rawDt; fpsFrames++;    // use real elapsed time so FPS counter reflects actual frame rate
   if(fpsAccum>=1){ const fps=fpsFrames/fpsAccum; fpsAccum=0; fpsFrames=0;
     if(SETTINGS.quality==='auto' && simAwake) autoPerf(fps);
     if(SETTINGS.showStats) updateStats(fps); }
   const cap = perfLevel==='low'?4 : perfLevel==='med'?6 : 10;
+  // Subtle (Keys mode): a small blob at the fingertip with hardly any velocity,
+  // so the reward stays where the touch is instead of smearing across the grid.
+  const subtle = pm==='subtle' ? {radius:SUBTLE_PAINT.radius} : null;
   for(const p of pointers){
     if(p.down){
       const mdx=p.x-p.px, mdy=p.y-p.py, dist=Math.hypot(mdx,mdy);
-      if(SETTINGS.paint===false){ p.moved=true; }   // Blank: sound + zone lights only, no paint
-      else if(!p.moved){ Anim.splat(p.x,p.y,0,0,p.color,{velScale:0}); p.moved=true; }
+      if(pm==='off'){ p.moved=true; }   // sound + zone lights only, no paint
+      else if(!p.moved){ Anim.splat(p.x,p.y,0,0,p.color,Object.assign({velScale:0},subtle)); p.moved=true; }
       else if(dist>0.00001){
         const steps=Math.min(Math.max(1,Math.ceil(dist/0.012)),cap);
-        for(let i=1;i<=steps;i++){ const t=i/steps; Anim.splat(p.px+mdx*t,p.py+mdy*t,p.dx,p.dy,p.color,{velScale:1/steps}); }
+        const vs=(subtle?SUBTLE_PAINT.vel:1)/steps;
+        for(let i=1;i<=steps;i++){ const t=i/steps; Anim.splat(p.px+mdx*t,p.py+mdy*t,p.dx,p.dy,p.color,Object.assign({velScale:vs},subtle)); }
       }
       p.px=p.x; p.py=p.y; p.dx*=0.85; p.dy*=0.85;
     }

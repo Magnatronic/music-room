@@ -2,32 +2,22 @@
 html,body{width:100%;height:100%;overflow:hidden;background:#000}
 canvas{display:block;width:100%;height:100%;touch-action:none}
 
-/* ── Control bar ─────────────────────────────────────────── */
-/* Full-height, click-through container pinned to the left edge. align-items:center keeps
-   each column vertically centred INDEPENDENTLY, so the rail never shifts when the menu opens. */
+/* ── Control rail ────────────────────────────────────────── */
+/* Full-height, click-through container pinned to the left edge. The rail IS the
+   menu: the four panel tabs live in it permanently (one tap opens the panel
+   beside it), followed by the app's icon buttons. align-items:center keeps rail
+   and panel vertically centred independently. */
 #ui{position:fixed;left:16px;top:0;height:100vh;
   display:flex;flex-direction:row;align-items:center;gap:8px;
   z-index:10;pointer-events:none}
 #ui > *{pointer-events:auto}
-#rail{display:flex;flex-direction:column;align-items:flex-start;gap:8px;
+#rail{display:flex;flex-direction:column;align-items:stretch;gap:8px;
+  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;
   opacity:0.5;transition:opacity 0.4s}
+#rail::-webkit-scrollbar{display:none}
 #rail:hover,#ui.open #rail{opacity:1}
 #railExtra{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
 #railExtra:empty{display:none}
-#menuExpand{display:none;flex-direction:row;align-items:center;gap:8px;max-height:100vh}
-#ui.open #menuExpand{display:flex}
-#quickRow{display:flex;flex-direction:column;gap:8px;align-items:stretch;
-  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;
-  background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.14);
-  border-radius:16px;padding:12px;backdrop-filter:blur(8px)}
-#quickRow:empty{display:none}
-#quickRow::-webkit-scrollbar{display:none}
-#quickRow .chip{text-align:center}
-#quickRow .autochip,#quickRow .bgpick{width:100%;justify-content:center}
-.swatchgrid{display:grid;grid-template-columns:repeat(2,auto);gap:8px;justify-content:center;justify-items:center}
-#bottomRow{display:flex;flex-direction:column;gap:6px;align-items:flex-start;
-  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none}
-#bottomRow::-webkit-scrollbar{display:none}
 .btn{background:rgba(0,0,0,0.50);border:1px solid rgba(255,255,255,0.22);color:rgba(255,255,255,0.95);
   padding:9px 18px;border-radius:22px;font-size:13px;cursor:pointer;font-family:sans-serif;
   transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;white-space:nowrap;
@@ -35,8 +25,7 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
 .btn:hover{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.55)}
 .btn.active{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.75);color:#fff}
 #rail .btn,#railExtra .btn{font-size:18px;padding:11px 15px;min-width:48px;text-align:center}
-#collapse{font-size:18px}
-#homeBtn{text-decoration:none}
+#homeBtn{text-decoration:none;align-self:flex-start}
 .bbar{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.95);
   padding:8px 14px;border-radius:20px;font-size:12px;cursor:pointer;font-family:sans-serif;
   transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;
@@ -73,12 +62,6 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
   transition:transform 0.15s;flex-shrink:0}
 .swatch:hover{transform:scale(1.12)}
 .swatch.active{border-color:#fff;transform:scale(1.1)}
-.autochip{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.20);
-  color:rgba(255,255,255,0.95);height:28px;padding:0 12px;border-radius:14px;font-size:12px;cursor:pointer;
-  font-family:sans-serif;transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
-  user-select:none;display:flex;align-items:center;flex:none;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
-.autochip:hover{background:rgba(0,0,0,0.68)}
-.autochip.active{background:rgba(0,0,0,0.65);border-color:#fff}
 .picker{position:relative;width:24px;height:24px;border-radius:50%;overflow:hidden;flex-shrink:0;
   border:2px solid rgba(255,255,255,0.25);cursor:pointer;
   background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)}
@@ -106,8 +89,9 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 #bands{position:fixed;inset:0;display:grid;z-index:4;pointer-events:none}
 #bands.hidden{display:none}
 .band{position:relative;background:rgba(var(--c),var(--a,0.06));transition:background 0.45s}
-.band.held{background:rgba(var(--c),0.30);transition:background 0.06s}
-.band.flash{background:rgba(var(--c),0.32);transition:background 0.03s}
+/* held/flash sit well above the resting tint (~0.18) so a press clearly lights up */
+.band.held{background:rgba(var(--c),0.38);transition:background 0.06s}
+.band.flash{background:rgba(var(--c),0.42);transition:background 0.03s}
 .band .lbl{position:absolute;bottom:5vh;left:50%;transform:translateX(-50%);
   font-family:sans-serif;font-weight:700;font-size:6vmin;color:rgb(var(--c));
   opacity:0.85;text-shadow:0 1px 8px rgba(0,0,0,0.85);user-select:none}
