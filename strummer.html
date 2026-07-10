@@ -89,17 +89,17 @@ const Anim = (() => {
   // ks: bright/ring scale the user sliders; pick = pick-position comb (0 = none);
   //     passes = extra excitation lowpassing (rounder); stretch<1 keeps the highs
   //     ringing (metallic); snap = unpitched attack transient.
-  // add: parts = [ratio, gain, decay×ring]; oct shifts the whole voice.
+  // add: parts = [ratio, gain, time-to-silence×ring (-60 dB)]; oct shifts the whole voice.
   const STRVOICES={
     harp:    {label:'🎼 Harp',      type:'ks',  bright:1.0,  ring:1.0,  pick:0},
     nylon:   {label:'🎸 Nylon',     type:'ks',  bright:0.3,  ring:1.0,  pick:0.35, passes:2},
     banjo:   {label:'🪕 Banjo',     type:'ks',  bright:2.2,  ring:0.5,  pick:0.08, stretch:0.35, snap:0.7},
     marimba: {label:'🪵 Marimba',   type:'add', oct:0, ring:0.45,
-      parts:[[1,1,0.6],[3.93,0.5,0.12],[9.2,0.18,0.05]]},
+      parts:[[1,1,1.3],[3.93,0.5,0.26],[9.2,0.18,0.11]]},
     musicbox:{label:'🎐 Music box', type:'add', oct:1, ring:0.55,
-      parts:[[1,1,1],[3.4,0.34,0.35],[6.76,0.12,0.18]]},
+      parts:[[1,1,2.2],[3.4,0.34,0.77],[6.76,0.12,0.4]]},
     bell:    {label:'🔔 Bell',      type:'add', oct:0, ring:0.9,
-      parts:[[1,1,1],[2.76,0.45,0.6],[5.4,0.2,0.35]]},
+      parts:[[1,1,2.2],[2.76,0.45,1.3],[5.4,0.2,0.77]]},
   };
   function strVoice(){ return STRVOICES[SETTINGS.strVoice]||STRVOICES.harp; }
 
@@ -139,12 +139,13 @@ const Anim = (() => {
   function renderAdd(ac,freq,V,bright,ring){
     ring*=V.ring;
     const sr=ac.sampleRate, f0=freq*Math.pow(2,V.oct||0);
-    const len=Math.floor(sr*(ring*1.1+0.1));
+    const maxDec=Math.max.apply(null,V.parts.map(p=>p[2]));
+    const len=Math.floor(sr*(ring*maxDec*1.1+0.1));   // longest partial is ~-66 dB by the end
     const buf=ac.createBuffer(1,len,sr), d=buf.getChannelData(0);
     V.parts.forEach((p,pi)=>{
       const f=f0*p[0]; if(f>sr*0.45) return;
       const g=p[1]*(pi===0?1:0.25+bright);   // brightness tilts the upper partials
-      const k=-1/(Math.max(0.05,ring*p[2])*sr), w=2*Math.PI*f/sr;
+      const k=Math.log(0.001)/(Math.max(0.05,ring*p[2])*sr), w=2*Math.PI*f/sr;   // -60 dB at ring*p[2], like rho in renderKS
       for(let i=0;i<len;i++) d[i]+=g*Math.exp(k*i)*Math.sin(w*i);
     });
     finishBuf(d,len,sr); return buf;
