@@ -26,6 +26,7 @@ const STORE_KEY = 'settings:' + location.pathname.split('/').pop();
 const SHARED_DEFAULTS = {
   volume:0.30, bg:'#000000', lockedColor:null, colorMode:'note',
   voice:'pure', scale:'major', reverb:false, echo:false, chorus:false, mute:false,
+  tone:0.5, attack:0.5, ring:0.5,   // sound macros; 0.5 = the engine's original values
   mode:'notes', rootNote:'C', octave:'4', noteCount:5,
   showLabels:true, yAxis:'none', octaveRows:'2', zoneLook:'tint', paint:true, glide:'gentle',
   paintKeys:'subtle', pressFx:'bloom',
@@ -43,6 +44,9 @@ function initSettings(){
   currentTheme = themeKeys.includes(SETTINGS.theme) ? SETTINGS.theme : themeKeys[0];
   // Saved settings may hold a retired press effect (smoke/pixel/ripple/press)
   if(SETTINGS.pressFx && !PRESSFX_OPTS[SETTINGS.pressFx]) SETTINGS.pressFx='bloom';
+  // Retired voices: Retro's territory folded into Synth, Pluck's into Kalimba
+  if(SETTINGS.voice==='retro') SETTINGS.voice='synth';
+  if(SETTINGS.voice==='pluck') SETTINGS.voice='kalimba';
   bgRGB = hexToRGB(SETTINGS.bg);
   perfLevel = (SETTINGS.quality && SETTINGS.quality!=='auto') ? SETTINGS.quality : 'high';
 }
@@ -216,12 +220,25 @@ const VOICES = {
     oscs:[{type:'sine'},{type:'sine',ratio:3.0,gain:0.45,decayTo:0.35},{type:'sine',ratio:4.2,gain:0.22,decayTo:0.25}]},
   deep:  {label:'Deep',  oct:-1, gain:0.18, filter:{type:'lowpass', base:700,  track:900},  lfo:{rate:2,depth:0.005},
     oscs:[{type:'sine'},{type:'sine',ratio:2,gain:0.55},{type:'sine',ratio:3,gain:0.2}]},
-  pluck: {label:'Pluck', oct:0,  gain:0.18, filter:{type:'lowpass', base:1800, track:1600}, lfo:{rate:0,depth:0}, pluck:1.6,
+  // Karplus-Strong plucked string: a real delay-line pluck, not oscillators.
+  // ks.damp scales the in-loop lowpass (freq×damp); oscs is pluckNote's fallback timbre.
+  harp:  {label:'Harp',  oct:0,  gain:0.55, ks:{damp:8}, filter:{type:'lowpass', base:2400, track:1800}, lfo:{rate:0,depth:0},
     oscs:[{type:'triangle'},{type:'sine',ratio:2,gain:0.3}]},
+  // 2-op FM: modulator at fm.ratio×freq, depth in units of the carrier frequency,
+  // decaying to fm.decayTo over fm.decay seconds — the classic tine attack.
+  epiano:{label:'E-Piano', oct:0, gain:0.15, fm:{ratio:14, depth:2.4, decayTo:0.08, decay:0.16},
+    filter:{type:'lowpass', base:2200, track:1600}, lfo:{rate:0,depth:0},
+    oscs:[{type:'sine'},{type:'sine',ratio:2,gain:0.12,decayTo:0.3}]},
+  musicbox:{label:'Music box', oct:1, gain:0.15, filter:{type:'lowpass', base:5200, track:1500}, lfo:{rate:0,depth:0}, pluck:1.3,
+    oscs:[{type:'sine'},{type:'sine',ratio:4.06,gain:0.22,decayTo:0.05},{type:'sine',ratio:9.7,gain:0.08,decayTo:0.02}]},
+  // Modal synthesis: the inharmonic partial ratios of the real instruments
+  // (marimba's famous ~3.9× first overtone) with fast per-partial decay.
+  marimba:{label:'Marimba', oct:0, gain:0.20, filter:{type:'lowpass', base:2600, track:1800}, lfo:{rate:0,depth:0}, pluck:0.8,
+    oscs:[{type:'sine'},{type:'sine',ratio:3.93,gain:0.38,decayTo:0.03},{type:'sine',ratio:9.2,gain:0.12,decayTo:0.01}]},
+  kalimba:{label:'Kalimba', oct:0, gain:0.20, filter:{type:'lowpass', base:2000, track:1400}, lfo:{rate:0,depth:0}, pluck:1.1,
+    oscs:[{type:'sine'},{type:'sine',ratio:5.1,gain:0.20,decayTo:0.02},{type:'triangle',gain:0.10,decayTo:0.1}]},
   synth: {label:'Synth', oct:0,  gain:0.10, filter:{type:'lowpass', base:600,  track:2800, q:7}, lfo:{rate:0,depth:0},
     oscs:[{type:'sawtooth'},{type:'sawtooth',detune:11,gain:0.7},{type:'sawtooth',detune:-11,gain:0.7}]},
-  retro: {label:'Retro', oct:0,  gain:0.09, filter:{type:'lowpass', base:2600, track:1400}, lfo:{rate:6,depth:0.004},
-    oscs:[{type:'square'}]},
   pad:   {label:'Pad',   oct:-1, gain:0.11, filter:{type:'lowpass', base:500,  track:1400, q:2}, lfo:{rate:3,depth:0.006},
     oscs:[{type:'sawtooth',detune:6,gain:0.6},{type:'sawtooth',detune:-6,gain:0.6},{type:'sine',ratio:2,gain:0.3}]},
 };
@@ -283,6 +300,14 @@ function freqForX(x,y){
 function yAxisMode(){ return SETTINGS.yAxis==='octaves' ? 'none' : SETTINGS.yAxis; }
 function yFilterPos(y){ return yAxisMode()==='bright' ? y : 0.5; }
 function yLoudness(y){  return yAxisMode()==='loud'   ? 0.30+0.70*y : 1; }
+// Sound macros (Sound pane → Fine-tune): three high-level sliders mapped across
+// every voice, so a therapist can shape a sound without a synth editor. Each maps
+// exponentially around 1× at the 0.5 default (the engine's long-standing values).
+function macro(key){ const v=SETTINGS[key]; return v==null?0.5:v; }
+function toneMul(){   return Math.pow(2,(macro('tone')-0.5)*2); }          // filter ×0.5..×2
+function attackTime(){return 0.02*Math.pow(10,(0.5-macro('attack'))*2); }  // 2 ms..200 ms
+function ringMul(){   return Math.pow(8,(macro('ring')-0.5)*2); }          // decays ×⅛..×8
+function filtFreq(V,y){ return (V.filter.base+yFilterPos(y)*V.filter.track)*toneMul(); }
 
 function makeImpulse(ac,dur,decay){
   const len=Math.floor(ac.sampleRate*dur), buf=ac.createBuffer(2,len,ac.sampleRate);
@@ -357,10 +382,72 @@ function updatePolyGain(){
 }
 
 let voiceSeq=0; const voices={}; const MAX_VOICES=16;
+
+// ── Karplus-Strong plucked string (Harp): noise burst circulating in a tuned
+// delay-line loop with an in-loop lowpass. Decays naturally via feedback < 1;
+// retuning changes the delay time, so Flow-mode glides become harp glissandi.
+let noiseBuf=null;
+function ksNoise(ac){
+  if(!noiseBuf){
+    noiseBuf=ac.createBuffer(1,Math.floor(ac.sampleRate*0.1),ac.sampleRate);
+    const d=noiseBuf.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+  }
+  return noiseBuf;
+}
+// Per-period feedback for a -60 dB decay over T60 seconds (Ring-scaled).
+function ksFeedback(f){
+  const T60=1.8*ringMul();
+  return Math.min(0.999, Math.exp(Math.log(0.001)/(Math.max(60,f)*T60)));
+}
+function ksPluck(v,t){
+  const ac=audioCtx, f=v.freq;
+  const src=ac.createBufferSource(); src.buffer=ksNoise(ac);
+  const bg=ac.createGain();
+  bg.gain.setValueAtTime(0.9,t);
+  bg.gain.exponentialRampToValueAtTime(0.001,t+Math.max(0.003,2/f));
+  src.connect(bg); bg.connect(v.ks.dly);
+  src.start(t); src.stop(t+Math.max(0.006,3/f));
+  src.onended=()=>{try{bg.disconnect();}catch(e){}};
+}
+function startKSVoice(vid,x,y,V){
+  const ac=getAudio();
+  const f=freqForX(x,y)*Math.pow(2,V.oct), t=ac.currentTime+0.012;
+  const gain=ac.createGain(); gain.gain.value=V.gain;
+  const vol=ac.createGain(); vol.gain.value=yLoudness(y);
+  const pan=ac.createStereoPanner(); pan.pan.value=(x*2-1)*0.6;
+  gain.connect(vol); vol.connect(pan); pan.connect(masterGain);
+  const dly=ac.createDelay(0.05); dly.delayTime.value=1/f;
+  const damp=ac.createBiquadFilter(); damp.type='lowpass';
+  damp.frequency.value=Math.min(14000, f*V.ks.damp*toneMul());
+  const fb=ac.createGain(); fb.gain.value=ksFeedback(f);
+  dly.connect(damp); damp.connect(fb); fb.connect(dly);
+  damp.connect(gain);
+  const v={ks:{dly,damp,fb},gain,vol,pan,freq:f,V,nodes:[]};
+  ksPluck(v,t);
+  voices[vid]=v;
+  soundingVoices++; updatePolyGain();
+  return vid;
+}
+function stopKSVoice(v){
+  try{
+    const ac=getAudio(), t=ac.currentTime+0.012, tc=Math.min(0.25*ringMul(),1.2);
+    if(v.gain.gain.cancelAndHoldAtTime) v.gain.gain.cancelAndHoldAtTime(t);
+    v.gain.gain.setTargetAtTime(0,t,tc);
+    v.ks.fb.gain.setTargetAtTime(0,t+tc*3,0.2);   // kill the loop after the fade
+    setTimeout(()=>{
+      soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+      try{v.ks.dly.disconnect();v.ks.damp.disconnect();v.ks.fb.disconnect();
+          v.gain.disconnect();v.vol.disconnect();v.pan.disconnect();}catch(e){}
+    }, (tc*7+0.8)*1000);
+  }catch(e){}
+}
+
 function startVoice(x,y){
   try{
     if(Object.keys(voices).length>=MAX_VOICES) return 0;
     const ac=getAudio(), vid=++voiceSeq, V=VOICES[SETTINGS.voice]||VOICES.pure;
+    if(V.ks) return startKSVoice(vid,x,y,V);
     // +12 ms scheduling headroom: an event stamped exactly at currentTime can land
     // in a render quantum that has already been processed, truncating the attack
     // ramp into a step (an audible click, worst under CPU load).
@@ -368,7 +455,7 @@ function startVoice(x,y){
     const gain=ac.createGain(); gain.gain.value=0.0001;
     const vol=ac.createGain(); vol.gain.value=yLoudness(y);
     const pan=ac.createStereoPanner(); pan.pan.value=(x*2-1)*0.6;
-    const filt=ac.createBiquadFilter(); filt.type=V.filter.type; filt.frequency.value=V.filter.base+yFilterPos(y)*V.filter.track;
+    const filt=ac.createBiquadFilter(); filt.type=V.filter.type; filt.frequency.value=filtFreq(V,y);
     if(V.filter.q) filt.Q.value=V.filter.q;
     filt.connect(gain); gain.connect(vol); vol.connect(pan); pan.connect(masterGain);
     const nodes=[];
@@ -381,15 +468,25 @@ function startVoice(x,y){
       osc.connect(g); g.connect(filt); osc.start(t);
       nodes.push({osc,ratio,g,base:(o.gain!==undefined?o.gain:1),decayTo:o.decayTo});
     }
+    if(V.fm){
+      // 2-op FM: modulator drives the FIRST osc's frequency; depth scales with
+      // the note frequency and decays like a struck tine (re-fired on retune).
+      const mod=ac.createOscillator(); mod.type='sine'; mod.frequency.value=freq*V.fm.ratio;
+      const mg=ac.createGain();
+      mg.gain.setValueAtTime(freq*V.fm.depth, t);
+      mg.gain.setTargetAtTime(freq*V.fm.depth*V.fm.decayTo, t, V.fm.decay);
+      mod.connect(mg); mg.connect(nodes[0].osc.frequency); mod.start(t);
+      nodes.push({osc:mod, ratio:V.fm.ratio, g:mg, base:0, mod:true});
+    }
     let lfo=null;
     if(V.lfo.rate>0){
       lfo=ac.createOscillator(); const lfoG=ac.createGain();
       lfo.frequency.value=V.lfo.rate; lfoG.gain.value=freq*V.lfo.depth;
-      lfo.connect(lfoG); nodes.forEach(n=>lfoG.connect(n.osc.frequency)); lfo.start();
+      lfo.connect(lfoG); nodes.forEach(n=>{if(!n.mod)lfoG.connect(n.osc.frequency);}); lfo.start();
     }
     gain.gain.setValueAtTime(0.0001,t);
-    gain.gain.linearRampToValueAtTime(V.gain,t+0.02);
-    if(V.pluck) gain.gain.exponentialRampToValueAtTime(0.0008, t+0.02+V.pluck);
+    gain.gain.linearRampToValueAtTime(V.gain,t+attackTime());
+    if(V.pluck) gain.gain.exponentialRampToValueAtTime(0.0008, t+attackTime()+V.pluck*ringMul());
     voices[vid]={nodes,lfo,gain,vol,pan,filt,freq,V};
     soundingVoices++; updatePolyGain();
     return vid;
@@ -408,10 +505,16 @@ function moveVoice(vid,x,y,speed){
     if(Math.abs(f-v.freq)>0.5){  // retune only when the target pitch actually moved
       v.freq=f;
       const tc = SETTINGS.mode==='flow' ? (GLIDE_TIMES[SETTINGS.glide]||0.02) : 0.02;
-      v.nodes.forEach(n=>n.osc.frequency.setTargetAtTime(f*n.ratio,now,tc));
+      if(v.ks){
+        v.ks.dly.delayTime.setTargetAtTime(1/f,now,tc);
+        v.ks.damp.frequency.setTargetAtTime(Math.min(14000,f*V.ks.damp*toneMul()),now,tc);
+        v.ks.fb.gain.setValueAtTime(ksFeedback(f),now);
+      } else {
+        v.nodes.forEach(n=>n.osc.frequency.setTargetAtTime(f*n.ratio,now,tc));
+      }
     }
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
-    if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime(V.filter.base+y*V.filter.track,now,0.08);
+    if(yAxisMode()==='bright' && v.filt) v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
     if(yAxisMode()==='loud')   v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
   }catch(e){}
 }
@@ -427,6 +530,16 @@ function retuneVoice(vid,x,y){
     const ac=getAudio(), now=ac.currentTime+0.012, V=v.V;   // scheduling headroom, see startVoice
     const f=freqForX(x,y)*Math.pow(2,V.oct);
     v.freq=f;
+    if(v.ks){
+      // A string crossing into a new zone is a fresh pluck at the new pitch.
+      v.ks.dly.delayTime.setTargetAtTime(1/f,now,0.008);
+      v.ks.damp.frequency.setTargetAtTime(Math.min(14000,f*V.ks.damp*toneMul()),now,0.02);
+      v.ks.fb.gain.setValueAtTime(ksFeedback(f),now);
+      ksPluck(v,now);
+      v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
+      if(yAxisMode()==='loud') v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
+      return true;
+    }
     // Anchor before ramping: linear/exponential ramps interpolate from the LAST
     // timeline event — for a held note that's its attack from seconds ago, so an
     // un-anchored ramp JUMPS the value instantly (a hard click on every crossing).
@@ -437,7 +550,11 @@ function retuneVoice(vid,x,y){
     };
     v.nodes.forEach(n=>{
       n.osc.frequency.setTargetAtTime(f*n.ratio,now,0.005);
-      if(n.decayTo!==undefined){ // re-strike decaying partials (bell/glass sparkle)
+      if(n.mod){ // re-strike the FM tine: depth rescales with the new frequency
+        hold(n.g.gain);
+        n.g.gain.linearRampToValueAtTime(f*V.fm.depth,now+0.008);
+        n.g.gain.setTargetAtTime(f*V.fm.depth*V.fm.decayTo,now+0.008,V.fm.decay);
+      } else if(n.decayTo!==undefined){ // re-strike decaying partials (bell/glass sparkle)
         hold(n.g.gain);
         n.g.gain.linearRampToValueAtTime(n.base,now+0.008);
         n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.008,0.5);
@@ -446,7 +563,7 @@ function retuneVoice(vid,x,y){
     const g=v.gain.gain; hold(g);
     if(V.pluck){ // re-fire the pluck envelope so glissandos strike each note
       g.linearRampToValueAtTime(V.gain,now+0.012);
-      g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck);
+      g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
     } else {     // brief dip so each zone still reads as its own note
       // 45% over 20 ms is deep enough to articulate but shallow/slow enough not
       // to read as a click when a fast swipe fires it several times a second
@@ -454,7 +571,7 @@ function retuneVoice(vid,x,y){
       g.linearRampToValueAtTime(V.gain,now+0.08);
     }
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
-    if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime(V.filter.base+y*V.filter.track,now,0.08);
+    if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
     if(yAxisMode()==='loud')   v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
     return true;
   }catch(e){ return false; }
@@ -465,14 +582,16 @@ function retuneVoice(vid,x,y){
 function stopVoice(vid){
   const v=voices[vid]; if(!v) return;
   delete voices[vid];
+  if(v.ks){ stopKSVoice(v); return; }
   try{
     const ac=getAudio(), t=ac.currentTime+0.012;   // scheduling headroom, see startVoice
+    const rel=0.25*ringMul();   // Ring macro scales the release tail
     // cancelAndHoldAtTime freezes the envelope where it is; the fallback's
     // cancel+setValue can snap a mid-attack ramp back to ~0 (an audible click).
     if(v.gain.gain.cancelAndHoldAtTime) v.gain.gain.cancelAndHoldAtTime(t);
     else { v.gain.gain.cancelScheduledValues(t); v.gain.gain.setValueAtTime(v.gain.gain.value,t); }
-    v.gain.gain.setTargetAtTime(0,t,0.25);
-    const stopAt=t+0.25*7;
+    v.gain.gain.setTargetAtTime(0,t,rel);
+    const stopAt=t+rel*7;
     v.nodes.forEach(n=>{try{n.osc.stop(stopAt);}catch(e){}});
     if(v.lfo){try{v.lfo.stop(stopAt);}catch(e){}}
     v.nodes[0].osc.onended=()=>{soundingVoices=Math.max(0,soundingVoices-1);updatePolyGain();try{v.gain.disconnect();v.vol.disconnect();v.pan.disconnect();v.filt.disconnect();}catch(e){}};
@@ -487,9 +606,10 @@ function pluckNote(x,y,gainMul){
     const V=VOICES[SETTINGS.voice]||VOICES.pure;
     const freq=freqForX(x,y)*Math.pow(2,V.oct), t=ac.currentTime+0.012;   // scheduling headroom
     const peak=V.gain*(gainMul!=null?gainMul:1)*yLoudness(y);
+    const decay=0.7*ringMul();   // Ring macro scales the one-shot decay too
     const gain=ac.createGain(); gain.gain.value=0.0001;
     const pan=ac.createStereoPanner(); pan.pan.value=(x*2-1)*0.6;
-    const filt=ac.createBiquadFilter(); filt.type=V.filter.type; filt.frequency.value=V.filter.base+yFilterPos(y)*V.filter.track;
+    const filt=ac.createBiquadFilter(); filt.type=V.filter.type; filt.frequency.value=filtFreq(V,y);
     if(V.filter.q) filt.Q.value=V.filter.q;
     filt.connect(gain); gain.connect(pan); pan.connect(masterGain);
     const oscs=[];
@@ -498,12 +618,12 @@ function pluckNote(x,y,gainMul){
       const osc=ac.createOscillator(); osc.type=o.type||'sine'; osc.frequency.value=freq*ratio;
       if(o.detune) osc.detune.value=o.detune;
       const g=ac.createGain(); g.gain.value=(o.gain!==undefined?o.gain:1);
-      osc.connect(g); g.connect(filt); osc.start(t); osc.stop(t+1.0);
+      osc.connect(g); g.connect(filt); osc.start(t); osc.stop(t+decay+0.35);
       oscs.push(osc);
     }
     gain.gain.setValueAtTime(0.0001,t);
     gain.gain.linearRampToValueAtTime(peak,t+0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0008,t+0.7);
+    gain.gain.exponentialRampToValueAtTime(0.0008,t+decay);
     soundingVoices++; updatePolyGain();
     oscs[0].onended=()=>{soundingVoices=Math.max(0,soundingVoices-1);updatePolyGain();try{gain.disconnect();pan.disconnect();filt.disconnect();}catch(e){}};
   }catch(e){}
@@ -698,18 +818,23 @@ function appendBgControl(el){
 // Open state is remembered for the session only, so panel rebuilds (chip taps
 // re-run buildVisualsPanel) don't snap it shut while someone is in it.
 let fineTuneOpen=false;
-function appendFineTune(el, build){
+function makeDrawer(el, build){
   const det=document.createElement('details'); det.className='finetune'; det.open=fineTuneOpen;
   const sum=document.createElement('summary'); sum.textContent='Fine-tune';
   sum.addEventListener('click',e=>e.stopPropagation());
   det.addEventListener('toggle',()=>{ fineTuneOpen=det.open; });
   det.appendChild(sum);
   const body=document.createElement('div');
-  if(build) build(body);
-  body.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-  body.appendChild(makeToggle('Show performance','showStats',applyStats));
+  build(body);
   det.appendChild(body);
   el.appendChild(det);
+}
+function appendFineTune(el, build){
+  makeDrawer(el, body=>{
+    if(build) build(body);
+    body.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+    body.appendChild(makeToggle('Show performance','showStats',applyStats));
+  });
 }
 function buildVisualsPanel(){
   const el=document.getElementById('visualsContent'); el.innerHTML='';
@@ -818,6 +943,14 @@ function buildSoundPanel(){
   snd.appendChild(makeToggle('Chorus','chorus',applyChorus));
   snd.appendChild(makeToggle('Mute',  'mute',  applyVolume));
   snd.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+  // Sound macros: three student-safe sliders that shape ANY voice (see toneMul/
+  // attackTime/ringMul). New notes pick changes up; nothing can break a sound.
+  makeDrawer(snd, ft=>{
+    const h=document.createElement('div'); h.className='sectn'; h.textContent='Shape the sound'; ft.appendChild(h);
+    ft.appendChild(makeSlider({key:'tone',   label:'Brightness (dark → bright)', min:0,max:1,step:0.05,dp:2}));
+    ft.appendChild(makeSlider({key:'attack', label:'Attack (soft → crisp)',      min:0,max:1,step:0.05,dp:2}));
+    ft.appendChild(makeSlider({key:'ring',   label:'Ring (short → long)',        min:0,max:1,step:0.05,dp:2}));
+  });
 }
 
 // ── Named presets (per-student setups, stored locally) ─────────────────────────
