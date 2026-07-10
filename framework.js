@@ -220,10 +220,13 @@ const VOICES = {
     oscs:[{type:'sine'},{type:'sine',ratio:3.0,gain:0.45,decayTo:0.35},{type:'sine',ratio:4.2,gain:0.22,decayTo:0.25}]},
   deep:  {label:'Deep',  oct:-1, gain:0.18, filter:{type:'lowpass', base:700,  track:900},  lfo:{rate:2,depth:0.005},
     oscs:[{type:'sine'},{type:'sine',ratio:2,gain:0.55},{type:'sine',ratio:3,gain:0.2}]},
-  // Karplus-Strong plucked string: a real delay-line pluck, not oscillators.
-  // ks.damp scales the in-loop lowpass (freq×damp); oscs is pluckNote's fallback timbre.
-  harp:  {label:'Harp',  oct:0,  gain:0.55, ks:{damp:8}, filter:{type:'lowpass', base:2400, track:1800}, lfo:{rate:0,depth:0},
-    oscs:[{type:'triangle'},{type:'sine',ratio:2,gain:0.3}]},
+  // Layered-harmonics pluck: string-like spectrum (higher partials decay faster)
+  // through the proven pluck path. A Karplus-Strong delay-line version was tried
+  // and cut — WebAudio's linearly-interpolated DelayNode flutters and the loop
+  // filter detunes; don't reintroduce it without an AudioWorklet.
+  harp:  {label:'Harp',  oct:0,  gain:0.16, filter:{type:'lowpass', base:2800, track:1600}, lfo:{rate:0,depth:0}, pluck:1.5,
+    oscs:[{type:'triangle'},{type:'sine',gain:0.5},{type:'sine',ratio:2,gain:0.45,decayTo:0.15},
+          {type:'sine',ratio:3,gain:0.22,decayTo:0.08},{type:'sine',ratio:4,gain:0.10,decayTo:0.05}]},
   // 2-op FM: modulator at fm.ratio×freq, depth in units of the carrier frequency,
   // decaying to fm.decayTo over fm.decay seconds — the classic tine attack.
   epiano:{label:'E-Piano', oct:0, gain:0.15, fm:{ratio:14, depth:2.4, decayTo:0.08, decay:0.16},
@@ -382,72 +385,10 @@ function updatePolyGain(){
 }
 
 let voiceSeq=0; const voices={}; const MAX_VOICES=16;
-
-// ── Karplus-Strong plucked string (Harp): noise burst circulating in a tuned
-// delay-line loop with an in-loop lowpass. Decays naturally via feedback < 1;
-// retuning changes the delay time, so Flow-mode glides become harp glissandi.
-let noiseBuf=null;
-function ksNoise(ac){
-  if(!noiseBuf){
-    noiseBuf=ac.createBuffer(1,Math.floor(ac.sampleRate*0.1),ac.sampleRate);
-    const d=noiseBuf.getChannelData(0);
-    for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
-  }
-  return noiseBuf;
-}
-// Per-period feedback for a -60 dB decay over T60 seconds (Ring-scaled).
-function ksFeedback(f){
-  const T60=1.8*ringMul();
-  return Math.min(0.999, Math.exp(Math.log(0.001)/(Math.max(60,f)*T60)));
-}
-function ksPluck(v,t){
-  const ac=audioCtx, f=v.freq;
-  const src=ac.createBufferSource(); src.buffer=ksNoise(ac);
-  const bg=ac.createGain();
-  bg.gain.setValueAtTime(0.9,t);
-  bg.gain.exponentialRampToValueAtTime(0.001,t+Math.max(0.003,2/f));
-  src.connect(bg); bg.connect(v.ks.dly);
-  src.start(t); src.stop(t+Math.max(0.006,3/f));
-  src.onended=()=>{try{bg.disconnect();}catch(e){}};
-}
-function startKSVoice(vid,x,y,V){
-  const ac=getAudio();
-  const f=freqForX(x,y)*Math.pow(2,V.oct), t=ac.currentTime+0.012;
-  const gain=ac.createGain(); gain.gain.value=V.gain;
-  const vol=ac.createGain(); vol.gain.value=yLoudness(y);
-  const pan=ac.createStereoPanner(); pan.pan.value=(x*2-1)*0.6;
-  gain.connect(vol); vol.connect(pan); pan.connect(masterGain);
-  const dly=ac.createDelay(0.05); dly.delayTime.value=1/f;
-  const damp=ac.createBiquadFilter(); damp.type='lowpass';
-  damp.frequency.value=Math.min(14000, f*V.ks.damp*toneMul());
-  const fb=ac.createGain(); fb.gain.value=ksFeedback(f);
-  dly.connect(damp); damp.connect(fb); fb.connect(dly);
-  damp.connect(gain);
-  const v={ks:{dly,damp,fb},gain,vol,pan,freq:f,V,nodes:[]};
-  ksPluck(v,t);
-  voices[vid]=v;
-  soundingVoices++; updatePolyGain();
-  return vid;
-}
-function stopKSVoice(v){
-  try{
-    const ac=getAudio(), t=ac.currentTime+0.012, tc=Math.min(0.25*ringMul(),1.2);
-    if(v.gain.gain.cancelAndHoldAtTime) v.gain.gain.cancelAndHoldAtTime(t);
-    v.gain.gain.setTargetAtTime(0,t,tc);
-    v.ks.fb.gain.setTargetAtTime(0,t+tc*3,0.2);   // kill the loop after the fade
-    setTimeout(()=>{
-      soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
-      try{v.ks.dly.disconnect();v.ks.damp.disconnect();v.ks.fb.disconnect();
-          v.gain.disconnect();v.vol.disconnect();v.pan.disconnect();}catch(e){}
-    }, (tc*7+0.8)*1000);
-  }catch(e){}
-}
-
 function startVoice(x,y){
   try{
     if(Object.keys(voices).length>=MAX_VOICES) return 0;
     const ac=getAudio(), vid=++voiceSeq, V=VOICES[SETTINGS.voice]||VOICES.pure;
-    if(V.ks) return startKSVoice(vid,x,y,V);
     // +12 ms scheduling headroom: an event stamped exactly at currentTime can land
     // in a render quantum that has already been processed, truncating the attack
     // ramp into a step (an audible click, worst under CPU load).
@@ -505,16 +446,10 @@ function moveVoice(vid,x,y,speed){
     if(Math.abs(f-v.freq)>0.5){  // retune only when the target pitch actually moved
       v.freq=f;
       const tc = SETTINGS.mode==='flow' ? (GLIDE_TIMES[SETTINGS.glide]||0.02) : 0.02;
-      if(v.ks){
-        v.ks.dly.delayTime.setTargetAtTime(1/f,now,tc);
-        v.ks.damp.frequency.setTargetAtTime(Math.min(14000,f*V.ks.damp*toneMul()),now,tc);
-        v.ks.fb.gain.setValueAtTime(ksFeedback(f),now);
-      } else {
-        v.nodes.forEach(n=>n.osc.frequency.setTargetAtTime(f*n.ratio,now,tc));
-      }
+      v.nodes.forEach(n=>n.osc.frequency.setTargetAtTime(f*n.ratio,now,tc));
     }
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
-    if(yAxisMode()==='bright' && v.filt) v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
+    if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
     if(yAxisMode()==='loud')   v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
   }catch(e){}
 }
@@ -530,16 +465,6 @@ function retuneVoice(vid,x,y){
     const ac=getAudio(), now=ac.currentTime+0.012, V=v.V;   // scheduling headroom, see startVoice
     const f=freqForX(x,y)*Math.pow(2,V.oct);
     v.freq=f;
-    if(v.ks){
-      // A string crossing into a new zone is a fresh pluck at the new pitch.
-      v.ks.dly.delayTime.setTargetAtTime(1/f,now,0.008);
-      v.ks.damp.frequency.setTargetAtTime(Math.min(14000,f*V.ks.damp*toneMul()),now,0.02);
-      v.ks.fb.gain.setValueAtTime(ksFeedback(f),now);
-      ksPluck(v,now);
-      v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
-      if(yAxisMode()==='loud') v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
-      return true;
-    }
     // Anchor before ramping: linear/exponential ramps interpolate from the LAST
     // timeline event — for a held note that's its attack from seconds ago, so an
     // un-anchored ramp JUMPS the value instantly (a hard click on every crossing).
@@ -582,7 +507,6 @@ function retuneVoice(vid,x,y){
 function stopVoice(vid){
   const v=voices[vid]; if(!v) return;
   delete voices[vid];
-  if(v.ks){ stopKSVoice(v); return; }
   try{
     const ac=getAudio(), t=ac.currentTime+0.012;   // scheduling headroom, see startVoice
     const rel=0.25*ringMul();   // Ring macro scales the release tail

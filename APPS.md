@@ -33,8 +33,9 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
   stats) live in the collapsed `Fine-tune` disclosure at the bottom of the Visuals panel —
   `appendFineTune(el, build?)` in framework.js. Keep the everyday top level to what changes
   mid-session: Style chips, paint colours, and (Keys mode) zone/press feedback.
-- **Voices** (expanded 2026-07): Pure, Warm, Bell, Glass, Deep, Harp (real Karplus-Strong
-  delay-line string — Flow glides become glissandi), E-Piano (2-op FM tine), Music box,
+- **Voices** (expanded 2026-07): Pure, Warm, Bell, Glass, Deep, Harp (layered decaying
+  harmonics — a Karplus-Strong delay-line version was tried and cut, see the note in
+  framework.js), E-Piano (2-op FM tine), Music box,
   Marimba and Kalimba (modal synthesis on the real instruments' inharmonic partial ratios),
   Synth, Pad. Retro and the generic Pluck are retired; saved settings migrate to
   Synth/Kalimba automatically. Three **sound macros** — Brightness, Attack, Ring — sit in
