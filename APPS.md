@@ -333,6 +333,19 @@ Soundscape and Voice Visuals. The `touch` repo is now superseded/frozen.
 
 ---
 
+## 17. 🌀 Fluid Paint — `fluid_paint.html` ✅ BUILT (2026-07)
+
+Sensory fork of Fluid Keys: same Navier–Stokes core, deliberately diverged. Locked to
+Flow (no Keys grid), calm defaults (pad voice, smooth glide), plus visual enhancements
+that stay OUT of the instrument on purpose: **bloom** (soft-knee prefilter + separable
+blur at low res, Glow slider), **3D shading** (dye brightness lit as a heightfield),
+an exposed **Swirl** (vorticity) slider, and opt-in **Ambient drift** — the canvas
+paints itself with soft splats, intentionally keeping the sim awake (skips idle-sleep
+power saving, so it's off by default). Styles: Calm / Silk / Nebula / Lava lamp /
+Smoke / Storm. The fork does not track fluid_sensory.html — don't sync them.
+
+---
+
 ## Later / ideas parking lot
 
 - **Realistic melodic instruments** (piano/marimba via multisample packs) — revisit once the
