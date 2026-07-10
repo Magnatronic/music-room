@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Game of Life – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Conway's Game of Life — paint live cells by touch, watch patterns evolve.
+   Cell column → musical pitch; oscillators create repeating phrases, gliders make
+   traveling melodies. Supports 5 themes, colour inheritance on birth, and ghost trails.
+*/
+const Anim = (() => {
+  let ctx, W, H;
+  let cols = 0, rows = 0;
+  let grid, next, colors, nextColors;
+  let visFades, visColors; // per-cell smooth fade for birth/death transitions
+  let genAccum = 0;
+  let audioBudget = 1; // notes per generation (1 = single melodic note)
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  function packRGB(r, g, b) {
+    return ((Math.min(255, r * 255) | 0) << 16) |
+           ((Math.min(255, g * 255) | 0) << 8)  |
+            (Math.min(255, b * 255) | 0);
+  }
+
+  function unpackRGB(p) {
+    return [(p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff];
+  }
+
+  function cellCSS(packed, alpha) {
+    const [r, g, b] = unpackRGB(packed);
+    return alpha < 1
+      ? `rgba(${r},${g},${b},${alpha.toFixed(2)})`
+      : `rgb(${r},${g},${b})`;
+  }
+
+  // HSL → packed RGB (for age-based colouring)
+  function hslPack(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s /= 100; l /= 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h < 60)       { r=c; g=x; }
+    else if (h < 120) { r=x; g=c; }
+    else if (h < 180) { g=c; b=x; }
+    else if (h < 240) { g=x; b=c; }
+    else if (h < 300) { r=x; b=c; }
+    else              { r=c; b=x; }
+    return packRGB(r + m, g + m, b + m);
+  }
+
+  // Blend two packed colours equally
+  function blendPacked(a, b) {
+    const [ar, ag, ab_] = unpackRGB(a);
+    const [br, bg, bb]  = unpackRGB(b);
+    return packRGB((ar + br) / 510, (ag + bg) / 510, (ab_ + bb) / 510);
+  }
+
+  function blendThree(a, b, c) { return blendPacked(blendPacked(a, b), c); }
+
+  // ── Grid ─────────────────────────────────────────────────────────────────────
+
+  function allocGrid(c, r) {
+    cols = c; rows = r;
+    grid       = new Uint8Array(c * r);
+    next       = new Uint8Array(c * r);
+    colors     = new Uint32Array(c * r);
+    nextColors = new Uint32Array(c * r);
+    visFades   = new Float32Array(c * r);
+    visColors  = new Uint32Array(c * r);
+    genAccum   = 0;
+  }
+
+  // Reallocate the grid if the current cell size implies a different resolution.
+  // Called every frame so a cellSize change (slider or Style chip) takes effect
+  // immediately, consistent with every other setting. Reallocation clears the board.
+  function syncGridToCellSize() {
+    const cs = SETTINGS.cellSize | 0;
+    if (Math.floor(W / cs) !== cols) allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+  }
+
+  function idx(c, r) { return r * cols + c; }
+
+  function paintCell(col, row, packed) {
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return;
+    const i = idx(col, row);
+    grid[i]   = 1;
+    colors[i] = packed;
+  }
+
+  // Colour a cell purely from its position (column → hue, row → lightness).
+  // Mirrors the position-mode logic in step(); used when painting in that mode so
+  // freshly touched cells already match, instead of snapping colour on the next gen.
+  function positionColor(c, r) {
+    const th = Anim.themes[currentTheme];
+    const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+    const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+    return hslPack(hue, th.ageSat, th.ageLit + litOff);
+  }
+
+  // ── Generation step ───────────────────────────────────────────────────────────
+
+  function step() {
+    const th = Anim.themes[currentTheme];
+    // cellColor, not colorMode — the framework owns SETTINGS.colorMode (paint colours)
+    const colorMode = SETTINGS.cellColor;
+    const birthNotes = [];
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // Count live neighbours (toroidal wrap)
+        let live = 0;
+        let c0 = 0, c1 = 0, c2 = 0; // up to 3 live-neighbour colours for blending
+        let nc = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nr = (r + dr + rows) % rows;
+            const nc2 = (c + dc + cols) % cols;
+            if (grid[idx(nc2, nr)]) {
+              live++;
+              if (nc < 3) {
+                if (nc === 0) c0 = colors[idx(nc2, nr)];
+                else if (nc === 1) c1 = colors[idx(nc2, nr)];
+                else c2 = colors[idx(nc2, nr)];
+                nc++;
+              }
+            }
+          }
+        }
+
+        const i = idx(c, r);
+        const alive = grid[i] > 0;
+        let survives = false;
+
+        if (alive) {
+          survives = live === 2 || live === 3;
+        } else {
+          survives = live === 3; // birth
+        }
+
+        if (survives) {
+          next[i] = Math.min(255, (grid[i] || 0) + 1);
+          if (!alive) {
+            // Newly born cell
+            if (colorMode === 'touch' || colorMode === 'mixed') {
+              // Inherit blended colour from live parents
+              nextColors[i] = nc >= 3 ? blendThree(c0, c1, c2) :
+                              nc === 2 ? blendPacked(c0, c1) : (c0 || colors[i]);
+            } else {
+              // Two-axis: column → hue, row → lightness offset
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              nextColors[i] = hslPack(hue, th.ageSat, th.ageLit + litOff);
+            }
+            if (birthNotes.length < audioBudget) {
+              birthNotes.push([c, r]);
+            }
+          } else {
+            // Survivor: re-derive by position each gen so colour stays stable
+            if (colorMode === 'age') {
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              nextColors[i] = hslPack(hue, th.ageSat, th.ageLit + litOff);
+            } else if (colorMode === 'mixed') {
+              // Gradually shift from inherited touch colour toward position colour as cell ages
+              const t = Math.min(1, next[i] / 80);
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              const posCol = hslPack(hue, th.ageSat, th.ageLit + litOff);
+              const [pr, pg, pb] = unpackRGB(colors[i]);
+              const [tr, tg, tb] = unpackRGB(posCol);
+              nextColors[i] = packRGB(
+                (pr / 255 * (1 - t) + tr / 255 * t),
+                (pg / 255 * (1 - t) + tg / 255 * t),
+                (pb / 255 * (1 - t) + tb / 255 * t)
+              );
+            } else {
+              nextColors[i] = colors[i];
+            }
+          }
+        } else {
+          next[i] = 0;
+          nextColors[i] = 0;
+        }
+      }
+    }
+
+    // Swap buffers
+    const tmpG = grid; grid = next; next = tmpG;
+    const tmpC = colors; colors = nextColors; nextColors = tmpC;
+
+    // Single birth note per generation — sparse, melodic, not cluttered
+    if (SETTINGS.birthSound && birthNotes.length > 0 && audioBudget > 0) {
+      // Pick the birth nearest screen centre for a musically central note
+      const midCol = cols / 2, midRow = rows / 2;
+      birthNotes.sort((a, b) =>
+        Math.hypot(a[0] - midCol, a[1] - midRow) - Math.hypot(b[0] - midCol, b[1] - midRow)
+      );
+      const [bc, br] = birthNotes[0];
+      // Birth notes sit quieter than touch so your interaction stays in the foreground
+      pluckNote(bc / cols, 1 - br / rows, 0.5);
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+
+  function drawCell(shape, px, py, cs, halfCS) {
+    if (shape === 'circle') {
+      ctx.beginPath(); ctx.arc(px + halfCS, py + halfCS, halfCS * 0.9, 0, Math.PI * 2); ctx.fill();
+    } else if (shape === 'dot') {
+      ctx.beginPath(); ctx.arc(px + halfCS, py + halfCS, halfCS * 0.44, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillRect(px + 0.5, py + 0.5, cs - 1, cs - 1);
+    }
+  }
+
+  function render() {
+    if (!ctx) return;
+    const cs = SETTINGS.cellSize | 0;
+
+    // Trail fade: composite semi-transparent background over previous frame
+    const trail = SETTINGS.trail | 0;
+    const alpha = trail === 0 ? 1 : Math.max(0.05, 1 / (1 + trail * 0.5));
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0},${alpha.toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw cells using visFades for smooth birth/death transitions.
+    // Glow is a user setting (0–20). When glowing we draw each cell twice: once with a
+    // same-colour shadow for the halo, then again crisp on top so the core stays sharp.
+    const shape = SETTINGS.cellShape;
+    const glowAmt = SETTINGS.glow | 0;
+    const glowBlur = glowAmt > 0 ? cs * glowAmt * 0.1 : 0;
+
+    const halfCS = cs * 0.5;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = idx(c, r);
+        const fade = visFades[i];
+        if (fade < 0.01) continue;
+        const px = c * cs, py = r * cs;
+        ctx.globalAlpha = fade;
+        const css = cellCSS(visColors[i], 1);
+        ctx.fillStyle = css;
+        if (glowBlur > 0) {
+          ctx.shadowColor = css;
+          ctx.shadowBlur = glowBlur;
+          drawCell(shape, px, py, cs, halfCS);  // glow halo
+          ctx.shadowBlur = 0;                   // crisp core on top
+          drawCell(shape, px, py, cs, halfCS);
+        } else {
+          drawCell(shape, px, py, cs, halfCS);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Public Anim object ────────────────────────────────────────────────────────
+
+  return {
+    sectionLabel: 'Life',
+
+    themes: {
+      crystalCave: {
+        label: '💎 Crystal Cave',
+        colors: [[0, 0.9, 1], [0.4, 0.8, 1], [0.6, 1, 0.9], [0.2, 0.6, 1], [0.8, 0.5, 1]],
+        ageHue0: 170, ageHue1: 290, ageSat: 90, ageLit: 65, ageLitRange: 18,
+      },
+      coralReef: {
+        label: '🪸 Coral Reef',
+        colors: [[1, 0.35, 0.2], [1, 0.75, 0.1], [1, 0.45, 0.65], [0.2, 0.8, 0.7], [1, 0.6, 0.3]],
+        ageHue0: 0, ageHue1: 80, ageSat: 85, ageLit: 58, ageLitRange: 15,
+      },
+      emberForge: {
+        label: '🔥 Ember Forge',
+        colors: [[1, 0.1, 0], [1, 0.4, 0], [1, 0.7, 0], [1, 0.9, 0.2], [0.9, 0.05, 0.05]],
+        ageHue0: 0, ageHue1: 65, ageSat: 100, ageLit: 52, ageLitRange: 20,
+      },
+      gossamer: {
+        label: '🕸️ Gossamer',
+        colors: [[0.8, 0.6, 1], [0.6, 0.85, 1], [1, 0.7, 0.85], [0.7, 1, 0.8], [1, 0.9, 0.6]],
+        ageHue0: 230, ageHue1: 350, ageSat: 65, ageLit: 72, ageLitRange: 12,
+      },
+      neonGrid: {
+        label: '🟩 Neon Grid',
+        colors: [[0, 1, 0.3], [1, 0, 0.8], [0, 0.9, 1], [1, 0.9, 0], [0.5, 0, 1]],
+        ageHue0: 90, ageHue1: 330, ageSat: 100, ageLit: 55, ageLitRange: 15,
+      },
+      prism: {
+        label: '🌈 Prism',
+        colors: [[1, 0, 0.2], [1, 0.6, 0], [0.2, 1, 0.2], [0, 0.8, 1], [0.7, 0.2, 1]],
+        ageHue0: 0, ageHue1: 360, ageSat: 100, ageLit: 58, ageLitRange: 20,
+      },
+    },
+
+    defaults: {
+      mode:       'flow',   // sensory-first: free Flow by default, Keys grid via the rail toggle
+      theme:      'crystalCave',
+      speed:      3,
+      cellSize:   20,
+      playing:    false,
+      brush:      'single',
+      cellColor:  'age',
+      cellShape:  'square',
+      trail:      3,
+      glow:       0,
+      birthSound: true,
+      voice:      'bell',
+    },
+
+    railButtons: [{
+      id: 'play',
+      icon:  () => SETTINGS.playing ? '⏸' : '▶',
+      title: () => SETTINGS.playing ? 'Pause (Space)' : 'Play (Space)',
+      active: () => SETTINGS.playing,
+      key: ' ',
+      onClick() { SETTINGS.playing = !SETTINGS.playing; saveSettings(); },
+    }],
+
+    // Visual-only presets — sound is configured in the shared Instrument/Notes
+    // panels (and per-student presets), the same in every Music Room app.
+    styles: {
+      classic:    { label:'Classic',    speed:3,  cellSize:20, cellShape:'square', trail:3,  glow:0,  brush:'single', cellColor:'touch' },
+      microscope: { label:'Microscope', speed:5,  cellSize:8,  cellShape:'circle', trail:2,  glow:0,  brush:'large',  cellColor:'age'   },
+      pixel:      { label:'Pixel',      speed:2,  cellSize:36, cellShape:'square', trail:1,  glow:0,  brush:'single', cellColor:'mixed' },
+      stardust:   { label:'Stardust',   speed:8,  cellSize:14, cellShape:'dot',    trail:8,  glow:14, brush:'small',  cellColor:'age'   },
+    },
+
+    schema: [
+      { key: 'speed',      label: 'Speed',       min: 0.5, max: 20,  step: 0.5, dp: 1 },
+      { key: 'cellSize',   label: 'Cell Size',   min: 6,   max: 80,  step: 2,   dp: 0 },
+      { key: 'brush',      label: 'Brush Size',  type: 'preset-chips',
+        options: { single: {label:'1 cell'}, small: {label:'3×3'}, large: {label:'5×5'} } },
+      { key: 'cellColor',  label: 'Colour Mode', type: 'preset-chips',
+        options: { touch: {label:'Touch'}, age: {label:'Position'}, mixed: {label:'Mixed'} } },
+      { key: 'cellShape',  label: 'Shape',       type: 'preset-chips',
+        options: { square: {label:'■ Square'}, circle: {label:'● Circle'}, dot: {label:'· Dot'} } },
+      { key: 'trail',      label: 'Ghost Trail', min: 0,   max: 20,  step: 1,   dp: 0 },
+      { key: 'glow',       label: 'Glow',        min: 0,   max: 20,  step: 1,   dp: 0 },
+      { key: 'birthSound', label: 'Birth Notes', type: 'toggle' },
+    ],
+
+    init(cv) {
+      ctx = cv.getContext('2d');
+      W = cv.width; H = cv.height;
+      const cs = SETTINGS.cellSize | 0;
+      allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+      this.reset();
+      // Play/Pause is a framework rail button — see `railButtons` below.
+    },
+
+    resize(w, h) {
+      W = w; H = h;
+      const cs = SETTINGS.cellSize | 0;
+      allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+      // Clear on resize — unavoidable with typed array realloc
+      this.reset();
+    },
+
+    splat(x, y, dx, dy, color) {
+      if (!ctx) return;
+      syncGridToCellSize();
+      const cs = SETTINGS.cellSize | 0;
+      // Direct pixel→cell: avoids double-flooring error that grows toward edges
+      const col = Math.max(0, Math.min(cols - 1, Math.floor(x * W / cs)));
+      const row = Math.max(0, Math.min(rows - 1, Math.floor((1 - y) * H / cs)));
+      const packed = packRGB(
+        Math.min(1, color[0]),
+        Math.min(1, color[1]),
+        Math.min(1, color[2])
+      );
+      const brushR = SETTINGS.brush === 'large' ? 2 : SETTINGS.brush === 'small' ? 1 : 0;
+      // In position mode, paint each cell in its own position colour so touched cells
+      // don't flash the finger colour then snap to position on the next generation.
+      const posMode = SETTINGS.cellColor === 'age';
+      for (let dr = -brushR; dr <= brushR; dr++) {
+        for (let dc = -brushR; dc <= brushR; dc++) {
+          const cc = col + dc, rr = row + dr;
+          paintCell(cc, rr, posMode ? positionColor(cc, rr) : packed);
+        }
+      }
+    },
+
+    frame(dt) {
+      if (!ctx) return;
+      syncGridToCellSize();
+
+      // Advance generation if playing
+      if (SETTINGS.playing) {
+        genAccum += dt;
+        const interval = 1 / Math.max(0.5, SETTINGS.speed);
+        while (genAccum >= interval) {
+          genAccum -= interval;
+          step();
+        }
+      }
+
+      // Smooth per-cell fade — alive cells fade in, dead cells fade out
+      const fadeRate = 6; // reaches full opacity in ~0.17 s
+      const n = cols * rows;
+      for (let i = 0; i < n; i++) {
+        if (grid[i]) {
+          visFades[i] = Math.min(1, visFades[i] + dt * fadeRate);
+          visColors[i] = colors[i];
+        } else {
+          visFades[i] = Math.max(0, visFades[i] - dt * fadeRate);
+        }
+      }
+
+      render();
+    },
+
+    reset() {
+      if (!ctx) return;
+      if (grid) grid.fill(0);
+      if (colors) colors.fill(0);
+      if (visFades) visFades.fill(0);
+      if (visColors) visColors.fill(0);
+      genAccum = 0;
+      SETTINGS.playing = false;
+      refreshRailButtons();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = `rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
+      ctx.fillRect(0, 0, W, H);
+    },
+
+    setQuality(level) {
+      audioBudget = level === 'high' ? 4 : level === 'med' ? 2 : 0;
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

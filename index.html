@@ -22,6 +22,10 @@ h1{font-size:clamp(34px,6vw,64px);font-weight:700;letter-spacing:-0.02em;
 .tag{margin-top:12px;font-size:clamp(14px,2.2vw,18px);color:rgba(255,255,255,0.6);max-width:680px;margin-left:auto;margin-right:auto;line-height:1.5}
 .grid{max-width:1100px;margin:0 auto;display:grid;
   grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px}
+.sect{max-width:1100px;margin:0 auto 8px}
+.sect+.grid{margin-bottom:36px}
+.sect h2{font-size:clamp(20px,3vw,26px);font-weight:600;letter-spacing:-0.01em}
+.sect p{margin-top:4px;font-size:13px;color:rgba(255,255,255,0.45)}
 .card{position:relative;display:block;text-decoration:none;color:inherit;
   background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);
   border-radius:18px;padding:22px;min-height:150px;
@@ -49,7 +53,7 @@ footer a{color:rgba(255,255,255,0.55)}
      Works fullscreen on the touch projector and runs entirely offline.</p>
 </header>
 
-<main class="grid" id="grid"></main>
+<main id="main"></main>
 
 <footer>
   Open-source music therapy project ·
@@ -57,37 +61,54 @@ footer a{color:rgba(255,255,255,0.55)}
 </footer>
 
 <script>
-// Each app: file (null = not built yet), emoji, title, blurb, accent colour
-// The first six are the most-used apps in sessions — keep them above the fold.
-const ITEMS = [
-  {file:'fluid_sensory.html', emoji:'🎹', title:'Fluid Keys',      blurb:'Paint with sound — a fluid canvas that is also a playable instrument with note zones and octave grid.', accent:'#7ad7ff'},
-  {file:'strummer.html', emoji:'🎸', title:'Chord Strummer',  blurb:'Sweep across the strings to strum — big chord buttons keep every sweep in harmony.', accent:'#e05a9c'},
-  {file:'song_grid.html', emoji:'🎵', title:'Song Grid', blurb:'Cells light up to guide a student through real songs, one note at a time, at their own pace.', accent:'#f5d117'},
-  {file:'big_switch.html', emoji:'🔘', title:'Big Switch Songs',blurb:'The whole screen is one giant button. Every press plays the next part of the song.', accent:'#3bb54a'},
-  {file:'voice_visuals.html', emoji:'🎤', title:'Voice Visuals',   blurb:'Sing, hum or shout — the microphone turns every sound into light and colour.', accent:'#8affd0'},
-  {file:'soundscape.html', emoji:'🌧️', title:'Soundscape',      blurb:'Mix rain, waves, birds and soft chords on big sliders into a calming soundscape.', accent:'#1ca9a9'},
-  {file:'drums.html', emoji:'🥁', title:'Drum Pads',       blurb:'Big colourful percussion zones — kick, snare, shaker — plus a backing track to play along with.', accent:'#e2641c'},
-  {file:'echo_bird.html', emoji:'🦜', title:'Echo Bird',     blurb:'The bird plays a little tune, then waits for your reply — every answer makes it happy.', accent:'#7dffb0'},
-  {file:'sweep_chimes.html', emoji:'🎐', title:'Sweep Chimes',  blurb:'Sweep through hanging chime bars — they swing, knock together and ring in your scale.', accent:'#8fd3ff'},
-  {file:'bubbles.html', emoji:'🫧', title:'Music Bubbles',  blurb:'Pop drifting note bubbles — or follow a song bubble by bubble. Gentle goals, never a fail.', accent:'#9ee7ff'},
-  {file:'beat_builder.html', emoji:'🏗️', title:'Beat Builder',   blurb:'Place sounds on big steps and the loop plays forever — save each student\'s beat for next week.', accent:'#ffb36b'},
-  {file:'conductor.html', emoji:'🪄', title:'Conductor',      blurb:'The music plays only while you move — speed sets the tempo, height sets the volume.', accent:'#e8c8ff'},
-  {file:'sampler.html', emoji:'📼', title:'Sampler Pads',    blurb:'Record any sound onto a pad — your voice, a shaker, a door — then play it like an instrument.', accent:'#c0a0ff'},
+// Each app: file (null = not built yet), emoji, title, blurb, accent colour.
+// Sections tell therapists WHEN to reach for each app: active music-making,
+// structured activities, or regulation / wind-down. Most-used first per section.
+const SECTIONS = [
+  { title:'Instruments', tag:'Open-ended music-making — every touch plays in key.', items:[
+    {file:'fluid_sensory.html', emoji:'🎹', title:'Fluid Keys',      blurb:'Paint with sound — a fluid canvas that is also a playable instrument with note zones and octave grid.', accent:'#7ad7ff'},
+    {file:'strummer.html', emoji:'🎸', title:'Chord Strummer',  blurb:'Sweep across the strings to strum — big chord buttons keep every sweep in harmony.', accent:'#e05a9c'},
+    {file:'drums.html', emoji:'🥁', title:'Drum Pads',       blurb:'Big colourful percussion zones — kick, snare, shaker — plus a backing track to play along with.', accent:'#e2641c'},
+    {file:'sweep_chimes.html', emoji:'🎐', title:'Sweep Chimes',  blurb:'Sweep through hanging chime bars — they swing, knock together and ring in your scale.', accent:'#8fd3ff'},
+    {file:'sampler.html', emoji:'📼', title:'Sampler Pads',    blurb:'Record any sound onto a pad — your voice, a shaker, a door — then play it like an instrument.', accent:'#c0a0ff'},
+  ]},
+  { title:'Songs & Games', tag:'Structured activities with gentle goals — never a fail.', items:[
+    {file:'song_grid.html', emoji:'🎵', title:'Song Grid', blurb:'Cells light up to guide a student through real songs, one note at a time, at their own pace.', accent:'#f5d117'},
+    {file:'big_switch.html', emoji:'🔘', title:'Big Switch Songs',blurb:'The whole screen is one giant button. Every press plays the next part of the song.', accent:'#3bb54a'},
+    {file:'echo_bird.html', emoji:'🦜', title:'Echo Bird',     blurb:'The bird plays a little tune, then waits for your reply — every answer makes it happy.', accent:'#7dffb0'},
+    {file:'bubbles.html', emoji:'🫧', title:'Music Bubbles',  blurb:'Pop drifting note bubbles — or follow a song bubble by bubble. Gentle goals, never a fail.', accent:'#9ee7ff'},
+    {file:'beat_builder.html', emoji:'🏗️', title:'Beat Builder',   blurb:'Place sounds on big steps and the loop plays forever — save each student\'s beat for next week.', accent:'#ffb36b'},
+    {file:'conductor.html', emoji:'🪄', title:'Conductor',      blurb:'The music plays only while you move — speed sets the tempo, height sets the volume.', accent:'#e8c8ff'},
+  ]},
+  { title:'Sensory & Calm', tag:'Mesmerising visuals and soundscapes for regulation and wind-down.', items:[
+    {file:'soundscape.html', emoji:'🌧️', title:'Soundscape',      blurb:'Mix rain, waves, birds and soft chords on big sliders into a calming soundscape.', accent:'#1ca9a9'},
+    {file:'voice_visuals.html', emoji:'🎤', title:'Voice Visuals',   blurb:'Sing, hum or shout — the microphone turns every sound into light and colour.', accent:'#8affd0'},
+    {file:'flock.html', emoji:'🕊️', title:'Flock',           blurb:'A glowing swarm gathers around your fingers — murmurations, fireflies, embers and aurora styles.', accent:'#7fa8ff'},
+    {file:'slime.html', emoji:'🍄', title:'Slime Mould',     blurb:'Thousands of tiny explorers weave living networks of light around every touch.', accent:'#9dff57'},
+    {file:'life.html', emoji:'🧬', title:'Game of Life',    blurb:'Paint living cells and watch them grow, drift and sing — new cells play soft notes as they are born.', accent:'#57ffb0'},
+  ]},
 ];
 
-const grid = document.getElementById('grid');
-for (const it of ITEMS) {
-  const live = !!it.file;
-  const el = document.createElement(live ? 'a' : 'div');
-  el.className = 'card ' + (live ? 'live' : 'soon');
-  if (live) el.href = it.file;
-  el.innerHTML = `
-    <div class="glow" style="background:radial-gradient(circle at 50% 0%, ${it.accent}33, transparent 70%)"></div>
-    <span class="badge ${live?'live':'soon'}">${live?'Live':'Soon'}</span>
-    <div class="emoji">${it.emoji}</div>
-    <h2>${it.title}</h2>
-    <p>${it.blurb}</p>`;
-  grid.appendChild(el);
+const main = document.getElementById('main');
+for (const sec of SECTIONS) {
+  const head = document.createElement('div'); head.className = 'sect';
+  head.innerHTML = `<h2>${sec.title}</h2><p>${sec.tag}</p>`;
+  main.appendChild(head);
+  const grid = document.createElement('div'); grid.className = 'grid';
+  for (const it of sec.items) {
+    const live = !!it.file;
+    const el = document.createElement(live ? 'a' : 'div');
+    el.className = 'card ' + (live ? 'live' : 'soon');
+    if (live) el.href = it.file;
+    el.innerHTML = `
+      <div class="glow" style="background:radial-gradient(circle at 50% 0%, ${it.accent}33, transparent 70%)"></div>
+      <span class="badge ${live?'live':'soon'}">${live?'Live':'Soon'}</span>
+      <div class="emoji">${it.emoji}</div>
+      <h2>${it.title}</h2>
+      <p>${it.blurb}</p>`;
+    grid.appendChild(el);
+  }
+  main.appendChild(grid);
 }
 </script>
 </body>

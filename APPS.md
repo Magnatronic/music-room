@@ -312,6 +312,27 @@ A webcam-motion input mode can arrive later via the framework input-adapter work
 
 ---
 
+## 14–16. Sensory & Calm ports from the Touch repo ✅ BUILT (2026-07)
+
+Three sensory-room animations ported from the earlier `touch` repo
+(github.com/Magnatronic/touch) onto this framework, so they share the suite's sound
+model (note bands, Boomwhacker colours, Keys/Flow, presets, session lock) instead of
+the old continuous x→pitch mapping that confused therapists.
+
+- **🍄 Slime Mould — `slime.html`** GPU Physarum simulation (WebGL2): agents burst from
+  each touch and weave glowing networks. Gossamer/Dense/Rivers/Chaos styles, repel mode.
+- **🧬 Game of Life — `life.html`** Paint living cells, watch them evolve; births play
+  quiet `pluckNote`s in the current key. Its cell-colour setting is `cellColor`
+  (renamed — the framework owns `colorMode`).
+- **🕊️ Flock — `flock.html`** Boids swarm that gathers to (or flees) the fingers;
+  Murmuration/Fireflies/Plasma/Embers/Aurora styles.
+
+All three default to **Flow mode** (`defaults.mode:'flow'`) — sensory-first, with the
+Keys grid one rail-tap away. The home page groups them under **Sensory & Calm** with
+Soundscape and Voice Visuals. The `touch` repo is now superseded/frozen.
+
+---
+
 ## Later / ideas parking lot
 
 - **Realistic melodic instruments** (piano/marimba via multisample packs) — revisit once the

@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Flock – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Boids (steering swarm) — CPU simulation, Canvas2D rendering.
+   Five themes each bring a distinct visual style + motion character.
+*/
+const Anim = (() => {
+  /* ── Private state ── */
+  let ctx = null, W = 1, H = 1;
+  let glowCanvas = null, glowCtx = null;   // offscreen canvas for single-pass blur
+  let agents = [];
+  let activeCount = 0;
+  let _attractors = [];   // filled by splat(), drained at end of frame()
+  let _lastTheme = '';
+
+  /* ── Physics radii (px at 1080p; spatial-hash cell matches COH_RADIUS) ── */
+  const BASE_SPEED    = 150;   // px/s at theme.speed=1, SETTINGS.speed=1
+  const SEP_RADIUS    = 28;
+  const ALIGN_RADIUS  = 68;
+  const COH_RADIUS    = 90;
+  const TOUCH_RADIUS  = 220;   // px: touch influence range
+  const CLAIM_RADIUS  = 260;   // px: colour-claim range
+  const LINE_THRESH   = 100;   // px: constellation line threshold
+  const CELL          = 90;    // spatial-hash cell size (matches COH_RADIUS)
+  const TAU           = Math.PI * 2;
+
+  /* ── Themes (colour-only — physics/render driven by Style presets via SETTINGS) ── */
+  const THEME_DATA = {
+    sky:          {
+      label:'🩵 Sky',
+      colors:[[0.4,0.6,1],[0.5,0.75,1],[0.3,0.5,0.9],[0.8,0.9,1],[0.45,0.65,1]],
+      hueMin:0.50, hueMax:0.78, drift:0, sat:0.80, lit:0.62,
+    },
+    garden:       {
+      label:'🌿 Garden',
+      colors:[[1,0.7,0.1],[0.35,0.95,0.25],[1,0.5,0.05],[0.45,1,0.4],[1,0.8,0.2]],
+      hueMin:0.06, hueMax:0.32, drift:0, sat:0.95, lit:0.65,
+    },
+    violet:       {
+      label:'💜 Violet',
+      colors:[[1,0.05,0.8],[0,1,0.9],[0.8,0.05,1],[0.05,0.8,1],[1,0.25,0.9]],
+      hueMin:0.70, hueMax:1.00, drift:0, sat:1.0, lit:0.62,
+    },
+    embers:       {
+      label:'🔥 Embers',
+      colors:[[1,0.25,0],[1,0.5,0.08],[1,0.12,0],[0.92,0.4,0],[1,0.65,0.05]],
+      hueMin:0.0, hueMax:0.11, drift:-55, sat:1.0, lit:0.58,
+    },
+    aurora:       {
+      label:'🌌 Aurora',
+      colors:[[0.1,1,0.5],[0.65,0.1,1],[0.05,0.9,0.65],[0.8,0.25,1],[0.1,0.85,0.45]],
+      hueMin:0.20, hueMax:0.82, drift:0, sat:0.85, lit:0.55,
+    },
+    prism: {
+      label:'🌈 Prism',
+      colors:[[1,0,0.2],[1,0.6,0],[0.2,1,0.2],[0,0.8,1],[0.7,0.2,1]],
+      hueMin:0, hueMax:1.0, drift:0, sat:1.0, lit:0.62,
+    },
+  };
+
+  /* ── Spatial hash ── */
+  const hashMap = new Map();
+
+  function hashKey(cx, cy){ return cx * 30000 + cy; }
+
+  function buildHash(){
+    hashMap.clear();
+    for(let i = 0; i < activeCount; i++){
+      const a = agents[i];
+      const k = hashKey(Math.floor(a.x / CELL), Math.floor(a.y / CELL));
+      if(!hashMap.has(k)) hashMap.set(k, []);
+      hashMap.get(k).push(i);
+    }
+  }
+
+  function queryRange(x, y, r){
+    const out = [];
+    const x0 = Math.floor((x - r) / CELL), x1 = Math.floor((x + r) / CELL);
+    const y0 = Math.floor((y - r) / CELL), y1 = Math.floor((y + r) / CELL);
+    for(let cx = x0; cx <= x1; cx++)
+      for(let cy = y0; cy <= y1; cy++){
+        const cell = hashMap.get(hashKey(cx, cy));
+        if(cell) for(const idx of cell) out.push(idx);
+      }
+    return out;
+  }
+
+  /* ── Colour helpers ── */
+  function hslStr(h, s, l, a){
+    // Fast HSL→CSS string. h,s,l in 0..1; a in 0..1.
+    const q = l < 0.5 ? l*(1+s) : l+s-l*s, p = 2*l - q;
+    function c2(t){ t=((t%1)+1)%1; if(t<1/6) return p+(q-p)*6*t; if(t<0.5) return q; if(t<2/3) return p+(q-p)*(2/3-t)*6; return p; }
+    const r=c2(h+1/3)*255+0.5|0, g=c2(h)*255+0.5|0, b=c2(h-1/3)*255+0.5|0;
+    return a>=1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a.toFixed(2)})`;
+  }
+
+  function rgbToHue(c){
+    const r=c[0], g=c[1], b=c[2], mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
+    if(d<0.001) return 0;
+    if(mx===r) return (((g-b)/d)%6+6)/6;
+    if(mx===g) return ((b-r)/d+2)/6;
+    return ((r-g)/d+4)/6;
+  }
+
+  function lerpHue(a, b, t){
+    let d = b-a; if(d>0.5) d-=1; if(d<-0.5) d+=1;
+    return ((a+d*t)%1+1)%1;
+  }
+
+  // Per-agent sat/lit offsets applied here — caps lit at 0.80 to prevent whitening on cluster
+  function agentColor(a, th, alpha, litBoost=0){
+    const s=Math.max(0.3, Math.min(1,   th.sat+(a.satOff||0)));
+    const l=Math.max(0.2, Math.min(0.80, th.lit+(a.litOff||0)+litBoost));
+    return hslStr(a.displayHue, s, l, alpha);
+  }
+
+  /* ── Agent management ── */
+  function spawnAgent(){
+    const th = THEME_DATA[currentTheme] || THEME_DATA.sky;
+    const hue = th.hueMin + Math.random()*(th.hueMax - th.hueMin);
+    return {
+      x: Math.random()*W, y: Math.random()*H,
+      vx: (Math.random()-0.5)*60, vy: (Math.random()-0.5)*60,
+      displayHue: hue, themeHue: hue,
+      pulsePhase: Math.random()*TAU,
+      jitterVx: (Math.random()-0.5)*30,  // embers horizontal bias (px/s²)
+      satOff: (Math.random()-0.5)*0.16,  // individual saturation variety
+      litOff: (Math.random()-0.5)*0.12,  // individual lightness variety
+    };
+  }
+
+  function spawnAll(count){
+    agents = [];
+    for(let i=0; i<count; i++) agents.push(spawnAgent());
+    activeCount = count;
+  }
+
+  function resizePool(target){
+    while(agents.length < target) agents.push(spawnAgent());
+    activeCount = Math.min(target, agents.length);
+  }
+
+  /* ── Physics update ── */
+  function updateAgents(dt, th){
+    const maxSpeed = BASE_SPEED * (SETTINGS.speed || 1);
+    const sepW   = SETTINGS.separation != null ? SETTINGS.separation : 1;
+    const alignW = SETTINGS.alignment  != null ? SETTINGS.alignment  : 1;
+    const cohW   = SETTINGS.cohesion   != null ? SETTINGS.cohesion   : 1;
+    const pull   = SETTINGS.pull   != null ? SETTINGS.pull   : 1;
+    const repel  = SETTINGS.repel;
+
+    buildHash();
+
+    for(let i=0; i<activeCount; i++){
+      const a = agents[i];
+      let ax=0, ay=0;
+
+      // ── Neighbour forces ──
+      const near = queryRange(a.x, a.y, COH_RADIUS);
+      let sxS=0, syS=0, sn=0;
+      let avxS=0, avyS=0, an=0;
+      let cxS=0, cyS=0, cn=0;
+
+      for(const j of near){
+        if(j===i) continue;
+        const b = agents[j];
+        const dx=a.x-b.x, dy=a.y-b.y;
+        const d2=dx*dx+dy*dy; if(d2<1) continue;
+        const d=Math.sqrt(d2);
+        if(d<SEP_RADIUS){
+          const w=(SEP_RADIUS-d)/SEP_RADIUS;
+          sxS+=(dx/d)*w; syS+=(dy/d)*w; sn++;
+        }
+        if(d<ALIGN_RADIUS){ avxS+=b.vx; avyS+=b.vy; an++; }
+        if(d<COH_RADIUS)  { cxS+=b.x;   cyS+=b.y;   cn++; }
+      }
+
+      // Steering: (desired_velocity − current_velocity) × weight applied as acceleration
+      if(sn>0){
+        const sl=Math.hypot(sxS,syS)||1;
+        ax+=(sxS/sl*maxSpeed - a.vx)*sepW*4.2;
+        ay+=(syS/sl*maxSpeed - a.vy)*sepW*4.2;
+      }
+      if(an>0){
+        const avl=Math.hypot(avxS/an,avyS/an)||1;
+        ax+=(avxS/an/avl*maxSpeed - a.vx)*alignW*1.8;
+        ay+=(avyS/an/avl*maxSpeed - a.vy)*alignW*1.8;
+      }
+      if(cn>0){
+        const tCx=cxS/cn-a.x, tCy=cyS/cn-a.y;
+        const cl=Math.hypot(tCx,tCy)||1;
+        ax+=(tCx/cl*maxSpeed - a.vx)*cohW*0.85;
+        ay+=(tCy/cl*maxSpeed - a.vy)*cohW*0.85;
+      }
+
+      // ── Wander ──
+      ax+=(Math.random()-0.5)*maxSpeed*0.85;
+      ay+=(Math.random()-0.5)*maxSpeed*0.85;
+
+      // ── Embers: upward drift + horizontal sway ──
+      if(th.drift!==0){
+        ay+=th.drift;
+        ax+=a.jitterVx*0.5;
+        if(Math.random()<0.018) a.jitterVx=(Math.random()-0.5)*35;
+      }
+
+      // ── Touch attract / repel ──
+      for(const att of _attractors){
+        const dx=att.x-a.x, dy=att.y-a.y;
+        const d2=dx*dx+dy*dy;
+        if(d2>=TOUCH_RADIUS*TOUCH_RADIUS||d2<1) continue;
+        const d=Math.sqrt(d2);
+        const falloff=1-d/TOUCH_RADIUS;
+        const dir=repel?-1:1;
+        ax+=(dx/d*maxSpeed - a.vx*dir)*pull*3.2*falloff*dir;
+        ay+=(dy/d*maxSpeed - a.vy*dir)*pull*3.2*falloff*dir;
+      }
+
+      // ── Integrate ──
+      a.vx+=ax*dt; a.vy+=ay*dt;
+      const spd=Math.hypot(a.vx,a.vy);
+      if(spd>maxSpeed){ const s=maxSpeed/spd; a.vx*=s; a.vy*=s; }
+      a.x+=a.vx*dt; a.y+=a.vy*dt;
+
+      // ── Torus wrap ──
+      if(a.x<0) a.x+=W; else if(a.x>=W) a.x-=W;
+      if(a.y<0) a.y+=H; else if(a.y>=H) a.y-=H;
+    }
+  }
+
+  /* ── Colour-claim ── */
+  function updateColours(dt){
+    const th=THEME_DATA[currentTheme]||THEME_DATA.sky;
+    const repel=SETTINGS.repel;
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      let claimed=false;
+      if(!repel){
+        for(const att of _attractors){
+          const d2=(a.x-att.x)**2+(a.y-att.y)**2;
+          if(d2<CLAIM_RADIUS*CLAIM_RADIUS){
+            a.displayHue=lerpHue(a.displayHue, rgbToHue(att.color), Math.min(1,dt*2.8));
+            claimed=true; break;
+          }
+        }
+      }
+      // Slow hue wander — keeps the flock visually alive within the theme's palette range
+      a.themeHue+=(Math.random()-0.5)*dt*0.06;
+      a.themeHue=Math.max(th.hueMin, Math.min(th.hueMax, a.themeHue));
+      if(!claimed) a.displayHue=lerpHue(a.displayHue, a.themeHue, Math.min(1,dt*0.9));
+    }
+  }
+
+  /* ── Fade canvas each frame ── */
+  function fadeCanvas(){
+    const trailLen=SETTINGS.trailLen!=null?SETTINGS.trailLen:20;
+    const alpha=trailLen<=0?1:Math.max(0.03, 1-trailLen/62);
+    const r=bgRGB[0]*255|0, g=bgRGB[1]*255|0, b=bgRGB[2]*255|0;
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle=`rgba(${r},${g},${b},${alpha})`;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  /* ── Render styles ── */
+
+  function renderStreaks(th){
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    ctx.shadowBlur=0;
+    ctx.lineWidth=1.3;
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      if(Math.hypot(a.vx,a.vy)<1) continue;
+      const k=gs*0.05+0.01;
+      ctx.strokeStyle=agentColor(a, th, 0.82);
+      ctx.beginPath();
+      ctx.moveTo(a.x-a.vx*k, a.y-a.vy*k);
+      ctx.lineTo(a.x, a.y);
+      ctx.stroke();
+    }
+  }
+
+  function renderGlow(dt, th){
+    if(!glowCtx) return;
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    const coreR=Math.max(1, gs*0.45);
+    const blurAmt=Math.max(2, gs*1.2)|0;   // reduced: single-pass blurs all particles together so less blur keeps them distinct
+    glowCtx.clearRect(0,0,W,H);
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      a.pulsePhase=(a.pulsePhase+dt*2.4)%TAU;
+      const pulse=0.5+0.5*Math.sin(a.pulsePhase);
+      const r=coreR*(0.5+0.5*pulse);
+      glowCtx.fillStyle=agentColor(a, th, 0.65+0.35*pulse);
+      glowCtx.beginPath(); glowCtx.arc(a.x,a.y,r,0,TAU); glowCtx.fill();
+    }
+    ctx.globalCompositeOperation='screen';  // screen avoids blowing out to white when agents cluster
+    ctx.filter=`blur(${blurAmt}px)`;
+    ctx.drawImage(glowCanvas,0,0);
+    ctx.filter='none';
+    ctx.globalCompositeOperation='source-over';  // crisp cores use normal blend so they don't compound
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      const pulse=0.5+0.5*Math.sin(a.pulsePhase);
+      ctx.fillStyle=agentColor(a, th, 0.65+0.2*pulse, 0.1);
+      ctx.beginPath(); ctx.arc(a.x,a.y,Math.max(0.8,coreR*0.4),0,TAU); ctx.fill();
+    }
+  }
+
+  function renderConstellation(th){
+    buildHash();
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+
+    // Collect segments into 3 alpha tiers — 3 stroke() calls instead of one per line
+    const near4=[], mid4=[], far4=[];
+    const NEAR_D=LINE_THRESH*0.4, MID_D=LINE_THRESH*0.7;
+    const avgHue=(th.hueMin+th.hueMax)*0.5;
+
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      // Inline hash traversal to avoid a new array allocation per agent
+      const x0=Math.floor((a.x-LINE_THRESH)/CELL), x1=Math.floor((a.x+LINE_THRESH)/CELL);
+      const y0=Math.floor((a.y-LINE_THRESH)/CELL), y1=Math.floor((a.y+LINE_THRESH)/CELL);
+      for(let cx=x0; cx<=x1; cx++){
+        for(let cy=y0; cy<=y1; cy++){
+          const cell=hashMap.get(hashKey(cx,cy));
+          if(!cell) continue;
+          for(const j of cell){
+            if(j<=i) continue;
+            const b=agents[j];
+            const dx=b.x-a.x, dy=b.y-a.y;
+            const d2=dx*dx+dy*dy;
+            if(d2>=LINE_THRESH*LINE_THRESH) continue;
+            const d=Math.sqrt(d2);
+            if(d<NEAR_D)     near4.push(a.x,a.y,b.x,b.y);
+            else if(d<MID_D) mid4.push(a.x,a.y,b.x,b.y);
+            else              far4.push(a.x,a.y,b.x,b.y);
+          }
+        }
+      }
+    }
+
+    ctx.lineWidth=0.9;
+    const drawTier=(segs,alpha)=>{
+      if(!segs.length) return;
+      ctx.strokeStyle=hslStr(avgHue, th.sat, th.lit, alpha);
+      ctx.beginPath();
+      for(let k=0; k<segs.length; k+=4){ ctx.moveTo(segs[k],segs[k+1]); ctx.lineTo(segs[k+2],segs[k+3]); }
+      ctx.stroke();
+    };
+    drawTier(far4, 0.12);
+    drawTier(mid4, 0.26);
+    drawTier(near4, 0.44);
+
+    // Node dots on top — single-pass blur via offscreen canvas
+    const dotR=Math.max(1.5, gs*0.28);
+    if(glowCtx){
+      glowCtx.clearRect(0,0,W,H);
+      for(let i=0; i<activeCount; i++){
+        const a=agents[i];
+        glowCtx.fillStyle=agentColor(a, th, 0.9, 0.1);
+        glowCtx.beginPath(); glowCtx.arc(a.x,a.y,dotR,0,TAU); glowCtx.fill();
+      }
+      ctx.filter=`blur(${Math.max(1,gs*0.5)|0}px)`;
+      ctx.drawImage(glowCanvas,0,0);
+      ctx.filter='none';
+    }
+  }
+
+  function renderSparks(th){
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    ctx.shadowBlur=0;
+    const hr=Math.max(1.2, gs*0.2);
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      if(Math.hypot(a.vx,a.vy)<1) continue;
+      const k=gs*0.045+0.015;
+      // Faint tail
+      ctx.lineWidth=0.9;
+      ctx.strokeStyle=agentColor(a, th, 0.32);
+      ctx.beginPath(); ctx.moveTo(a.x-a.vx*k, a.y-a.vy*k); ctx.lineTo(a.x,a.y); ctx.stroke();
+      // Bright head
+      ctx.fillStyle=agentColor(a, th, 0.92, 0.12);
+      ctx.beginPath(); ctx.arc(a.x,a.y,hr,0,TAU); ctx.fill();
+    }
+  }
+
+  function renderBlobs(th){
+    if(!glowCtx) return;
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    const coreR=Math.max(2, gs*0.65);
+    const blurAmt=Math.max(4, gs*2.2)|0;   // reduced from gs*3.5 — was creating 42px blur at max glow size
+    glowCtx.clearRect(0,0,W,H);
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      glowCtx.fillStyle=agentColor(a, th, 0.50);  // slightly higher alpha than before to compensate for screen blend being dimmer than lighter
+      glowCtx.beginPath(); glowCtx.arc(a.x,a.y,coreR,0,TAU); glowCtx.fill();
+    }
+    ctx.globalCompositeOperation='screen';
+    ctx.filter=`blur(${blurAmt}px)`;
+    ctx.drawImage(glowCanvas,0,0);
+    ctx.filter='none';
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  /* ── Public Anim interface ── */
+  return {
+    sectionLabel: 'Flock',
+
+    themes: THEME_DATA,
+
+    defaults: {
+      mode:'flow',   // sensory-first: free Flow by default, Keys grid via the rail toggle
+      theme:'sky', renderStyle:'streaks',
+      count:500, speed:1.8,
+      cohesion:1.44, separation:1.04, alignment:2.08,
+      pull:2.0, trailLen:20, glowSize:4, repel:false,
+    },
+
+    styles: {
+      murmuration: { label:'Murmuration', renderStyle:'streaks',       speed:1.8,  cohesion:1.44, separation:1.04, alignment:2.08, trailLen:20, glowSize:4 },
+      fireflies:   { label:'Fireflies',   renderStyle:'glow',          speed:0.55, cohesion:0.32, separation:0.64, alignment:0.52, trailLen:40, glowSize:7 },
+      plasma:      { label:'Plasma',      renderStyle:'constellation',  speed:1.2,  cohesion:0.52, separation:0.80, alignment:0.84, trailLen:15, glowSize:5 },
+      embers:      { label:'Embers',      renderStyle:'sparks',         speed:0.95, cohesion:0.24, separation:0.40, alignment:0.56, trailLen:8,  glowSize:3 },
+      aurora:      { label:'Aurora',      renderStyle:'blobs',          speed:0.25, cohesion:0.36, separation:0.44, alignment:0.32, trailLen:60, glowSize:9 },
+    },
+
+    schema: [
+      {key:'count',      label:'Agents',       min:100, max:1500, step:50,   dp:0},
+      {key:'speed',      label:'Speed',        min:0.2, max:3.0,  step:0.1,  dp:1},
+      {key:'cohesion',   label:'Cohesion',     min:0,   max:2,    step:0.05, dp:2},
+      {key:'separation', label:'Separation',   min:0,   max:2,    step:0.05, dp:2},
+      {key:'alignment',  label:'Alignment',    min:0,   max:2,    step:0.05, dp:2},
+      {key:'pull',       label:'Touch pull',   min:1,   max:8,    step:0.1,  dp:1},
+      {key:'trailLen',   label:'Trail length', min:0,   max:60,   step:1,    dp:0},
+      {key:'glowSize',   label:'Glow size',    min:1,   max:12,   step:0.5,  dp:1},
+      {key:'repel',      label:'Repel',        type:'toggle'},
+    ],
+
+    init(cv){
+      ctx=cv.getContext('2d',{alpha:false});
+      W=cv.width; H=cv.height;
+      glowCanvas=document.createElement('canvas');
+      glowCanvas.width=W; glowCanvas.height=H;
+      glowCtx=glowCanvas.getContext('2d',{alpha:true});
+      const q=activeQuality();
+      const base=SETTINGS.count||500;
+      const n={high:base, med:Math.round(base*0.6), low:Math.round(base*0.35)}[q]||base;
+      spawnAll(n);
+    },
+
+    resize(w,h){
+      const sx=w/(W||w), sy=h/(H||h);
+      W=w; H=h;
+      if(glowCanvas){ glowCanvas.width=w; glowCanvas.height=h; }
+      for(let i=0; i<agents.length; i++){ agents[i].x*=sx; agents[i].y*=sy; }
+    },
+
+    splat(x,y,dx,dy,color){
+      _attractors.push({x:x*W, y:(1-y)*H, color});
+    },
+
+    frame(dt){
+      if(!ctx||W<2||H<2) return;
+
+      // Sync agent count to current setting + quality ceiling
+      const desired=SETTINGS.count||500;
+      const q=activeQuality();
+      const ceiling={high:desired, med:Math.round(desired*0.6), low:Math.round(desired*0.35)}[q]||desired;
+      if(activeCount!==ceiling) resizePool(ceiling);
+
+      const th=THEME_DATA[currentTheme]||THEME_DATA.sky;
+
+      // When theme changes, retarget all agent hues so updateColours lerps them to the new palette
+      if(currentTheme!==_lastTheme){
+        _lastTheme=currentTheme;
+        for(let i=0; i<agents.length; i++)
+          agents[i].themeHue=th.hueMin+Math.random()*(th.hueMax-th.hueMin);
+      }
+
+      updateAgents(dt,th);
+      updateColours(dt);
+      fadeCanvas();
+      ctx.shadowBlur=0;
+
+      const style=SETTINGS.renderStyle||'streaks';
+      if     (style==='streaks')       renderStreaks(th);
+      else if(style==='glow')          renderGlow(dt,th);
+      else if(style==='constellation') renderConstellation(th);
+      else if(style==='sparks')        renderSparks(th);
+      else if(style==='blobs')         renderBlobs(th);
+
+      _attractors=[];
+    },
+
+    reset(){
+      const base=SETTINGS.count||500;
+      spawnAll(base);
+      if(ctx){
+        ctx.globalCompositeOperation='source-over';
+        ctx.fillStyle=`rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
+        ctx.fillRect(0,0,W,H);
+      }
+    },
+
+    setQuality(level){
+      const base=SETTINGS.count||500;
+      const target={high:base, med:Math.round(base*0.6), low:Math.round(base*0.35)}[level]||base;
+      resizePool(target);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>
