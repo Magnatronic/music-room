@@ -158,7 +158,7 @@ const Anim = (() => {
     sectionLabel:'Echo Bird',
     lockMode:'notes',
     hideRail:['clear'],
-    paneLabels:{ instrument:'🦜 Bird', sound:'🎸 Instrument' },
+    paneLabels:{ instrument:'🦜 Bird' },
     themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
     defaults:{ theme:'glow', birdMode:'free', callFrom:'random', phraseLen:3, tempo:1.0,
       song:'twinkle', pressFx:'bloom', mode:'notes', paint:false, yAxis:'none',
@@ -205,8 +205,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     onCell(col,row){
       fxCell(col,0);

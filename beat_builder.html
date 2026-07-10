@@ -241,8 +241,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     init(cv){
       ctx=cv.getContext('2d');

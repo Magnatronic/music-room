@@ -12,7 +12,7 @@
    Coordinates passed to splat() are normalised 0..1 with y pointing UP.
 */
 // The framework owns its DOM: inject it before any element lookups below.
-document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <button class=\"bbar\" id=\"btnInstrument\" data-mode=\"instrument\">🎵 Notes</button>\n    <button class=\"bbar\" id=\"btnSound\"      data-mode=\"sound\">🎸 Instrument</button>\n    <button class=\"bbar\" id=\"btnVisuals\"    data-mode=\"visuals\">✨ Visuals</button>\n    <button class=\"bbar\" id=\"btnPresets\"    data-mode=\"presets\">⭐ Presets</button>\n    <div class=\"qsep\"></div>\n    <div id=\"railExtra\"></div>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
+document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <button class=\"bbar\" id=\"btnInstrument\" data-mode=\"instrument\">🎵 Notes</button>\n    <button class=\"bbar\" id=\"btnSound\"      data-mode=\"sound\">🎛️ Sound</button>\n    <button class=\"bbar\" id=\"btnVisuals\"    data-mode=\"visuals\">✨ Visuals</button>\n    <button class=\"bbar\" id=\"btnPresets\"    data-mode=\"presets\">⭐ Presets</button>\n    <div class=\"qsep\"></div>\n    <div id=\"railExtra\"></div>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
 
 
 const canvas   = document.getElementById('c');
@@ -691,6 +691,26 @@ function appendBgControl(el){
   bgpk.addEventListener('click',e=>e.stopPropagation());
   bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
 }
+// Collapsed "Fine-tune" group at the bottom of every Visuals panel: set-once
+// controls (app sliders, background, performance diagnostics) stay one tap away
+// without crowding the everyday panel. Apps with their own buildVisuals call
+// appendFineTune(el) — optionally with a builder for their own advanced rows.
+// Open state is remembered for the session only, so panel rebuilds (chip taps
+// re-run buildVisualsPanel) don't snap it shut while someone is in it.
+let fineTuneOpen=false;
+function appendFineTune(el, build){
+  const det=document.createElement('details'); det.className='finetune'; det.open=fineTuneOpen;
+  const sum=document.createElement('summary'); sum.textContent='Fine-tune';
+  sum.addEventListener('click',e=>e.stopPropagation());
+  det.addEventListener('toggle',()=>{ fineTuneOpen=det.open; });
+  det.appendChild(sum);
+  const body=document.createElement('div');
+  if(build) build(body);
+  body.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
+  body.appendChild(makeToggle('Show performance','showStats',applyStats));
+  det.appendChild(body);
+  el.appendChild(det);
+}
 function buildVisualsPanel(){
   const el=document.getElementById('visualsContent'); el.innerHTML='';
   // An app can take over the Visuals panel (e.g. Song Grid's reward styles);
@@ -705,14 +725,14 @@ function buildVisualsPanel(){
     if(SETTINGS.zoneLook!=='off')
       el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
     el.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
-    appendBgControl(el);
+    appendFineTune(el, ft=>appendBgControl(ft));
   } else {
-    // Flow mode: painting IS the app — colours, motion styles and brush controls.
+    // Flow mode: painting IS the app — colours and styles stay up top, the
+    // per-app sliders tuck into Fine-tune.
     el.appendChild(makeToggle('Paint trails','paint',buildVisualsPanel));
     if(SETTINGS.paint!==false) appendColorControls(el);
-    appendBgControl(el);
     if(Anim.styles){
-      const h=document.createElement('div'); h.className='sectn'; h.textContent='Motion style'; el.appendChild(h);
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Style'; el.appendChild(h);
       const chips=document.createElement('div'); chips.className='chips';
       const activeKey=getCurrentStyleKey();
       for(const k in Anim.styles){
@@ -723,16 +743,19 @@ function buildVisualsPanel(){
       }
       el.appendChild(chips);
     }
-    // Animation-specific sliders/toggles
-    const h2=document.createElement('div'); h2.className='sectn'; h2.textContent=Anim.sectionLabel||'Controls'; el.appendChild(h2);
-    (Anim.schema||[]).forEach(it=>{
-      if(it.type==='toggle') el.appendChild(makeToggle(it.label,it.key));
-      else if(it.type==='preset-chips') el.appendChild(makeChips(it.label,it.key,it.options));
-      else el.appendChild(makeSlider(it));
+    appendFineTune(el, ft=>{
+      // Animation-specific sliders/toggles
+      if((Anim.schema||[]).length){
+        const h2=document.createElement('div'); h2.className='sectn'; h2.textContent=Anim.sectionLabel||'Controls'; ft.appendChild(h2);
+        Anim.schema.forEach(it=>{
+          if(it.type==='toggle') ft.appendChild(makeToggle(it.label,it.key));
+          else if(it.type==='preset-chips') ft.appendChild(makeChips(it.label,it.key,it.options));
+          else ft.appendChild(makeSlider(it));
+        });
+      }
+      appendBgControl(ft);
     });
   }
-  el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-  el.appendChild(makeToggle('Show performance','showStats',applyStats));
 }
 
 // ── Notes panel: which notes the student can play, and how they're laid out ─────

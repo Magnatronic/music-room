@@ -561,7 +561,7 @@ const Anim = (() => {
     lockMode:'notes',
     noVoices:true,                    // recordings ARE the sound
     hideRail:['clear'],
-    paneLabels:{ instrument:'📼 Pads', sound:'🎛️ Sound' },
+    paneLabels:{ instrument:'📼 Pads' },
     // Framework themes mirror the pad themes (flow-mode splats, first 5 colours)
     themes:(function(){ const t={};
       for(const k in PADTHEMES) t[k]={label:PADTHEMES[k].label,
@@ -623,8 +623,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     onCell(col,row){
       pokeSim();

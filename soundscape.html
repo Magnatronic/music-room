@@ -868,7 +868,7 @@ const Anim = (() => {
     lockMode:'notes',
     noVoices:true,
     hideRail:['clear'],
-    paneLabels:{ instrument:'🌿 Scenes', sound:'🎛️ Sound' },
+    paneLabels:{ instrument:'🌿 Scenes' },
     themes:{ calm:{label:'🌿 Calm', colors:[[0.4,0.7,0.9],[0.2,0.7,0.7],[0.6,0.8,0.4],[0.9,0.6,0.3],[0.6,0.5,0.8]]} },
     defaults:{ theme:'calm', scene:'calm', wind:6, visFx:true, remember:true, colWash:'bold',
       mode:'notes', paint:false, yAxis:'none', octaveRows:'2', noteCount:8,
@@ -945,8 +945,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     onCell(colIdx){
       getAudio(); pokeSim(); windOn=false;   // a touch always cancels the wind-down

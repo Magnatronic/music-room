@@ -22,6 +22,17 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
   with volume and pause controls in the Sound panel.
 - Mic apps require the room's external microphone and never output the mic signal to the
   speakers unless the app is explicitly designed for it (feedback risk).
+- **UI glossary — the same word always means the same thing** (from the 2026-07 UI review):
+  **Theme** = a colour palette (Ocean, Lava…). **Style** = a behaviour/motion preset (Calm,
+  Storm…). **Voice** = the timbre picker inside the Sound tab (Pure, Bell…). **Preset** = a
+  saved whole setup, usually per student. The rail is **Notes · Sound · Visuals · Presets** in
+  every app; apps may re-label *Notes* when the pane genuinely isn't notes ("Songs", "Chords",
+  "Scenes"), but the Sound tab keeps its name (icon variants allowed, e.g. Voice Visuals' 🔇).
+  The root-note chips are always labelled **"Starting note"**, never "Key".
+- **Fine-tune drawer**: set-once controls (app sliders, background colour, Performance quality,
+  stats) live in the collapsed `Fine-tune` disclosure at the bottom of the Visuals panel —
+  `appendFineTune(el, build?)` in framework.js. Keep the everyday top level to what changes
+  mid-session: Style chips, paint colours, and (Keys mode) zone/press feedback.
 
 ## Custom song import (framework feature) ✅ BUILT
 

@@ -787,7 +787,7 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
-      el.appendChild(makeChips('Visual style','visMode',VISMODES,()=>{ pokeSim(); buildVisualsPanel(); }));
+      el.appendChild(makeChips('Style','visMode',VISMODES,()=>{ pokeSim(); buildVisualsPanel(); }));
       el.appendChild(makeChips('Scene build-up (how much stays on screen)','buildup',
         {off:{label:'Just one'},gentle:{label:'Gentle'},full:{label:'Full scene'}},
         buildVisualsPanel));   // rebuild so tweak counts that depend on this stay true
@@ -858,8 +858,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     init(cv){
       ctx=cv.getContext('2d');

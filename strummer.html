@@ -279,7 +279,7 @@ const Anim = (() => {
     lockMode:'flow',                   // strings, not the Keys/Flow band grid
     noVoices:true,                     // plucks ARE the sound
     hideRail:['clear'],
-    paneLabels:{ instrument:'🎸 Chords', sound:'🎛️ Sound' },
+    paneLabels:{ instrument:'🎸 Chords' },
     themes:{ harp:{label:'🎸 Harp', colors:[[1,0.35,0.55],[0.95,0.8,0.2],[0.2,0.7,0.7],[0.55,0.4,0.85],[0.3,0.75,0.4]]} },
     defaults:{ theme:'harp', stringCount:15, curChord:'I',
       chord_I:true, chord_ii:false, chord_iii:false, chord_IV:true, chord_V:true, chord_vi:true,
@@ -288,7 +288,7 @@ const Anim = (() => {
     schema:[],
     // 🎸 Chords tab — key, register, strings, which chord buttons are offered
     buildInstrument(el){
-      el.appendChild(makeChips('Key','rootNote',rootOptions(),buildInstrumentPanel));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),buildInstrumentPanel));
       el.appendChild(makeChips('Register','octave',OCT_OPTS));
       el.appendChild(makeSlider({key:'stringCount',label:'How many strings',min:8,max:24,step:1,dp:0}));
       const h=document.createElement('div'); h.className='sectn'; h.textContent='Chord buttons offered'; el.appendChild(h);
@@ -323,8 +323,7 @@ const Anim = (() => {
       bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
       bgpk.addEventListener('click',e=>e.stopPropagation());
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
-      el.appendChild(makeChips('Performance','quality',QUALITY,()=>{ if(SETTINGS.quality!=='auto') setPerf(SETTINGS.quality); }));
-      el.appendChild(makeToggle('Show performance','showStats',applyStats));
+      appendFineTune(el);
     },
     init(cv){
       ctx=cv.getContext('2d');
