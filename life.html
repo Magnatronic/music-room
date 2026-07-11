@@ -398,6 +398,10 @@ const Anim = (() => {
       if (!ctx) return;
       syncGridToCellSize();
 
+      // While the game is playing it must keep evolving (and singing) even with
+      // no touches — opt out of the framework's 12 s idle sleep for that state.
+      if (SETTINGS.playing) pokeSim();
+
       // Advance generation if playing
       if (SETTINGS.playing) {
         genAccum += dt;
@@ -438,7 +442,9 @@ const Anim = (() => {
     },
 
     setQuality(level) {
-      audioBudget = level === 'high' ? 4 : level === 'med' ? 2 : 0;
+      // Never zero: one pluck per generation is negligible audio load, and a
+      // zero budget silently mutes birth notes when auto-quality drops to low.
+      audioBudget = level === 'high' ? 4 : level === 'med' ? 2 : 1;
     },
   };
 })();

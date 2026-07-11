@@ -472,6 +472,10 @@ const Anim = (() => {
     frame(dt){
       if(!ctx||W<2||H<2) return;
 
+      // A frozen mid-flight swarm reads as broken — flock is deliberately
+      // always-on (the framework's idle sleep suits touch-driven paint apps).
+      pokeSim();
+
       // Sync agent count to current setting + quality ceiling
       const desired=SETTINGS.count||500;
       const q=activeQuality();

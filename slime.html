@@ -424,6 +424,11 @@ void main(){
 
     frame(dt) {
       if (!gl || !agentFBO || !trailFBO) return;
+
+      // Agents explore continuously — the network growing is the whole show,
+      // so opt out of the framework's idle sleep (matches the old touch repo).
+      pokeSim();
+
       const key = SETTINGS.preset || 'dense';
       if (key !== activePresetKey) {
         activePresetKey = key;
