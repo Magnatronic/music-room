@@ -428,10 +428,35 @@ function startVoice(x,y){
     gain.gain.setValueAtTime(0.0001,t);
     gain.gain.linearRampToValueAtTime(V.gain,t+attackTime());
     if(V.pluck) gain.gain.exponentialRampToValueAtTime(0.0008, t+attackTime()+V.pluck*ringMul());
-    voices[vid]={nodes,lfo,gain,vol,pan,filt,freq,V};
+    voices[vid]={nodes,lfo,gain,vol,pan,filt,freq,V,lastStrike:t,strikeDist:0};
     soundingVoices++; updatePolyGain();
     return vid;
   }catch(e){ return 0; }
+}
+// Struck/plucked voices (Harp, Marimba, …) decay to silence by design, so a
+// finger DRAGGING without crossing note zones would go quiet mid-gesture.
+// Re-strike the envelope as the pointer travels — distance-based, so a fast
+// sweep rolls like a mallet roll / glissando while a resting finger decays
+// naturally like the real instrument.
+function restrikePluck(v,now){
+  const V=v.V;
+  const hold=p=>{
+    if(p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
+    p.setValueAtTime(p.value,now);
+  };
+  v.nodes.forEach(n=>{
+    if(n.mod){ hold(n.g.gain);
+      n.g.gain.linearRampToValueAtTime(v.freq*V.fm.depth,now+0.008);
+      n.g.gain.setTargetAtTime(v.freq*V.fm.depth*V.fm.decayTo,now+0.008,V.fm.decay);
+    } else if(n.decayTo!==undefined){ hold(n.g.gain);
+      n.g.gain.linearRampToValueAtTime(n.base,now+0.008);
+      n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.008,0.5);
+    }
+  });
+  const g=v.gain.gain; hold(g);
+  g.linearRampToValueAtTime(V.gain,now+0.012);
+  g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
+  v.lastStrike=now; v.strikeDist=0;
 }
 // How long the voice takes to travel to a new note in Flow mode. It always LANDS
 // exactly on scale notes (accurate at rest); glide only shapes the journey between
@@ -451,6 +476,11 @@ function moveVoice(vid,x,y,speed){
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
     if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
     if(yAxisMode()==='loud')   v.vol.gain.setTargetAtTime(yLoudness(y),now,0.08);
+    if(V.pluck){
+      // ~every 4.5% of screen travel, min 90 ms apart (no machine-gunning)
+      v.strikeDist=(v.strikeDist||0)+(speed||0);
+      if(v.strikeDist>0.045 && now-(v.lastStrike||0)>0.09) restrikePluck(v,now+0.012);
+    }
   }catch(e){}
 }
 // Keys-mode zone crossing: retune the SAME voice with a quick articulation dip,
@@ -489,6 +519,7 @@ function retuneVoice(vid,x,y){
     if(V.pluck){ // re-fire the pluck envelope so glissandos strike each note
       g.linearRampToValueAtTime(V.gain,now+0.012);
       g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
+      v.lastStrike=now; v.strikeDist=0;   // a zone crossing counts as a strike
     } else {     // brief dip so each zone still reads as its own note
       // 45% over 20 ms is deep enough to articulate but shallow/slow enough not
       // to read as a click when a fast swipe fires it several times a second
