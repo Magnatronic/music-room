@@ -223,34 +223,65 @@ const Anim = (() => {
     lastPreview=now; getAudio(); playShaped(pad);
   }
 
-  // ── beat recorder: pad hits as {pad index, ms offset}, looped on a timer ──
-  const REC_MAX=60000, REC_MAXEVENTS=400;
-  let recState='idle';                 // idle | armed (waiting for first hit) | rec
-  let recStart=0, recEvents=[], loop=null;      // loop = {events, len}
-  let playOn=false, playTimers=[], cycleTimer=null, cycleAt=0;
-  function recHit(idx){
-    if(recState==='armed'){ recState='rec'; recStart=performance.now();
+  // ── multi-layer beat looper ────────────────────────────────────────────────
+  // A song is a base loop plus overdub layers, each replayed through the synth
+  // (events, not audio, so the beat follows any later reshaping). song =
+  //   { base:<ms>, layers:[ {evs:[{i,o}], len} ] }
+  // where o is a hit's offset within its layer (0..len) and len is a whole
+  // multiple of base. All layers restart together every masterLen (the LCM of
+  // their lengths), anchored at originAt, so a 2-bar clap part stays phase-
+  // locked to the 1-bar kick — that's how "claps on alternate loops" works.
+  const REC_MAX=60000, MAX_BARS=8, MAX_LAYERS=8, MAX_EVENTS=600;
+  let recState='idle';                 // idle | armed | rec
+  let recStart=0, recEvents=[];
+  let song=null, originAt=0;           // originAt = the song's downbeat (t0)
+  let playOn=false, schedTimers=[], cycleTimer=null, cycleAt=0, plays=0;
+
+  function gcd(a,b){ a=Math.round(a); b=Math.round(b); while(b){ const t=b; b=a%b; a=t; } return a||1; }
+  function masterLen(){
+    if(!song||!song.layers.length) return song?song.base:0;
+    let m=1; song.layers.forEach(L=>{ const k=Math.max(1,Math.round(L.len/song.base)); m=m/gcd(m,k)*k; });
+    return m*song.base;
+  }
+
+  // Every layer records the same way: arm, then the first hit starts the clock
+  // at wherever the playhead is. For an overdub that phase (recStart-originAt)
+  // is baked into the hit offsets, so the layer sits exactly where you played
+  // it in the loop — no forced count-in swallowing early hits.
+  function recHit(idx){                 // called from onCell in play mode
+    if(recState==='armed'){
+      recState='rec'; recStart=performance.now();
+      if(!song) originAt=recStart;      // the very first layer defines the song's downbeat
       recEvents=[{i:idx,t:0}]; recUI(); return; }
-    if(recState==='rec'&&recEvents.length<REC_MAXEVENTS)
+    if(recState==='rec'&&recEvents.length<MAX_EVENTS)
       recEvents.push({i:idx,t:performance.now()-recStart});
   }
   function toggleRecord(){
-    if(recState==='idle'){ stopPlay(); recState='armed'; }   // old loop stays until replaced
-    else if(recState==='armed') recState='idle';             // second tap cancels
-    else { finishRec(); return; }
-    recUI();
+    if(recState==='rec'){ finishRec(); return; }
+    if(recState==='armed'){ recState='idle'; recUI(); return; }   // cancel arm
+    if(song&&!playOn) startPlay();       // hear the loop while you arm the overdub
+    recState='armed'; recUI();
   }
   function finishRec(){
     const evs=recEvents, stopAt=performance.now()-recStart;
     recState='idle'; recEvents=[];
-    if(evs.length){ loop={events:evs, len:loopLen(evs,stopAt)}; startPlay(); }
+    if(!evs.length){ recUI(); return; }
+    if(!song){                                      // finalise the FIRST layer → sets base
+      const len=loopLen(evs,stopAt);
+      song={ base:len, layers:[{ evs:evs.map(e=>({i:e.i,o:wrap(e.t,len)})), len }] };
+      startPlay();
+    } else if(song.layers.length<MAX_LAYERS){       // overdub → snap to whole bars
+      const base=song.base, len=Math.max(1,Math.min(MAX_BARS,Math.round(stopAt/base)))*base;
+      const p=recStart-originAt;                    // layer's phase from the song downbeat
+      song.layers.push({ evs:evs.map(e=>({i:e.i,o:wrap(p+e.t,len)})), len });
+      if(playOn) reschedule(); else startPlay();
+    }
     recUI();
   }
-  // The stop press always lands late, leaving dead space that breaks the pulse
-  // when the loop wraps. So the trailing gap is rounded to whole beats: loop
-  // end = last hit + the nearest multiple of the median interval between hits.
-  // Intentional end-rests survive (they round to 2, 3… beats); stop-press lag
-  // doesn't. One lone hit keeps the stop press as its repeat interval.
+  function wrap(t,len){ return ((t%len)+len)%len; }
+  // First layer only: the stop press lands late, leaving dead space that breaks
+  // the pulse on wrap. Round the trailing gap to whole beats of the player's own
+  // pulse (median hit interval). Deliberate end-rests survive; stop lag doesn't.
   function loopLen(evs,stopAt){
     const last=evs[evs.length-1].t;
     if(evs.length<2) return Math.max(stopAt,last+250);
@@ -261,40 +292,133 @@ const Anim = (() => {
     if(pulse<40) return Math.max(stopAt,last+250);   // degenerate: one dense roll
     return last+Math.max(1,Math.round((stopAt-last)/pulse))*pulse;
   }
-  function cancelRec(){ if(recState==='idle') return; recState='idle'; recEvents=[]; recUI(); }
+  function removeLastLayer(){
+    if(!song||!song.layers.length) return;
+    song.layers.pop();
+    if(!song.layers.length){ song=null; originAt=0; stopPlay(); }
+    else if(playOn) reschedule();
+    refreshRailButtons();
+  }
+  function cancelRec(){                  // abort any arm/recording; a playing song survives
+    if(recState==='idle') return;
+    recState='idle'; recEvents=[]; recUI();
+  }
   function recUI(){
     let p=document.getElementById('dpRecPill');
-    const msg = recState==='armed' ? '⏺ Ready — your first hit starts the recording'
-      : recState==='rec' ? '🔴 Recording… tap ⏺ again to finish' : '';
-    if(msg){
-      if(!p){ p=document.createElement('div'); p.id='dpRecPill'; document.body.appendChild(p); }
-      p.textContent=msg;
-    } else if(p) p.remove();
+    const n=song?song.layers.length+1:1;
+    const msg = recState==='armed'  ? (song?'⏺ Ready — tap a pad to start layer '+n:'⏺ Ready — your first hit starts the recording')
+      : recState==='rec'     ? (song?'🔴 Recording layer '+n+'… tap ⏺ to finish'
+                                     :'🔴 Recording… tap ⏺ again to finish') : '';
+    if(msg){ if(!p){ p=document.createElement('div'); p.id='dpRecPill'; document.body.appendChild(p); } p.textContent=msg; }
+    else if(p) p.remove();
     refreshRailButtons();
   }
-  // Each cycle re-anchors on cycleAt (+= len), so timer drift never accumulates.
+  // Scheduler: lay out one master cycle of timers at a time, re-anchored on
+  // cycleAt (+= masterLen) so drift never accumulates. Each layer repeats
+  // masterLen/len times within the cycle. We arm the next cycle LOOKAHEAD ms
+  // early so the downbeat (offset 0) is still in the future when its timer is
+  // set — otherwise a slightly-late setTimeout drops beat 1 on every wrap.
+  const LOOKAHEAD=110;
   function startPlay(){
-    if(!loop) return;
-    playOn=true; cycleAt=performance.now(); runCycle(); refreshRailButtons();
+    if(!song) return;
+    stopScheduler(); playOn=true;
+    const M=masterLen();
+    cycleAt=originAt+Math.floor((performance.now()-originAt)/M)*M;   // current cycle start (may be past)
+    scheduleCycle(); refreshRailButtons();
   }
-  function runCycle(){
-    if(!playOn||!loop) return;
-    const now=performance.now();
-    loop.events.forEach(ev=>playTimers.push(
-      setTimeout(()=>{ if(playOn) playBack(ev.i); }, Math.max(0,cycleAt+ev.t-now))));
-    cycleAt+=loop.len;
-    cycleTimer=setTimeout(runCycle, Math.max(0,cycleAt-now));
+  function reschedule(){ if(playOn) startPlay(); }
+  function scheduleCycle(){
+    if(!playOn||!song) return;
+    pokeSim();                          // keep the render loop (playhead) awake while playing
+    const now=performance.now(), M=masterLen();
+    song.layers.forEach(L=>{
+      const reps=Math.max(1,Math.round(M/L.len));
+      for(let q=0;q<reps;q++) L.evs.forEach(e=>{
+        const at=cycleAt+e.o+q*L.len;
+        // -60 tolerance: under a stall, a barely-late hit still fires (delay 0)
+        // rather than going silent; look-ahead keeps this from double-firing.
+        if(at>=now-60) schedTimers.push(setTimeout(()=>{ if(playOn) playBack(e.i); }, Math.max(0,at-now)));
+      });
+    });
+    cycleAt+=M;
+    cycleTimer=setTimeout(scheduleCycle, Math.max(0, cycleAt-performance.now()-LOOKAHEAD));
   }
-  function stopPlay(){
-    playOn=false;
-    playTimers.forEach(clearTimeout); playTimers=[]; clearTimeout(cycleTimer);
-    refreshRailButtons();
-  }
+  function stopScheduler(){ schedTimers.forEach(clearTimeout); schedTimers=[]; clearTimeout(cycleTimer); }
+  function stopPlay(){ playOn=false; stopScheduler(); refreshRailButtons(); }
   function playBack(i){
+    plays++; pokeSim();                 // pokeSim: dense/long loops stay awake between cycle ticks too
     const p=pads()[i]; if(!p) return;   // layout shrank since recording — skip
     playShaped(p);
-    const cols=NOTES.length, col=i%cols, row=gridRowCount()-1-Math.floor(i/cols);
-    flashCell(col,row); fxCell(col,row);
+    // While overdubbing, playback hits stay dark so only the live taps light up.
+    if(SETTINGS.loopFlash!==false && recState!=='rec'){
+      const cols=NOTES.length, col=i%cols, row=gridRowCount()-1-Math.floor(i/cols);
+      flashCell(col,row); fxCell(col,row);
+    }
+  }
+  // Loop playhead: a line sweeping across each base bar (the pulse), with a
+  // brief full-screen flash at the master downbeat so longer phrases are legible.
+  function drawPlayhead(){
+    if(SETTINGS.playhead===false||!song) return;
+    if(!playOn&&recState!=='rec') return;
+    const base=song.base, M=masterLen(), now=performance.now();
+    const x=wrap(now-originAt,base)/base*canvas.width;
+    ctx.save();
+    const mp=wrap(now-originAt,M);
+    if(mp<100){ ctx.globalAlpha=0.22*(1-mp/100); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+    ctx.globalAlpha=recState==='rec'?0.85:0.5;
+    ctx.fillStyle=recState==='rec'?'rgba(255,90,90,0.95)':'rgba(255,255,255,0.9)';
+    ctx.fillRect(x-2,0,4,canvas.height);
+    ctx.restore();
+  }
+  // Layer timeline: a centred overlay strip (above the pads, below the menu)
+  // with one lane per layer. Each lane shows that layer's hits across the whole
+  // master loop — dots in each hit's PAD colour, and the drum icons at the left
+  // say which layer is which — so a 2-bar clap layer visibly differs from a
+  // 1-bar kick. Own canvas so the pad tiles don't paint over it. Only shown
+  // while playing/recording (it vanishes when paused; a frozen playhead reads
+  // as broken).
+  function rr(g,x,y,w,h,r){ g.beginPath();
+    if(g.roundRect) g.roundRect(x,y,w,h,r); else g.rect(x,y,w,h); }
+  let stripEl=null;
+  function drawStrip(){
+    const on=SETTINGS.layerView!==false && song && song.layers.length && (playOn||recState==='rec');
+    if(!on){ if(stripEl) stripEl.style.display='none'; return; }
+    if(!stripEl){
+      stripEl=document.createElement('canvas'); stripEl.id='dpStrip';
+      stripEl.style.cssText='position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);'+
+        'z-index:8;pointer-events:none;border-radius:14px';
+      document.body.appendChild(stripEl);
+    }
+    stripEl.style.display='';
+    const laneH=40, padY=8, labelW=58, n=song.layers.length;
+    const cssW=Math.min(window.innerWidth-24,880), cssH=n*laneH+padY*2;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    stripEl.style.width=cssW+'px'; stripEl.style.height=cssH+'px';
+    const W=Math.round(cssW*dpr), H=Math.round(cssH*dpr);   // grow when layer count (height) changes, not just width
+    if(stripEl.width!==W||stripEl.height!==H){ stripEl.width=W; stripEl.height=H; }
+    const g=stripEl.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    g.clearRect(0,0,cssW,cssH);
+    g.fillStyle='rgba(10,12,18,0.92)'; rr(g,0,0,cssW,cssH,14); g.fill();   // opaque: pad tiles behind must not bleed through
+    const M=masterLen(), trackX=labelW, trackW=cssW-labelW-12, bars=Math.max(1,Math.round(M/song.base));
+    g.textBaseline='middle';
+    song.layers.forEach((L,i)=>{
+      const y=padY+i*laneH, cy=y+laneH/2;
+      g.fillStyle='rgba(255,255,255,0.05)'; rr(g,trackX,y+4,trackW,laneH-8,8); g.fill();
+      g.strokeStyle='rgba(255,255,255,0.12)'; g.lineWidth=1;                 // bar dividers
+      for(let b=1;b<bars;b++){ const x=trackX+b/bars*trackW; g.beginPath(); g.moveTo(x,y+5); g.lineTo(x,y+laneH-5); g.stroke(); }
+      const icons=[...new Set(L.evs.map(e=>{ const p=pads()[e.i]; return p?BY_KEY[p.drum].label:''; }))].filter(Boolean).slice(0,3).join('');
+      g.fillStyle='rgba(255,255,255,0.85)'; g.font='15px sans-serif'; g.fillText(icons||('L'+(i+1)),8,cy);
+      const reps=Math.max(1,Math.round(M/L.len));                            // hits across the master loop
+      for(let q=0;q<reps;q++) L.evs.forEach(e=>{
+        const pad=pads()[e.i], pc=pad?BY_KEY[pad.drum].color:[200,200,200];   // dot = the pad's colour
+        const x=trackX+((q*L.len+e.o)/M)*trackW;
+        g.fillStyle='rgb('+pc.join(',')+')';
+        g.beginPath(); g.arc(x,cy,5,0,7); g.fill();
+      });
+    });
+    const ph=trackX+(wrap(performance.now()-originAt,M)/M)*trackW;           // playhead across all lanes
+    g.strokeStyle='rgba(255,255,255,0.9)'; g.lineWidth=2;
+    g.beginPath(); g.moveTo(ph,padY); g.lineTo(ph,cssH-padY); g.stroke();
   }
 
   // ── edit mode (therapist: rail ✏️ → tap a pad → editor dialog) ──
@@ -393,7 +517,7 @@ const Anim = (() => {
   // the default kit and presets capture a whole custom one. padLayout '' is the
   // "migrate from older settings" sentinel — applyLayout resolves it.
   const DEFAULTS={ theme:'kit', padLayout:'', noteCount:4, btVolume:0.7, pressFx:'bloom',
-    padSounds:DEFAULT_PADS,
+    padSounds:DEFAULT_PADS, loopFlash:true, playhead:true, layerView:true,
     mode:'notes', paint:false, yAxis:'none', octaveRows:'1', zoneLook:'tint', colorMode:'note', showLabels:true };
 
   return {
@@ -407,22 +531,27 @@ const Anim = (() => {
     schema:[],
     bandColor(i){ const p=pads()[i]; return p?BY_KEY[p.drum].color:[200,200,200]; },
     bandLabel(i){ const p=pads()[i]; return p?BY_KEY[p.drum].label:''; },
-    _dbg(){ return {recState, playOn, loop:loop&&{len:loop.len, ts:loop.events.map(e=>e.t)}}; },
+    _dbg(){ return {recState, playOn, plays, base:song&&song.base, master:song?masterLen():0,
+      layers:song?song.layers.map(L=>({n:L.evs.length,len:L.len,o:L.evs.map(e=>Math.round(e.o))})):[]}; },
     railButtons:[
       { id:'dpedit', icon:()=>'✏️',
         title:()=>editMode?'Editing is ON — tap to go back to playing':'Edit pads: choose drums, shape sounds',
         active:()=>editMode,
         onClick(){ setEditMode(!editMode); } },
       { id:'dprec', icon:()=>recState==='rec'?'⏹':'⏺',
-        title:()=>recState==='idle'?'Record a beat (your first hit starts it)'
-          :recState==='armed'?'Armed — first hit starts recording · tap to cancel'
-          :'Recording — tap to finish and hear it loop',
+        title:()=>recState==='rec'?'Recording — tap to finish'
+          :recState==='armed'?(song?'Ready — tap a pad to start the new layer · tap to cancel':'Armed — first hit starts recording · tap to cancel')
+          :song?'Add another layer (starts on your first hit)':'Record a beat (your first hit starts it)',
         active:()=>recState!=='idle',
         onClick(){ if(!editMode) toggleRecord(); } },
       { id:'dpplay', icon:()=>playOn?'⏸':'▶',
-        title:()=>playOn?'Pause your beat':'Play your beat',
-        show:()=>!!loop, active:()=>playOn,
+        title:()=>playOn?'Pause the beat':'Play the beat',
+        show:()=>!!song, active:()=>playOn,
         onClick(){ if(playOn) stopPlay(); else startPlay(); } },
+      { id:'dpundo', icon:()=>'↩︎',
+        title:()=>'Remove the last layer',
+        show:()=>!!(song&&song.layers.length),
+        onClick(){ if(!editMode) removeLastLayer(); } },
     ],
     // 🥁 Drums tab — pad count, layout, backing track
     buildInstrument(el){
@@ -465,6 +594,9 @@ const Anim = (() => {
     buildVisuals(el){
       el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
       el.appendChild(makeToggle('Drum icons on pads','showLabels',buildBands));
+      el.appendChild(makeToggle('Show hits during playback','loopFlash'));
+      el.appendChild(makeToggle('Loop playhead','playhead'));
+      el.appendChild(makeToggle('Layer timeline','layerView'));
       const bgRow=document.createElement('div'); bgRow.className='swrow';
       const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
       bgpk.textContent='Background colour';
@@ -486,14 +618,17 @@ const Anim = (() => {
     splat(){},
     frame(dt){
       if(editMode&&SETTINGS.locked) setEditMode(false);   // lock always wins
-      if(SETTINGS.locked) cancelRec();   // …but a playing loop survives the lock
-      if(recState==='rec'&&performance.now()-recStart>REC_MAX) finishRec();
+      if(SETTINGS.locked&&recState!=='idle') cancelRec();  // …but a playing song survives the lock
+      // auto-stop a runaway take: MAX_BARS of the base loop (or REC_MAX for the first layer)
+      const cap=song?MAX_BARS*song.base:REC_MAX;
+      if(recState==='rec'&&performance.now()-recStart>cap) finishRec();
       // re-style fresh cells whenever the framework rebuilt the band grid
       const first=bandsEl.firstChild;
       if(first&&!first._styled) restyle();
       if(!ctx) return;
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);
+      drawPlayhead(); drawStrip();
     },
     reset(){
       if(!ctx) return;
