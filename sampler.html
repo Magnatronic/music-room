@@ -8,11 +8,14 @@
 <style>
 /* Pads look like pads: rounded tiles with a strong colour fill (the framework's
    default band tint is designed for translucent fullscreen apps and is far too
-   subtle here — see restyle(), which sets --a per pad). */
-.band.cell{border-radius:18px;margin:6px;
+   subtle here — see restyle(), which sets --a per pad).
+   Selectors use #bands .band (not .band.cell) because single-row layouts
+   have no .cell class — pads must look like pads in every layout. */
+#bands .band{border-radius:18px;margin:6px;
   box-shadow:inset 0 0 0 1px rgba(255,255,255,0.09)}
-.band.cell.held,.band.cell.flash{background:rgba(var(--c),0.85)}
-.band.cell .lbl{color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.45)}
+#bands .band.held,#bands .band.flash{background:rgba(var(--c),0.85)}
+#bands .band .lbl{color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.45);
+  top:50%;bottom:auto;transform:translate(-50%,-50%)}
 /* Looping state on the framework's band cells */
 .band.looping{animation:smLoop 1.6s ease-in-out infinite}
 @keyframes smLoop{0%,100%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.55)}50%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.15)}}
@@ -53,9 +56,9 @@
    students can't erase pads); in edit mode, tapping a pad opens an editor
    dialog: record from the mic (up to 20 s), trim by dragging the waveform's
    start/end handles (silence is auto-trimmed on save), label the pad (emoji or
-   short word), set pitch/speed. Looping pads get tempo controls automatically:
-   BPM starts at the loop's natural tempo and retimes it for backing tracks.
-   The kit persists in localStorage and can be exported/imported as .json.
+   short word), set pitch/speed, and mark it to loop while playing (tap the pad
+   again to stop). Tempo/BPM retiming existed once and was stripped — unused in
+   real sessions. The kit persists in localStorage, export/import as .json.
 
    The student's own voice/sounds become the instrument — recordings play as
    AudioBuffers through the framework master chain (volume, effects, limiter).
@@ -64,7 +67,17 @@ const Anim = (() => {
 
   const KIT_KEY='kit:'+location.pathname.split('/').pop();
   const REC_MAX=20;                    // seconds per recording
-  const LAYOUTS={'4':{label:'4 (2×2)',cols:2,rows:2},'6':{label:'6 (3×2)',cols:3,rows:2},'9':{label:'9 (3×3)',cols:3,rows:3}};
+  // One chip per valid arrangement (same UI as Drums). Single rows suit
+  // switch/eye-gaze left-to-right scanning; grids give bigger targets for
+  // imprecise motor control (the surface is a touchscreen projector).
+  const LAYOUTS={
+    r3:{label:'3',cols:3,rows:1}, r4:{label:'4',cols:4,rows:1}, r5:{label:'5',cols:5,rows:1},
+    r6:{label:'6',cols:6,rows:1}, r7:{label:'7',cols:7,rows:1}, r8:{label:'8',cols:8,rows:1},
+    r9:{label:'9',cols:9,rows:1},
+    g4:{label:'2×2',cols:2,rows:2}, g6:{label:'3×2',cols:3,rows:2},
+    g8:{label:'4×2',cols:4,rows:2}, g9:{label:'3×3',cols:3,rows:3}};
+  const ROW_LAYOUTS={}, GRID_LAYOUTS={};
+  for(const k in LAYOUTS) (LAYOUTS[k].rows>1?GRID_LAYOUTS:ROW_LAYOUTS)[k]=LAYOUTS[k];
   // Pad colour themes (picked in ✨ Visuals, like Fluid's themes). 9 colours
   // each — one per pad slot, cycling.
   const PADTHEMES={
@@ -76,7 +89,6 @@ const Anim = (() => {
   };
   const EMPTYCOL=[105,110,120];
   const ICONS=['🔊','🎤','🗣️','🎵','🥁','🎸','🎹','🎺','🎻','🪗','🔔','👏'];
-  const BEATS=[1,2,4,8,16];
 
   let ctx=null, kit=loadKit(), buffers=[], playing={};
   let editMode=false, dlgPad=-1, dlgEl=null;
@@ -113,7 +125,8 @@ const Anim = (() => {
   }
 
   // ── layout: pads on the framework's cell grid ──
-  function layout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS['6']; }
+  // Old saved settings stored grid layouts as '4'/'6'/'9' — map them to g4/g6/g9.
+  function layout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS['g'+SETTINGS.padLayout]||LAYOUTS.g6; }
   function padCount(){ const L=layout(); return L.cols*L.rows; }
   function padOf(col,row){ const rows=gridRowCount(); return (rows-1-row)*NOTES.length+col; }
   function applyLayout(){
@@ -155,33 +168,9 @@ const Anim = (() => {
     b=Math.max(a+0.05,Math.min(b,buf.duration));
     return [a,b];
   }
-  // Looping pads play at a tempo: the loop is sped up/slowed down so the
-  // trimmed section lasts exactly `beats` at `bpm`. When loop is turned on,
-  // bpm is initialised to the loop's natural tempo, so nothing changes until
-  // the therapist moves the slider. Non-loop pads use the pitch slider.
-  function padRate(pad,buf){
-    if(pad.loop&&pad.bpm){
-      const tb=trimBounds(pad,buf), target=(pad.beats||4)*60/pad.bpm;
-      return Math.max(0.25,Math.min(4,(tb[1]-tb[0])/target));
-    }
-    return pad.pitch||1;
-  }
-  function naturalBpm(pad,buf){
-    const tb=trimBounds(pad,buf);
-    return Math.max(30,Math.min(240,(pad.beats||4)*60/(tb[1]-tb[0])));
-  }
-  // First-time loop: pick a beat count whose natural tempo lands in a musical
-  // range (near 110 BPM), so the readout makes sense for any clip length.
-  function pickNatural(len){
-    let best=null;
-    for(const b of BEATS){
-      const bpm=b*60/len;
-      if(bpm<30||bpm>240) continue;
-      const score=Math.abs(Math.log(bpm/110));
-      if(!best||score<best.score) best={beats:b,bpm,score};
-    }
-    return best||{beats:4,bpm:Math.max(30,Math.min(240,240/len))};
-  }
+  // Pitch/speed applies to loops and one-shots alike. (BPM retiming for backing
+  // tracks lived here once — stripped as unused; old kits' bpm fields are ignored.)
+  function padRate(pad){ return pad.pitch||1; }
   function stopPad(idx){
     const pl=playing[idx]; if(!pl) return;
     delete playing[idx];
@@ -199,7 +188,7 @@ const Anim = (() => {
       if(wasLooping){ restyle(); return; }   // tapping a looping pad stops it
       const tb=trimBounds(pad,buf);
       const src=ac.createBufferSource(); src.buffer=buf;
-      src.playbackRate.value=padRate(pad,buf);
+      src.playbackRate.value=padRate(pad);
       if(pad.loop){ src.loop=true; src.loopStart=tb[0]; src.loopEnd=tb[1]; }
       const g=ac.createGain(); g.gain.value=1;
       src.connect(g); g.connect(masterGain);
@@ -222,7 +211,7 @@ const Anim = (() => {
       stopPad(idx);
       const tb=trimBounds(pad,buf);
       const src=ac.createBufferSource(); src.buffer=buf;
-      src.playbackRate.value=padRate(pad,buf);
+      src.playbackRate.value=padRate(pad);
       const g=ac.createGain(); src.connect(g); g.connect(masterGain);
       soundingVoices++; updatePolyGain();
       src.onended=()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
@@ -239,7 +228,8 @@ const Anim = (() => {
       if(recorder&&recorder.state!=='inactive') recorder.stop();   // saves the take
       if(recStream){ recStream.getTracks().forEach(t=>t.stop()); recStream=null; }
       closeEditor();
-    } else toast('Edit mode: tap a pad to record or change its sound.',4);
+    }
+    showEditIndicator(v);              // pulsing pads + persistent pill (framework)
     refreshRailButtons(); restyle();
   }
 
@@ -286,8 +276,7 @@ const Anim = (() => {
       const prev=kit.pads[idx]||{};
       kit.pads[idx]={d:abToB64(ab),mime:blob.type,
         icon:prev.icon||'🔊',
-        pitch:prev.pitch||1,loop:!!prev.loop,
-        bpm:prev.bpm||null,beats:prev.beats||4};
+        pitch:prev.pitch||1,loop:!!prev.loop};
       buffers[idx]=null;
       ensureDecoded(idx).then(buf=>{
         const t=autoTrim(buf);
@@ -388,7 +377,7 @@ const Anim = (() => {
       const t=posToT(e), tb=trimBounds(pad,buf);
       if(drag==='a'){ pad.trimA=Math.min(t,tb[1]-0.05); if(pad.trimA<0.02) pad.trimA=0; }
       else { pad.trimB=Math.max(t,tb[0]+0.05); if(pad.trimB>buf.duration-0.02) pad.trimB=buf.duration; }
-      storeKitSoon(); drawWave(cv,pad,buf); updateSyncCap(pad,buf);
+      storeKitSoon(); drawWave(cv,pad,buf);
     };
     cv.addEventListener('pointerdown',e=>{
       const t=posToT(e), tb=trimBounds(pad,buf);
@@ -398,15 +387,6 @@ const Anim = (() => {
     cv.addEventListener('pointermove',move);
     cv.addEventListener('pointerup',()=>{ if(drag){ drag=null; storeKit(); previewOnce(dlgPad); } });
     cv.addEventListener('pointercancel',()=>{ drag=null; });
-  }
-  function syncCapText(pad,buf){
-    const rate=padRate(pad,buf), target=(pad.beats||4)*60/(pad.bpm||100);
-    return (pad.beats||4)+' beats at '+Math.round(pad.bpm||100)+' BPM = a '+
-      target.toFixed(1)+' s loop, playing at '+rate.toFixed(2)+'× speed. Speed also changes the pitch.';
-  }
-  function updateSyncCap(pad,buf){
-    const c=document.getElementById('smSyncCap');
-    if(c&&buf) c.textContent=syncCapText(pad,buf);
   }
   function buildDlgBody(){
     const card=dlgEl&&dlgEl.querySelector('#smDlg'); if(!card) return;
@@ -465,44 +445,12 @@ const Anim = (() => {
     card.appendChild(li);
 
     const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Playback'; card.appendChild(h2);
-    if(!pad.loop)
-      kslider(card,'Pitch / speed',()=>pad.pitch||1,v=>{ pad.pitch=v; storeKitSoon(); previewOnce(idx); },0.5,2,0.05);
-    ktoggle(card,'Loop while playing',()=>!!pad.loop,v=>{
+    kslider(card,'Pitch / speed',()=>pad.pitch||1,v=>{ pad.pitch=v; storeKitSoon(); previewOnce(idx); },0.5,2,0.05);
+    ktoggle(card,'Loop while playing (tap the pad to stop)',()=>!!pad.loop,v=>{
       pad.loop=v;
-      if(!v){ stopPad(idx); storeKit(); restyle(); buildDlgBody(); return; }
-      ensureDecoded(idx).then(buf=>{
-        if(!pad.bpm){
-          const tb=trimBounds(pad,buf), n=pickNatural(tb[1]-tb[0]);
-          pad.beats=n.beats; pad.bpm=n.bpm;
-        }
-        storeKit(); restyle(); buildDlgBody();
-      }).catch(()=>{ storeKit(); restyle(); buildDlgBody(); });
+      if(!v) stopPad(idx);
+      storeKit(); restyle();
     });
-    if(pad.loop){
-      const bl=document.createElement('div'); bl.className='sectn'; bl.textContent='Loop tempo (for backing tracks)'; card.appendChild(bl);
-      if(!pad.bpm)   // pads looped before tempo existed: initialise once
-        ensureDecoded(idx).then(buf=>{
-          const tb=trimBounds(pad,buf), n=pickNatural(tb[1]-tb[0]);
-          pad.beats=n.beats; pad.bpm=n.bpm; storeKit();
-          if(dlgPad===idx) buildDlgBody();
-        }).catch(()=>{});
-      kslider(card,'Tempo (BPM)',()=>pad.bpm||100,v=>{
-        pad.bpm=v; storeKitSoon();
-        ensureDecoded(idx).then(b=>updateSyncCap(pad,b));
-      },30,240,1,v=>String(Math.round(v)));
-      const bc=document.createElement('div'); bc.className='chips';
-      BEATS.forEach(b=>bc.appendChild(chip(b+(b===1?' beat':' beats'),(pad.beats||4)===b,()=>{
-        pad.beats=b; storeKit(); buildDlgBody(); previewOnce(idx); })));
-      bc.appendChild(chip('↺ Natural speed',false,()=>{
-        ensureDecoded(idx).then(buf=>{
-          pad.bpm=naturalBpm(pad,buf); storeKit(); buildDlgBody(); previewOnce(idx);
-        }).catch(()=>{});
-      }));
-      card.appendChild(bc);
-      const cap=document.createElement('div'); cap.id='smSyncCap'; cap.className='cap';
-      cap.textContent='…'; card.appendChild(cap);
-      ensureDecoded(idx).then(b=>updateSyncCap(pad,b)).catch(()=>{});
-    }
   }
 
   // ── kit export / import ──
@@ -567,7 +515,7 @@ const Anim = (() => {
       for(const k in PADTHEMES) t[k]={label:PADTHEMES[k].label,
         colors:PADTHEMES[k].pads.slice(0,5).map(c=>c.map(v=>v/255))};
       return t; })(),
-    defaults:{ theme:'bright', padLayout:'6', pressFx:'bloom', padFill:0.6,
+    defaults:{ theme:'bright', padLayout:'g6', pressFx:'bloom', padFill:0.6,
       mode:'notes', paint:false, yAxis:'octaves', octaveRows:'2', noteCount:3,
       zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major' },
     schema:[],
@@ -581,7 +529,11 @@ const Anim = (() => {
       pads:kit.pads.map(p=>!!p),playing:Object.keys(playing).length}; },
     // 📼 Pads tab
     buildInstrument(el){
-      el.appendChild(makeChips('How many pads','padLayout',LAYOUTS,applyLayout));
+      // Both chip groups drive the same setting; rebuild the pane on change so
+      // the highlight moves between groups.
+      const relayout=()=>{ applyLayout(); buildInstrumentPanel(); };
+      el.appendChild(makeChips('Pads in one row','padLayout',ROW_LAYOUTS,relayout));
+      el.appendChild(makeChips('Pads in a grid','padLayout',GRID_LAYOUTS,relayout));
       const hint=document.createElement('div');
       hint.style.cssText='color:rgba(255,255,255,0.5);font:13px/1.5 sans-serif;margin-bottom:14px';
       hint.textContent='To record or change sounds: tap the ✏️ button on the left rail, then tap a pad.';

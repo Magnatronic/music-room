@@ -5,6 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Drum Pads – Music Room</title>
 <link rel="stylesheet" href="framework.css">
+<style>
+/* Pad editor dialog — same look as the Sampler's editor */
+#dpOv{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.55);
+  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+#dpDlg{width:min(440px,94vw);max-height:88vh;overflow-y:auto;
+  background:rgba(17,19,27,0.97);border:1px solid rgba(255,255,255,0.16);
+  border-radius:20px;padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,0.5);
+  color:rgba(255,255,255,0.9);font:14px sans-serif}
+#dpDlg .dlghead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+#dpDlg .dlghead .ttl{font-size:16px;font-weight:600}
+/* Recording status pill — like the framework's edit pill, but red-rimmed */
+#dpRecPill{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:55;
+  background:rgba(0,0,0,0.78);border:1px solid rgba(255,80,80,0.7);color:rgba(255,255,255,0.95);
+  font:14px sans-serif;padding:10px 18px;border-radius:14px;max-width:86vw;text-align:center;pointer-events:none}
+</style>
 </head>
 <body>
 <script src="framework.js"></script>
@@ -15,7 +30,25 @@
    across pads for rolls. All drums are synthesised (no samples), routed through
    the framework's master chain (volume, effects, auto-mixer, limiter).
 
-   Menu: 🥁 Drums (pad count + backing track) · 🎸 Instrument (effects/volume,
+   Editing follows the Sampler pattern: the therapist toggles the rail ✏️ button
+   into EDIT mode (the rail is hidden by the session lock, so students can't
+   change pads), then taps a pad to open its editor dialog: choose which drum it
+   plays and shape that pad's pitch / length / tone. Shaping is stored PER PAD
+   (inside SETTINGS.padSounds, so presets capture a whole custom kit) — two pads
+   can be the same drum at different pitches.
+
+   Layout: 2–8 pads in one row (best for left-to-right switch/eye-gaze scanning)
+   or a 2-row grid for even counts (bigger targets for imprecise motor control).
+   Pad 1 is top-left, reading order — same convention as the Sampler.
+
+   Beat recorder (rail ⏺): EVENT recording, not audio — pad hits are captured
+   with timestamps and replayed through the synth, so the beat follows any later
+   reshaping, needs no mic permission, and the pads flash in time. ⏺ arms; the
+   first hit starts the clock (no dead air); ⏺ again sets the loop length and it
+   plays back immediately. ▶/⏸ toggles the loop; recording again replaces it.
+   Session-only, like the backing track.
+
+   Menu: 🥁 Drums (pad count/layout + backing track) · 🎛️ Sound (effects/volume,
    no Voice — drums are the voice) · ✨ Visuals (press effect etc) · ⭐ Presets.
    Backing track: the therapist loads their own MP3 from disk — nothing bundled,
    still fully offline. Session-only (file permissions can't persist).
@@ -23,7 +56,7 @@
 const Anim = (() => {
 
   // Default pad order chosen so few pads = the most useful kit (2 = kick + snare);
-  // the therapist can reassign any drum to any pad in the Drums tab.
+  // the therapist can reassign any drum to any pad in its editor.
   const KIT=[
     {key:'kick',   label:'🥁', name:'Kick',    color:[226,28,28]},
     {key:'snare',  label:'🪘', name:'Snare',   color:[245,209,23]},
@@ -35,15 +68,74 @@ const Anim = (() => {
     {key:'crash',  label:'💥', name:'Crash',   color:[200,200,210]},
   ];
   const BY_KEY={}; KIT.forEach(d=>BY_KEY[d.key]=d);
-  const DEFAULT_PADS=KIT.map(d=>d.key);
-  // Per-drum shaping macros (saved in SETTINGS -> presets): every frequency in a
-  // recipe scales by pitch, every decay/stop time by len, filter cutoffs by tone.
-  function mulOf(key){ return {
-    pitch: SETTINGS['tw_'+key+'_pitch']||1,
-    len:   SETTINGS['tw_'+key+'_len']||1,
-    tone:  SETTINGS['tw_'+key+'_tone']||1 }; }
+  const DEFAULT_PADS=KIT.map(d=>({drum:d.key,pitch:1,len:1,tone:1}));
 
   let ctx=null, btAudio=null, btName='';
+  let editMode=false, dlgPad=-1, dlgEl=null;
+
+  // ── per-pad kit: SETTINGS.padSounds is an array of {drum,pitch,len,tone} ──
+  // Older saved settings stored an array of drum-key strings with shared
+  // per-drum macros in tw_<key>_* — normalise those into per-pad objects.
+  function normPad(p,i){
+    if(typeof p==='string') p={drum:p,
+      pitch:SETTINGS['tw_'+p+'_pitch'], len:SETTINGS['tw_'+p+'_len'], tone:SETTINGS['tw_'+p+'_tone']};
+    if(!p||!BY_KEY[p.drum]) p=DEFAULT_PADS[i%KIT.length];
+    return {drum:p.drum, pitch:+p.pitch||1, len:+p.len||1, tone:+p.tone||1};
+  }
+  function padList(){                            // all 8 slots, normalised
+    const arr=Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:[];
+    const out=[];
+    for(let i=0;i<KIT.length;i++) out.push(normPad(arr[i]===undefined?DEFAULT_PADS[i]:arr[i],i));
+    return out;
+  }
+  function padCount(){ const L=curLayout(); return L.cols*L.rows; }
+  function pads(){ return padList().slice(0,padCount()); }
+  function setPad(i,pad){
+    const full=padList(); full[i]=pad; SETTINGS.padSounds=full; saveSettings();
+  }
+
+  // ── layout: one chip per valid arrangement (same UI as the Sampler) ──
+  // Single rows suit switch/eye-gaze left-to-right scanning; grids give bigger
+  // targets for imprecise motor control (the surface is a touchscreen projector).
+  const LAYOUTS={
+    r2:{label:'2',cols:2,rows:1}, r3:{label:'3',cols:3,rows:1}, r4:{label:'4',cols:4,rows:1},
+    r5:{label:'5',cols:5,rows:1}, r6:{label:'6',cols:6,rows:1}, r7:{label:'7',cols:7,rows:1},
+    r8:{label:'8',cols:8,rows:1},
+    g4:{label:'2×2',cols:2,rows:2}, g6:{label:'3×2',cols:3,rows:2}, g8:{label:'4×2',cols:4,rows:2}};
+  const ROW_LAYOUTS={}, GRID_LAYOUTS={};
+  for(const k in LAYOUTS) (LAYOUTS[k].rows>1?GRID_LAYOUTS:ROW_LAYOUTS)[k]=LAYOUTS[k];
+  function curLayout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS.r4; }
+  function applyLayout(){
+    if(!LAYOUTS[SETTINGS.padLayout]){
+      // migrate older settings: padTotal/padRows (short-lived interim format),
+      // else noteCount — the original pad-count key, which now means COLUMNS
+      // as everywhere in the framework.
+      const n=Math.max(2,Math.min(8,Math.round(SETTINGS.padTotal||SETTINGS.noteCount)||4));
+      SETTINGS.padLayout=(String(SETTINGS.padRows)==='2'&&LAYOUTS['g'+n])?'g'+n:'r'+n;
+    }
+    const L=curLayout();
+    SETTINGS.noteCount=L.cols; SETTINGS.octaveRows=String(L.rows);
+    SETTINGS.yAxis=L.rows>1?'octaves':'none';
+    saveSettings(); refreshMusic();
+    if(dlgPad>=padCount()) closeEditor();
+  }
+  // Pad 1 is top-left (reading order): buildBands appends the top row first but
+  // indexes it as row rows-1. Same mapping as the Sampler.
+  function padOf(col,row){ return (gridRowCount()-1-row)*NOTES.length+col; }
+  // The framework tints/labels bands per COLUMN; with two rows each cell needs
+  // its own drum colour + icon, so re-style every cell after any buildBands
+  // (frame() re-runs this when the cells are fresh — see the _styled marker).
+  function restyle(){
+    const rows=gridRowCount(), cols=NOTES.length, list=pads();
+    bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
+      const cr=d.dataset.cell.split('-'), p=list[(rows-1-cr[1])*cols+ +cr[0]];
+      d._styled=true;
+      if(!p) return;
+      d.style.setProperty('--c',BY_KEY[p.drum].color.join(','));
+      const l=d.querySelector('.lbl');
+      if(l) l.textContent=BY_KEY[p.drum].label;
+    });
+  }
 
   // ── synthesised drums, routed into the framework master chain ──
   let noiseBuf=null;
@@ -122,13 +214,167 @@ const Anim = (() => {
       return t+2.0*m.len;
     },
   };
-  function padKeys(){
-    const arr=Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:DEFAULT_PADS;
-    return arr.slice(0, Math.max(2,Math.min(8,Math.round(SETTINGS.noteCount)||4)));
+  function playShaped(pad){ if(DRUMS[pad.drum]) hit((ac,t,out)=>DRUMS[pad.drum](ac,t,out,pad)); }
+
+  let lastPreview=0;
+  function preview(pad){                       // throttled so slider drags don't machine-gun
+    const now=performance.now();
+    if(now-lastPreview<160) return;
+    lastPreview=now; getAudio(); playShaped(pad);
   }
-  function pads(){ return padKeys().map(k=>BY_KEY[k]||KIT[0]); }
-  function playDrum(key){ if(DRUMS[key]) hit((ac,t,out)=>DRUMS[key](ac,t,out,mulOf(key))); }
-  function playPad(col){ const p=pads()[col]; if(p) playDrum(p.key); }
+
+  // ── beat recorder: pad hits as {pad index, ms offset}, looped on a timer ──
+  const REC_MAX=60000, REC_MAXEVENTS=400;
+  let recState='idle';                 // idle | armed (waiting for first hit) | rec
+  let recStart=0, recEvents=[], loop=null;      // loop = {events, len}
+  let playOn=false, playTimers=[], cycleTimer=null, cycleAt=0;
+  function recHit(idx){
+    if(recState==='armed'){ recState='rec'; recStart=performance.now();
+      recEvents=[{i:idx,t:0}]; recUI(); return; }
+    if(recState==='rec'&&recEvents.length<REC_MAXEVENTS)
+      recEvents.push({i:idx,t:performance.now()-recStart});
+  }
+  function toggleRecord(){
+    if(recState==='idle'){ stopPlay(); recState='armed'; }   // old loop stays until replaced
+    else if(recState==='armed') recState='idle';             // second tap cancels
+    else { finishRec(); return; }
+    recUI();
+  }
+  function finishRec(){
+    const evs=recEvents, stopAt=performance.now()-recStart;
+    recState='idle'; recEvents=[];
+    if(evs.length){ loop={events:evs, len:loopLen(evs,stopAt)}; startPlay(); }
+    recUI();
+  }
+  // The stop press always lands late, leaving dead space that breaks the pulse
+  // when the loop wraps. So the trailing gap is rounded to whole beats: loop
+  // end = last hit + the nearest multiple of the median interval between hits.
+  // Intentional end-rests survive (they round to 2, 3… beats); stop-press lag
+  // doesn't. One lone hit keeps the stop press as its repeat interval.
+  function loopLen(evs,stopAt){
+    const last=evs[evs.length-1].t;
+    if(evs.length<2) return Math.max(stopAt,last+250);
+    const iois=[];
+    for(let i=1;i<evs.length;i++) iois.push(evs[i].t-evs[i-1].t);
+    iois.sort((a,b)=>a-b);
+    const pulse=iois[(iois.length-1)>>1];
+    if(pulse<40) return Math.max(stopAt,last+250);   // degenerate: one dense roll
+    return last+Math.max(1,Math.round((stopAt-last)/pulse))*pulse;
+  }
+  function cancelRec(){ if(recState==='idle') return; recState='idle'; recEvents=[]; recUI(); }
+  function recUI(){
+    let p=document.getElementById('dpRecPill');
+    const msg = recState==='armed' ? '⏺ Ready — your first hit starts the recording'
+      : recState==='rec' ? '🔴 Recording… tap ⏺ again to finish' : '';
+    if(msg){
+      if(!p){ p=document.createElement('div'); p.id='dpRecPill'; document.body.appendChild(p); }
+      p.textContent=msg;
+    } else if(p) p.remove();
+    refreshRailButtons();
+  }
+  // Each cycle re-anchors on cycleAt (+= len), so timer drift never accumulates.
+  function startPlay(){
+    if(!loop) return;
+    playOn=true; cycleAt=performance.now(); runCycle(); refreshRailButtons();
+  }
+  function runCycle(){
+    if(!playOn||!loop) return;
+    const now=performance.now();
+    loop.events.forEach(ev=>playTimers.push(
+      setTimeout(()=>{ if(playOn) playBack(ev.i); }, Math.max(0,cycleAt+ev.t-now))));
+    cycleAt+=loop.len;
+    cycleTimer=setTimeout(runCycle, Math.max(0,cycleAt-now));
+  }
+  function stopPlay(){
+    playOn=false;
+    playTimers.forEach(clearTimeout); playTimers=[]; clearTimeout(cycleTimer);
+    refreshRailButtons();
+  }
+  function playBack(i){
+    const p=pads()[i]; if(!p) return;   // layout shrank since recording — skip
+    playShaped(p);
+    const cols=NOTES.length, col=i%cols, row=gridRowCount()-1-Math.floor(i/cols);
+    flashCell(col,row); fxCell(col,row);
+  }
+
+  // ── edit mode (therapist: rail ✏️ → tap a pad → editor dialog) ──
+  function setEditMode(v){
+    if(v===editMode) return;
+    editMode=v;
+    if(v) cancelRec();                 // editing taps must not land in a recording
+    if(!v) closeEditor();
+    showEditIndicator(v);              // pulsing pads + persistent pill (framework)
+    refreshRailButtons();
+  }
+
+  // ── editor dialog ──
+  function openEditor(idx){
+    dlgPad=idx;
+    if(!dlgEl){
+      dlgEl=document.createElement('div'); dlgEl.id='dpOv';
+      dlgEl.addEventListener('pointerdown',e=>{ if(e.target===dlgEl) closeEditor(); });
+      const card=document.createElement('div'); card.id='dpDlg';
+      dlgEl.appendChild(card); document.body.appendChild(dlgEl);
+    }
+    buildDlgBody();
+  }
+  function closeEditor(){
+    if(dlgEl){ dlgEl.remove(); dlgEl=null; }
+    dlgPad=-1;
+  }
+  function chip(txt,active,fn){
+    const c=document.createElement('div'); c.className='chip'+(active?' active':'');
+    c.textContent=txt;
+    c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); fn(c); });
+    return c;
+  }
+  // Slider over the pad object (kit data lives inside a SETTINGS array, so the
+  // framework's makeSlider — which needs a flat SETTINGS key — doesn't apply).
+  function kslider(el,label,get,set,min,max,step){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val'; val.textContent=(+get()).toFixed(2);
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
+    inp.addEventListener('input',()=>{ set(parseFloat(inp.value)); val.textContent=(+get()).toFixed(2); });
+    row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+  }
+  function buildDlgBody(){
+    const card=dlgEl&&dlgEl.querySelector('#dpDlg'); if(!card) return;
+    card.innerHTML='';
+    const idx=dlgPad, pad=pads()[idx]; if(!pad) return;
+    const meta=BY_KEY[pad.drum];
+
+    const head=document.createElement('div'); head.className='dlghead';
+    const ttl=document.createElement('div'); ttl.className='ttl';
+    ttl.textContent=meta.label+' Pad '+(idx+1)+' — '+meta.name;
+    const x=document.createElement('button'); x.className='btn'; x.textContent='✕';
+    x.title='Close'; x.addEventListener('click',e=>{ e.stopPropagation(); closeEditor(); });
+    head.appendChild(ttl); head.appendChild(x); card.appendChild(head);
+
+    const h=document.createElement('div'); h.className='sectn'; h.textContent='Drum (tap to change & hear)'; card.appendChild(h);
+    const row=document.createElement('div'); row.className='chips';
+    KIT.forEach(d=>row.appendChild(chip(d.label+' '+d.name,d.key===pad.drum,()=>{
+      pad.drum=d.key; setPad(idx,pad);
+      playShaped(pad); restyle(); buildDlgBody();   // restyle: new icon/colour on the pad
+    })));
+    card.appendChild(row);
+
+    const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Shape this pad'; card.appendChild(h2);
+    const hear=()=>preview(pad);
+    kslider(card,'Pitch (deep ↔ high)',      ()=>pad.pitch,v=>{ pad.pitch=v; setPad(idx,pad); hear(); },0.5,2,0.05);
+    kslider(card,'Length (tight ↔ ringing)', ()=>pad.len,  v=>{ pad.len=v;   setPad(idx,pad); hear(); },0.4,2.5,0.05);
+    kslider(card,'Tone (soft ↔ sharp)',      ()=>pad.tone, v=>{ pad.tone=v;  setPad(idx,pad); hear(); },0.5,2,0.05);
+
+    const rst=document.createElement('div'); rst.className='chips';
+    rst.appendChild(chip('▶ Play',false,()=>playShaped(pad)));
+    rst.appendChild(chip('↺ Reset this pad',false,()=>{
+      pad.pitch=1; pad.len=1; pad.tone=1; setPad(idx,pad);
+      playShaped(pad); buildDlgBody(); }));
+    card.appendChild(rst);
+  }
 
   // ── backing track: therapist's own file, session-only ──
   function pickTrack(rebuild){
@@ -143,19 +389,12 @@ const Anim = (() => {
     inp.click();
   }
 
-  // Defaults include every per-drum macro so Reset restores them and presets
-  // capture a whole custom kit.
-  const DEFAULTS={ theme:'kit', noteCount:4, btVolume:0.7, pressFx:'bloom', tweakDrum:'kick',
+  // padSounds (with per-pad shaping) rides along in SETTINGS, so Reset restores
+  // the default kit and presets capture a whole custom one. padLayout '' is the
+  // "migrate from older settings" sentinel — applyLayout resolves it.
+  const DEFAULTS={ theme:'kit', padLayout:'', noteCount:4, btVolume:0.7, pressFx:'bloom',
     padSounds:DEFAULT_PADS,
-    mode:'notes', paint:false, yAxis:'none', zoneLook:'tint', colorMode:'note', showLabels:true };
-  KIT.forEach(d=>{ DEFAULTS['tw_'+d.key+'_pitch']=1; DEFAULTS['tw_'+d.key+'_len']=1; DEFAULTS['tw_'+d.key+'_tone']=1; });
-
-  let lastPreview=0;
-  function preview(key){                       // throttled so slider drags don't machine-gun
-    const now=performance.now();
-    if(now-lastPreview<160) return;
-    lastPreview=now; getAudio(); playDrum(key);
-  }
+    mode:'notes', paint:false, yAxis:'none', octaveRows:'1', zoneLook:'tint', colorMode:'note', showLabels:true };
 
   return {
     sectionLabel:'Drums',
@@ -166,26 +405,36 @@ const Anim = (() => {
     themes:{ kit:{label:'🥁 Kit', colors:[[1,0.2,0.2],[1,0.85,0.1],[0.1,0.7,0.7],[1,0.5,0.1],[0.3,0.75,0.3]]} },
     defaults:DEFAULTS,
     schema:[],
-    bandColor(i){ const p=pads()[i]; return p?p.color:[200,200,200]; },
-    bandLabel(i){ const p=pads()[i]; return p?p.label:''; },
-    // 🥁 Drums tab — pads, pad sounds, backing track
+    bandColor(i){ const p=pads()[i]; return p?BY_KEY[p.drum].color:[200,200,200]; },
+    bandLabel(i){ const p=pads()[i]; return p?BY_KEY[p.drum].label:''; },
+    _dbg(){ return {recState, playOn, loop:loop&&{len:loop.len, ts:loop.events.map(e=>e.t)}}; },
+    railButtons:[
+      { id:'dpedit', icon:()=>'✏️',
+        title:()=>editMode?'Editing is ON — tap to go back to playing':'Edit pads: choose drums, shape sounds',
+        active:()=>editMode,
+        onClick(){ setEditMode(!editMode); } },
+      { id:'dprec', icon:()=>recState==='rec'?'⏹':'⏺',
+        title:()=>recState==='idle'?'Record a beat (your first hit starts it)'
+          :recState==='armed'?'Armed — first hit starts recording · tap to cancel'
+          :'Recording — tap to finish and hear it loop',
+        active:()=>recState!=='idle',
+        onClick(){ if(!editMode) toggleRecord(); } },
+      { id:'dpplay', icon:()=>playOn?'⏸':'▶',
+        title:()=>playOn?'Pause your beat':'Play your beat',
+        show:()=>!!loop, active:()=>playOn,
+        onClick(){ if(playOn) stopPlay(); else startPlay(); } },
+    ],
+    // 🥁 Drums tab — pad count, layout, backing track
     buildInstrument(el){
-      el.appendChild(makeSlider({key:'noteCount',label:'How many pads',min:2,max:8,step:1,dp:0,
-        onChange:()=>{ refreshMusic(); buildInstrumentPanel(); }}));
-      const hp=document.createElement('div'); hp.className='sectn'; hp.textContent='Pad sounds (tap to change & hear)'; el.appendChild(hp);
-      padKeys().forEach((cur,i)=>{
-        const row=document.createElement('div'); row.className='chips';
-        KIT.forEach(d=>{
-          const c=document.createElement('div'); c.className='chip'+(d.key===cur?' active':'');
-          c.textContent=d.label; c.title=d.name+(i===0?'':'');
-          c.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
-            const arr=padKeys(); const full=(Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:DEFAULT_PADS).slice();
-            full[i]=d.key; SETTINGS.padSounds=full; saveSettings();
-            playDrum(d.key); refreshMusic(); buildInstrumentPanel(); });
-          row.appendChild(c);
-        });
-        el.appendChild(row);
-      });
+      // Both chip groups drive the same setting; rebuild the pane on change so
+      // the highlight moves between groups.
+      const relayout=()=>{ applyLayout(); buildInstrumentPanel(); };
+      el.appendChild(makeChips('Pads in one row','padLayout',ROW_LAYOUTS,relayout));
+      el.appendChild(makeChips('Pads in a grid','padLayout',GRID_LAYOUTS,relayout));
+      const hint=document.createElement('div');
+      hint.style.cssText='color:rgba(255,255,255,0.5);font:13px/1.5 sans-serif;margin-bottom:14px';
+      hint.textContent='To choose a pad’s drum or shape its sound: tap the ✏️ button on the left rail, then tap the pad.';
+      el.appendChild(hint);
       const h=document.createElement('div'); h.className='sectn'; h.textContent='Backing track (from this computer)'; el.appendChild(h);
       const row=document.createElement('div'); row.className='chips';
       const pick=document.createElement('div'); pick.className='chip';
@@ -204,29 +453,8 @@ const Anim = (() => {
       if(btAudio) el.appendChild(makeSlider({key:'btVolume',label:'Backing volume',min:0,max:1,step:0.01,dp:2,
         onChange:()=>{ if(btAudio) btAudio.volume=SETTINGS.btVolume; }}));
     },
-    // 🎛️ Sound tab — per-drum shaping + effects/volume (no Voice: drums are the voice)
+    // 🎛️ Sound tab — effects/volume (no Voice: drums are the voice)
     buildSound(el){
-      const hs=document.createElement('div'); hs.className='sectn'; hs.textContent='Shape a drum'; el.appendChild(hs);
-      const sel=document.createElement('div'); sel.className='chips';
-      KIT.forEach(d=>{
-        const c=document.createElement('div'); c.className='chip'+(SETTINGS.tweakDrum===d.key?' active':'');
-        c.textContent=d.label+' '+d.name;
-        c.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
-          SETTINGS.tweakDrum=d.key; saveSettings(); playDrum(d.key); buildSoundPanel(); });
-        sel.appendChild(c);
-      });
-      el.appendChild(sel);
-      const k=BY_KEY[SETTINGS.tweakDrum]?SETTINGS.tweakDrum:'kick';
-      const hear=()=>preview(k);
-      el.appendChild(makeSlider({key:'tw_'+k+'_pitch',label:'Pitch (deep ↔ high)',min:0.5,max:2,step:0.05,dp:2,onChange:hear}));
-      el.appendChild(makeSlider({key:'tw_'+k+'_len',  label:'Length (tight ↔ ringing)',min:0.4,max:2.5,step:0.05,dp:2,onChange:hear}));
-      el.appendChild(makeSlider({key:'tw_'+k+'_tone', label:'Tone (soft ↔ sharp)',min:0.5,max:2,step:0.05,dp:2,onChange:hear}));
-      const rst=document.createElement('div'); rst.className='chips';
-      const rc=document.createElement('div'); rc.className='chip'; rc.textContent='↺ Reset this drum';
-      rc.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
-        SETTINGS['tw_'+k+'_pitch']=1; SETTINGS['tw_'+k+'_len']=1; SETTINGS['tw_'+k+'_tone']=1;
-        saveSettings(); playDrum(k); buildSoundPanel(); });
-      rst.appendChild(rc); el.appendChild(rst);
       const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
       el.appendChild(makeToggle('Reverb','reverb',applyReverb));
       el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
@@ -246,11 +474,23 @@ const Anim = (() => {
       bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
       appendFineTune(el);
     },
-    onCell(col,row){ playPad(col); fxCell(col,0); },
-    init(cv){ ctx=cv.getContext('2d'); this.reset(); refreshMusic(); },
+    onCell(col,row){
+      const idx=padOf(col,row);
+      if(editMode){ openEditor(idx); return; }
+      recHit(idx);
+      const p=pads()[idx]; if(p) playShaped(p);
+      fxCell(col,row);
+    },
+    init(cv){ ctx=cv.getContext('2d'); applyLayout(); this.reset(); },
     resize(w,h){ this.reset(); },
     splat(){},
     frame(dt){
+      if(editMode&&SETTINGS.locked) setEditMode(false);   // lock always wins
+      if(SETTINGS.locked) cancelRec();   // …but a playing loop survives the lock
+      if(recState==='rec'&&performance.now()-recStart>REC_MAX) finishRec();
+      // re-style fresh cells whenever the framework rebuilt the band grid
+      const first=bandsEl.firstChild;
+      if(first&&!first._styled) restyle();
       if(!ctx) return;
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);

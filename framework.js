@@ -190,6 +190,19 @@ function fxCell(c,r){
 const PRESSFX_OPTS={
   bloom:{label:'🌟 Bloom'}, glow:{label:'✨ Glow'}, pop:{label:'🎈 Pop'}, none:{label:'Off'},
 };
+// Pad-editor apps (Sampler, Drums) share one edit-mode look: body.editmode
+// drives pulsing pad outlines + ✏️ badges (framework.css) and a pill that
+// stays up until editing ends, so the mode is always visible on screen.
+function showEditIndicator(on){
+  document.body.classList.toggle('editmode',!!on);
+  let p=document.getElementById('editPill');
+  if(on&&!p){
+    p=document.createElement('div'); p.id='editPill';
+    p.textContent='✏️ Editing — tap a pad to change it · tap ✏️ again to finish';
+    document.body.appendChild(p);
+  }
+  if(!on&&p) p.remove();
+}
 // Zones stay lit for as long as a touch is holding them (instrument-key feedback).
 function updateHeldCells(){
   bandsEl.querySelectorAll('.band.held').forEach(d=>d.classList.remove('held'));
