@@ -202,12 +202,12 @@ const Anim = (() => {
       showLabels:true },
     schema:[],
     railButtons:[
-      { id:'bbplay',
+      { id:'bbplay', label:'Play',
         icon:()=>playing?'⏸':'▶',
         title:()=>playing?'Pause the beat':'Play the beat',
         active:()=>playing,
         onClick(){ playing?stopLoop():startLoop(); }},
-      { id:'bbrewind', icon:()=>'⏮', title:()=>'Back to the first step',
+      { id:'bbrewind', label:'Start', icon:()=>'⏮', title:()=>'Back to the first step',
         onClick(){ stepIdx=0; acc=0; paintPlayhead(); }},
     ],
     // 🥁 Beat tab

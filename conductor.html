@@ -300,7 +300,7 @@ const Anim = (() => {
       colorMode:'note', scale:'major', noteCount:8, showLabels:false },
     schema:[],
     railButtons:[
-      { id:'cdrestart', icon:()=>'⏮', title:()=>'Restart the path from the beginning',
+      { id:'cdrestart', label:'Restart', icon:()=>'⏮', title:()=>'Restart the path from the beginning',
         show:()=>true, onClick(){ cometU=0; cometNi=0; cometT=0; progress=0; lastCol=-1; setProgress(); }},
     ],
     // 🪄 Conduct tab

@@ -1,98 +1,146 @@
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:#000}
 canvas{display:block;width:100%;height:100%;touch-action:none}
+:root{--accent:#8fb4ff}
 
-/* ── Control rail ────────────────────────────────────────── */
-/* Full-height, click-through container pinned to the left edge. The rail IS the
-   menu: the four panel tabs live in it permanently (one tap opens the panel
-   beside it), followed by the app's icon buttons. align-items:center keeps rail
-   and panel vertically centred independently. */
-#ui{position:fixed;left:16px;top:0;height:100vh;
-  display:flex;flex-direction:row;align-items:center;gap:8px;
+/* ── Control rail ────────────────────────────────────────────
+   Wall-touch scale (2026-07 redesign, "1a"): ≥60px targets, icon + micro-label,
+   three visible tiers — home, the grouped panel-tab block, app action buttons
+   (accent-ringed in the app's colour), and 🔒 pinned to the bottom.
+   No :hover dependence: rail opacity is touch-recency driven (#rail.awake,
+   set by framework.js on any pointerdown; hover kept for desktop dev). */
+#ui{position:fixed;left:14px;top:12px;bottom:12px;
+  display:flex;flex-direction:row;align-items:flex-start;gap:10px;
   z-index:10;pointer-events:none}
 #ui > *{pointer-events:auto}
-#rail{display:flex;flex-direction:column;align-items:stretch;gap:8px;
-  max-height:96vh;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;
+#rail{height:100%;display:flex;flex-direction:column;align-items:center;gap:10px;
+  width:88px;flex-shrink:0;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;
   opacity:0.5;transition:opacity 0.4s}
 #rail::-webkit-scrollbar{display:none}
-#rail:hover,#ui.open #rail{opacity:1}
-#railExtra{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+#rail:hover,#rail.awake,#ui.open #rail{opacity:1}
+#railSpring{flex:1 0 0;min-height:8px}
+/* tier 1: the four panel tabs, one grouped block */
+#tabs{background:rgba(10,11,15,0.85);border:1px solid rgba(255,255,255,0.18);
+  border-radius:20px;padding:6px;display:flex;flex-direction:column;gap:4px;flex-shrink:0}
+#tabs .tab{width:72px;height:66px;border-radius:15px;background:none;border:none;padding:0;min-height:0;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;white-space:normal;
+  color:rgba(255,255,255,0.85);cursor:pointer;font-family:sans-serif;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none}
+#tabs .tab:hover{background:rgba(255,255,255,0.08);border:none}
+#tabs .tab .bic{font-size:24px;line-height:1.15}
+#tabs .tab .blb{font-size:10px;letter-spacing:0.04em}
+#tabs .tab.active,#tabs .tab.active:hover{background:#fff;border:none;color:#111}
+#tabs .tab.active .blb{font-weight:700}
+/* tier 2: framework + app action buttons (app ones wear the accent ring) */
+#railExtra{display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0}
 #railExtra:empty{display:none}
+.railbtn{width:64px;min-height:60px;padding:7px 2px;border-radius:16px;
+  background:rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.22);color:#fff;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  font-family:sans-serif;cursor:pointer;flex-shrink:0;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none}
+.railbtn .bic{font-size:22px;line-height:1.15}
+.railbtn .blb{font-size:9px;color:rgba(255,255,255,0.75);max-width:58px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.railbtn.app{border:2px solid color-mix(in srgb,var(--accent) 75%,transparent)}
+.railbtn.active{background:rgba(255,255,255,0.20);border-color:#fff}
+#homeBtn{width:64px;height:48px;padding:0;border-radius:16px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:24px;
+  text-decoration:none;align-self:center}
+/* tier 3: 🔒 pinned to the rail bottom by #railSpring */
+#lockBtn{border-color:rgba(255,255,255,0.35);background:rgba(0,0,0,0.7)}
+
+/* generic buttons (panel actions, dialogs) */
 .btn{background:rgba(0,0,0,0.50);border:1px solid rgba(255,255,255,0.22);color:rgba(255,255,255,0.95);
-  padding:9px 18px;border-radius:22px;font-size:13px;cursor:pointer;font-family:sans-serif;
-  transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;white-space:nowrap;
-  text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+  padding:12px 18px;border-radius:16px;font-size:14px;min-height:48px;cursor:pointer;font-family:sans-serif;
+  transition:background 0.2s,border-color 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  user-select:none;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
 .btn:hover{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.55)}
 .btn.active{background:rgba(0,0,0,0.70);border-color:rgba(255,255,255,0.75);color:#fff}
-#rail .btn,#railExtra .btn{font-size:18px;padding:11px 15px;min-width:48px;text-align:center}
-#homeBtn{text-decoration:none;align-self:flex-start}
 .bbar{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.95);
-  padding:8px 14px;border-radius:20px;font-size:12px;cursor:pointer;font-family:sans-serif;
-  transition:all 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;
+  padding:10px 16px;border-radius:18px;font-size:13px;min-height:44px;cursor:pointer;font-family:sans-serif;
+  transition:background 0.2s,border-color 0.2s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;
   white-space:nowrap;display:inline-flex;align-items:center;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
 .bbar:hover{background:rgba(0,0,0,0.68);border-color:rgba(255,255,255,0.50)}
 .bbar.active{background:rgba(0,0,0,0.65);border-color:rgba(255,255,255,0.75);color:#fff}
 
-/* ── Settings panel ──────────────────────────────────────── */
-#panel{display:none;width:44vw;max-width:440px;background:rgba(0,0,0,0.85);backdrop-filter:blur(14px);
-  border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:18px 22px;
-  font-family:sans-serif;color:#fff;max-height:88vh;overflow-y:auto}
+/* ── Settings panel ──────────────────────────────────────────
+   Attached to the tab block: top-aligned with #tabs (homeBtn 48px + 10px gap)
+   and square top-left corner so it reads as growing out of the active tab. */
+#panel{display:none;width:min(460px,46vw);background:rgba(12,13,18,0.94);backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,0.16);border-radius:0 22px 22px 22px;padding:22px 24px;
+  font-family:sans-serif;color:#fff;margin-top:58px;max-height:calc(100vh - 128px);overflow-y:auto}
 #panel.open{display:block}
 .sectn{font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
-  color:rgba(255,255,255,0.35);margin:18px 0 8px}
+  color:rgba(255,255,255,0.35);margin:20px 0 10px}
 .pane > .sectn:first-child{margin-top:2px}
 /* Fine-tune: collapsed drawer for set-once controls (sliders, background, perf) */
 details.finetune{margin-top:16px;border-top:1px solid rgba(255,255,255,0.10);padding-top:2px}
 details.finetune summary{list-style:none;cursor:pointer;user-select:none;
-  font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
-  color:rgba(255,255,255,0.45);padding:8px 0}
+  font-size:12px;letter-spacing:0.1em;text-transform:uppercase;
+  color:rgba(255,255,255,0.45);padding:12px 0;min-height:44px;display:flex;align-items:center}
 details.finetune summary::-webkit-details-marker{display:none}
 details.finetune summary::before{content:'▸  '}
 details.finetune[open] summary::before{content:'▾  '}
 details.finetune summary:hover{color:rgba(255,255,255,0.7)}
-.row{margin-bottom:14px}
+.row{margin-bottom:16px}
 .rowhead{display:flex;justify-content:space-between;align-items:center}
-.rowhead label{color:rgba(255,255,255,0.7);font-size:13px}
-.rowhead .val{color:rgba(255,255,255,0.5);font-size:13px;font-variant-numeric:tabular-nums}
-input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;margin-top:8px;
-  background:rgba(255,255,255,0.15);border-radius:2px;outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;
-  background:#fff;cursor:pointer;border:none}
-input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#fff;cursor:pointer;border:none}
-.toggle{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
-.toggle label{color:rgba(255,255,255,0.7);font-size:13px}
-.switch{position:relative;width:44px;height:24px;background:rgba(255,255,255,0.15);
-  border-radius:12px;cursor:pointer;transition:background 0.2s}
+.rowhead label{color:rgba(255,255,255,0.75);font-size:14px}
+.rowhead .val{color:rgba(255,255,255,0.5);font-size:14px;font-variant-numeric:tabular-nums}
+/* sliders at wall scale: 14px track, 34px thumb (the thumb IS the hit target) */
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:14px;margin:10px 0 4px;
+  background:rgba(255,255,255,0.15);border-radius:7px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:34px;height:34px;border-radius:50%;
+  background:#fff;cursor:pointer;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.5)}
+input[type=range]::-moz-range-thumb{width:34px;height:34px;border-radius:50%;background:#fff;cursor:pointer;border:none}
+.toggle{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;min-height:48px}
+.toggle label{color:rgba(255,255,255,0.75);font-size:14px}
+.switch{position:relative;width:64px;height:36px;background:rgba(255,255,255,0.15);
+  border-radius:18px;cursor:pointer;transition:background 0.2s;flex-shrink:0}
 .switch.on{background:rgba(120,180,255,0.7)}
-.switch::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;
+.switch::after{content:'';position:absolute;top:3px;left:3px;width:30px;height:30px;
   border-radius:50%;background:#fff;transition:transform 0.2s}
-.switch.on::after{transform:translateX(20px)}
-.swatch{width:24px;height:24px;border-radius:50%;cursor:pointer;border:2px solid rgba(255,255,255,0.25);
+.switch.on::after{transform:translateX(28px)}
+.swatch{width:44px;height:44px;border-radius:50%;cursor:pointer;border:2px solid rgba(255,255,255,0.25);
   transition:transform 0.15s;flex-shrink:0}
 .swatch:hover{transform:scale(1.12)}
 .swatch.active{border-color:#fff;transform:scale(1.1)}
-.picker{position:relative;width:24px;height:24px;border-radius:50%;overflow:hidden;flex-shrink:0;
+.picker{position:relative;width:44px;height:44px;border-radius:50%;overflow:hidden;flex-shrink:0;
   border:2px solid rgba(255,255,255,0.25);cursor:pointer;
   background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)}
 .picker.active{border-color:#fff}
 .picker input{position:absolute;inset:-4px;width:200%;height:200%;opacity:0;cursor:pointer;border:none;padding:0}
 .qsep{display:block;width:100%;height:1px;background:rgba(255,255,255,0.15);
   font-size:0;line-height:0;user-select:none;flex-shrink:0;margin:2px 0}
-.bgpick{position:relative;overflow:hidden;cursor:pointer;font-size:11px;
-  color:rgba(255,255,255,0.75);padding:0 10px;height:28px;border-radius:14px}
+.bgpick{position:relative;overflow:hidden;cursor:pointer;font-size:12px;
+  color:rgba(255,255,255,0.75);padding:0 14px;height:44px;border-radius:16px}
 .bgpick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:none;padding:0}
-.chips{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 14px}
-.chip{padding:7px 13px;border-radius:16px;background:rgba(0,0,0,0.45);
-  border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.95);font-size:12px;cursor:pointer;
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 16px}
+.chip{padding:8px 16px;border-radius:16px;min-height:50px;background:rgba(255,255,255,0.05);
+  border:2px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.90);font-size:13px;cursor:pointer;
   font-family:sans-serif;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
-  user-select:none;transition:all 0.15s;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
-.chip:hover{background:rgba(0,0,0,0.65)}
-.chip.active{background:rgba(0,0,0,0.65);border-color:#fff;color:#fff}
+  display:inline-flex;align-items:center;gap:6px;
+  user-select:none;transition:background 0.15s,border-color 0.15s;text-shadow:0 1px 3px rgba(0,0,0,0.9)}
+.chip:hover{background:rgba(255,255,255,0.10)}
+.chip.active{background:rgba(255,255,255,0.16);border-color:#fff;color:#fff}
 .pane{display:none}
 .pane.active{display:block}
 #stats{position:fixed;top:10px;left:12px;z-index:30;display:none;
   font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:rgba(255,255,255,0.85);
   background:rgba(0,0,0,0.45);padding:6px 9px;border-radius:8px;pointer-events:none;white-space:pre}
+
+/* ── Sub-menus (app-owned dialogs: pad editors, tune cards, song import) ─────
+   Deliberately NOT the panel look: accent header band + breadcrumb + ✕, so a
+   context editor never reads as the main settings panel. Apps put class
+   "submenu" on the dialog and "dlghead" on its header row. */
+.submenu{background:#15171f;border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  border-radius:22px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,0.6)}
+.submenu .dlghead{background:color-mix(in srgb,var(--accent) 20%,transparent);
+  border-bottom:2px solid color-mix(in srgb,var(--accent) 65%,transparent);
+  display:flex;justify-content:space-between;align-items:center;padding:12px 18px}
+.dlgx{width:44px;height:44px;border-radius:14px;background:rgba(255,255,255,0.10);
+  border:none;color:#fff;font-size:16px;cursor:pointer;flex-shrink:0;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 
 /* ── Notes mode: band / grid overlay ─────────────────────── */
 #bands{position:fixed;inset:0;display:grid;z-index:4;pointer-events:none}
@@ -105,7 +153,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
   font-family:sans-serif;font-weight:700;font-size:6vmin;color:rgb(var(--c));
   opacity:0.85;text-shadow:0 1px 8px rgba(0,0,0,0.85);user-select:none}
 .band.cell .lbl{top:50%;bottom:auto;transform:translate(-50%,-50%);font-size:5vmin}
-.swrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 14px}
+.swrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 16px}
 
 /* ── Session lock ────────────────────────────────────────── */
 #unlockZone{position:fixed;top:0;left:0;width:76px;height:76px;z-index:40;display:none;border-radius:0 0 24px 0}
@@ -117,10 +165,11 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 
 /* ── Presets pane ────────────────────────────────────────── */
 #panel input[type=text]{width:100%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.22);
-  border-radius:10px;color:#fff;padding:9px 12px;font-size:13px;font-family:sans-serif;outline:none;margin-top:4px}
+  border-radius:12px;color:#fff;padding:12px 14px;font-size:15px;font-family:sans-serif;outline:none;margin-top:4px}
 #panel input[type=text]:focus{border-color:rgba(255,255,255,0.5)}
 .prow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .prow .pname{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis}
+.prow .chip{min-width:50px;justify-content:center}
 
 /* ── press effects (fxCell in framework.js; SETTINGS.pressFx) ───────────────
    Set + tuning chosen in fx_lab.html (open that page to retune). Three

@@ -10,10 +10,10 @@
 #dpOv{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.55);
   display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
 #dpDlg{width:min(440px,94vw);max-height:88vh;overflow-y:auto;
-  background:rgba(17,19,27,0.97);border:1px solid rgba(255,255,255,0.16);
+  background:rgba(17,19,27,0.97);border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);
   border-radius:20px;padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,0.5);
   color:rgba(255,255,255,0.9);font:14px sans-serif}
-#dpDlg .dlghead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+#dpDlg .dlghead{display:flex;justify-content:space-between;align-items:center;margin:-16px -18px 12px;padding:12px 18px;background:color-mix(in srgb,var(--accent) 20%,transparent);border-bottom:2px solid color-mix(in srgb,var(--accent) 65%,transparent)}
 #dpDlg .dlghead .ttl{font-size:16px;font-weight:600}
 /* Recording status pill — like the framework's edit pill, but red-rimmed */
 #dpRecPill{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:55;
@@ -519,21 +519,21 @@ const Anim = (() => {
     _dbg(){ return {recState, playOn, plays, base:song&&song.base, master:song?masterLen():0,
       layers:song?song.layers.map(L=>({n:L.evs.length,len:L.len,o:L.evs.map(e=>Math.round(e.o))})):[]}; },
     railButtons:[
-      { id:'dpedit', icon:()=>'✏️',
+      { id:'dpedit', label:'Edit', icon:()=>'✏️',
         title:()=>editMode?'Editing is ON — tap to go back to playing':'Edit pads: choose drums, shape sounds',
         active:()=>editMode,
         onClick(){ setEditMode(!editMode); } },
-      { id:'dprec', icon:()=>recState==='rec'?'⏹':'⏺',
+      { id:'dprec', label:'Record', icon:()=>recState==='rec'?'⏹':'⏺',
         title:()=>recState==='rec'?'Recording — tap to finish'
           :recState==='armed'?(song?'Ready — tap a pad to start the new layer · tap to cancel':'Armed — first hit starts recording · tap to cancel')
           :song?'Add another layer (starts on your first hit)':'Record a beat (your first hit starts it)',
         active:()=>recState!=='idle',
         onClick(){ if(!editMode) toggleRecord(); } },
-      { id:'dpplay', icon:()=>playOn?'⏸':'▶',
+      { id:'dpplay', label:'Play', icon:()=>playOn?'⏸':'▶',
         title:()=>playOn?'Pause the beat':'Play the beat',
         show:()=>!!song, active:()=>playOn,
         onClick(){ if(playOn) stopPlay(); else startPlay(); } },
-      { id:'dpundo', icon:()=>'↩︎',
+      { id:'dpundo', label:'Undo', icon:()=>'↩︎',
         title:()=>'Remove the last layer',
         show:()=>!!(song&&song.layers.length),
         onClick(){ if(!editMode) removeLastLayer(); } },

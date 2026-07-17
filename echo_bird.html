@@ -165,12 +165,12 @@ const Anim = (() => {
       zoneLook:'tint', colorMode:'note', scale:'major', noteCount:5, showLabels:true },
     schema:[],
     railButtons:[
-      { id:'ebplay',
+      { id:'ebplay', label:'Play',
         icon:()=>convo?'⏸':'▶',
         title:()=>convo?'Pause the bird':'Start the bird',
         active:()=>convo,
         onClick(){ if(convo) stopConvo(); else { convo=true; startCall(); } }},
-      { id:'ebagain', icon:()=>'🔁', title:()=>'Hear the call again',
+      { id:'ebagain', label:'Again', icon:()=>'🔁', title:()=>'Hear the call again',
         onClick(){ if(convo && call.length && state==='waiting') startCall(false); }},
     ],
     // 🦜 Bird tab — the conversation controls

@@ -105,7 +105,7 @@ const Anim = (() => {
       colorMode:'note', scale:'major', noteCount:6, showLabels:false },
     schema:[],
     railButtons:[
-      { id:'bsrestart', icon:()=>'⏮', title:()=>'Restart the song from the beginning',
+      { id:'bsrestart', label:'Restart', icon:()=>'⏮', title:()=>'Restart the song from the beginning',
         onClick(){ pos=0; phrasePos=0; celebrating=false; finished=false; setProgress(); if(letterEl) letterEl.textContent=''; }},
     ],
     // 🎵 Songs tab

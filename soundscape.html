@@ -28,6 +28,9 @@
 #ssEdit .hd{display:flex;align-items:center;gap:9px;margin-bottom:12px}
 #ssEdit .hd .nm{flex:1;font-size:14px;font-weight:600}
 #ssEdit .hd .x{background:none;border:none;color:rgba(255,255,255,0.6);font-size:18px;cursor:pointer;padding:2px 6px}
+/* 2026-07 chrome redesign: accent sub-menu edge; rail stops above the strip */
+#ssEdit{border:1px solid color-mix(in srgb,var(--accent) 55%,transparent)}
+#ui{bottom:calc(7vh + 16px)}
 </style>
 </head>
 <body>
@@ -877,7 +880,7 @@ const Anim = (() => {
     bandColor(i){ return col(i); },
     bandLabel(i){ const L=LYS()[i]; return L?L.icon:''; },
     railButtons:[
-      { id:'ssmoon', icon:()=>'🌙', title:()=>'Wind-down: glide every slider to silence',
+      { id:'ssmoon', label:'Wind down', icon:()=>'🌙', title:()=>'Wind-down: glide every slider to silence',
         onClick(){ windOn=true; pokeSim(); } },
     ],
     _dbg(){ return { scene:SETTINGS.scene, wind:windOn, edit:editI,

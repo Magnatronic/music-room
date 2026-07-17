@@ -128,7 +128,7 @@ const Anim = (() => {
     schema:[],
     bandColor:keyColor,
     railButtons:[
-      { id:'sgplay',
+      { id:'sgplay', label:'Play',
         icon:()=> SETTINGS.playMode==='listen' ? (playing?'⏸':'▶') : '⏮',
         title:()=> SETTINGS.playMode==='listen' ? (playing?'Pause the song':'Play the song')
                                                 : 'Restart the song from the beginning',

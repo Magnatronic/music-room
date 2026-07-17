@@ -12,7 +12,7 @@
    Coordinates passed to splat() are normalised 0..1 with y pointing UP.
 */
 // The framework owns its DOM: inject it before any element lookups below.
-document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <button class=\"bbar\" id=\"btnInstrument\" data-mode=\"instrument\">🎵 Notes</button>\n    <button class=\"bbar\" id=\"btnSound\"      data-mode=\"sound\">🎛️ Sound</button>\n    <button class=\"bbar\" id=\"btnVisuals\"    data-mode=\"visuals\">✨ Visuals</button>\n    <button class=\"bbar\" id=\"btnPresets\"    data-mode=\"presets\">⭐ Presets</button>\n    <div class=\"qsep\"></div>\n    <div id=\"railExtra\"></div>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
+document.body.insertAdjacentHTML("afterbegin", "<canvas id=\"c\"></canvas>\n<div id=\"bands\" class=\"hidden\"></div>\n<div id=\"unlockZone\"></div>\n<div id=\"lockHint\">Controls locked — press and hold the top-left corner for 3 seconds to unlock</div>\n<div id=\"stats\"></div>\n\n<div id=\"ui\">\n  <div id=\"rail\">\n    <a href=\"index.html\" id=\"homeBtn\" class=\"btn\" title=\"Home\">⌂</a>\n    <div id=\"tabs\">\n      <button class=\"bbar tab\" id=\"btnInstrument\" data-mode=\"instrument\"><span class=\"bic\">🎵</span><span class=\"blb\">Notes</span></button>\n      <button class=\"bbar tab\" id=\"btnSound\" data-mode=\"sound\"><span class=\"bic\">🎛️</span><span class=\"blb\">Sound</span></button>\n      <button class=\"bbar tab\" id=\"btnVisuals\" data-mode=\"visuals\"><span class=\"bic\">✨</span><span class=\"blb\">Visuals</span></button>\n      <button class=\"bbar tab\" id=\"btnPresets\" data-mode=\"presets\"><span class=\"bic\">⭐</span><span class=\"blb\">Presets</span></button>\n    </div>\n    <div id=\"railExtra\"></div>\n    <div id=\"railSpring\"></div>\n    <button class=\"railbtn\" id=\"lockBtn\" title=\"Lock controls (hold top-left corner 3s to unlock)\"><span class=\"bic\">🔒</span><span class=\"blb\">Lock</span></button>\n  </div>\n  <div id=\"panel\">\n    <div class=\"pane\" id=\"paneInstrument\">\n      <div id=\"instrumentContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneSound\">\n      <div id=\"soundControls\"></div>\n    </div>\n    <div class=\"pane\" id=\"paneVisuals\">\n      <div id=\"visualsContent\"></div>\n    </div>\n    <div class=\"pane\" id=\"panePresets\">\n      <div id=\"presetsContent\"></div>\n    </div>\n  </div>\n</div>");
 
 
 const canvas   = document.getElementById('c');
@@ -21,6 +21,22 @@ const panel     = document.getElementById('panel');
 const railExtra = document.getElementById('railExtra');
 
 const STORE_KEY = 'settings:' + location.pathname.split('/').pop();
+
+// Per-app accent colour (matches the home-page tile): context colour for app
+// rail buttons (.railbtn.app ring) and sub-menu dialogs (.submenu) via --accent.
+const APP_ACCENTS={'fluid_sensory.html':'#7ad7ff','strummer.html':'#e05a9c','drums.html':'#e2641c',
+  'sweep_chimes.html':'#8fd3ff','sampler.html':'#c0a0ff','song_grid.html':'#f5d117',
+  'big_switch.html':'#3bb54a','echo_bird.html':'#7dffb0','bubbles.html':'#9ee7ff',
+  'beat_builder.html':'#ffb36b','conductor.html':'#e8c8ff','soundscape.html':'#1ca9a9',
+  'voice_visuals.html':'#8affd0','fluid_paint.html':'#b48cff','flock.html':'#7fa8ff',
+  'slime.html':'#9dff57','life.html':'#57ffb0'};
+document.documentElement.style.setProperty('--accent', APP_ACCENTS[location.pathname.split('/').pop()]||'#8fb4ff');
+
+// Rail visibility is touch-recency driven — there is no hover on the wall.
+const railEl=document.getElementById('rail'); let railWakeT=null;
+function wakeRail(){ railEl.classList.add('awake');
+  clearTimeout(railWakeT); railWakeT=setTimeout(()=>railEl.classList.remove('awake'),6000); }
+document.addEventListener('pointerdown',wakeRail,true);
 
 // Settings shared by every animation (the animation adds its own via Anim.defaults)
 const SHARED_DEFAULTS = {
@@ -612,6 +628,8 @@ function pointerColor(col){
   return pickColor();
 }
 function onDown(id, cx, cy){
+  // touching the play surface closes any open panel — configure, hand over, go
+  if(currentQuickMode){ currentQuickMode=null; closePanel(); updateBarButtons(); }
   const p=getPointer(id), s=toSim(cx,cy);
   p.x=s.x; p.y=s.y; p.px=s.x; p.py=s.y; p.dx=0; p.dy=0;
   p.down=true; p.moved=false;
@@ -653,9 +671,17 @@ function onUp(id){
   pointers.splice(i,1);
   updateHeldCells();
 }
-canvas.addEventListener('mousedown',e=>{ onDown('mouse',e.offsetX,e.offsetY); });
-canvas.addEventListener('mousemove',e=>{ onMove('mouse',e.offsetX,e.offsetY); });
+canvas.addEventListener('mousedown',e=>{ e.preventDefault(); onDown('mouse',e.offsetX,e.offsetY); });
+canvas.addEventListener('mousemove',e=>{
+  // A mouseup can be swallowed by a native drag (the ⌂ link's ghost image) or a
+  // release outside the window, leaving the pointer stuck "down" so the cursor
+  // plays without clicking. No button held on a move = the press is over: heal.
+  if(!e.buttons){ onUp('mouse'); return; }
+  onMove('mouse',e.offsetX,e.offsetY); });
 window.addEventListener('mouseup',()=>{ onUp('mouse'); });
+window.addEventListener('blur',()=>{ while(pointers.length) onUp(pointers[0].id); });
+// Nothing in the UI is meant to drag; a native drag hijacks the gesture mid-play.
+document.addEventListener('dragstart',e=>e.preventDefault());
 canvas.addEventListener('touchstart',e=>{ e.preventDefault(); const r=canvas.getBoundingClientRect();
   for(const t of e.changedTouches) onDown(t.identifier,t.clientX-r.left,t.clientY-r.top); },{passive:false});
 canvas.addEventListener('touchmove',e=>{ e.preventDefault(); const r=canvas.getBoundingClientRect();
@@ -989,7 +1015,18 @@ function buildPresetsPanel(){
 }
 
 // ── Session lock: hide every control so a student can only paint & play ────────
-function setLocked(v){ SETTINGS.locked=!!v; saveSettings(); applyLock(); }
+function setLocked(v){
+  const was=!!SETTINGS.locked, hint=document.getElementById('lockHint');
+  // applyLock shows the hint when locking; unlocking shows a brief confirmation
+  // so therapists know the 3 s hold worked and don't hold twice.
+  if(v) hint.textContent='Controls locked — press and hold the top-left corner for 3 seconds to unlock';
+  SETTINGS.locked=!!v; saveSettings(); applyLock();
+  if(was&&!v){
+    hint.textContent='🔓 Unlocked';
+    hint.classList.add('show');
+    clearTimeout(hint._ht); hint._ht=setTimeout(()=>hint.classList.remove('show'),1800);
+  }
+}
 function applyLock(){
   const locked=!!SETTINGS.locked;
   ui.style.display = locked?'none':'';
@@ -1033,6 +1070,7 @@ function updateBarButtons(){
 const FRAME_RAIL=[
   { id:'mode',
     icon:()=>SETTINGS.mode==='notes'?'🎹':'🌊',
+    label:()=>SETTINGS.mode==='notes'?'Keys':'Flow',
     title:()=>SETTINGS.mode==='notes'?'Keys mode — tap for free Flow':'Flow mode — tap for Keys zones',
     onClick(){
       SETTINGS.mode = SETTINGS.mode==='notes' ? 'flow' : 'notes';
@@ -1040,12 +1078,13 @@ const FRAME_RAIL=[
       if(currentQuickMode==='instrument') buildInstrumentPanel();
       else if(currentQuickMode==='visuals') buildVisualsPanel();
     }},
-  { id:'clear', icon:()=>'🧹', title:()=>'Clear the painting',
+  { id:'clear', icon:()=>'🧹', label:'Clear', title:()=>'Clear the painting',
     show:()=>paintMode()!=='off',   // nothing to clear when the mode isn't painting
     onClick(){ if(Anim.reset) Anim.reset(); }},
-  { id:'lock', icon:()=>'🔒', title:()=>'Lock controls (hold top-left corner 3s to unlock)',
-    onClick(){ setLocked(true); }},
 ];
+// 🔒 is not a FRAME_RAIL button: it is pinned to the rail bottom in the injected
+// HTML so it sits in the same place in every app, after any app buttons.
+document.getElementById('lockBtn').addEventListener('click',e=>{ e.stopPropagation(); setLocked(true); });
 // Apps that only make sense as a note grid set Anim.lockMode='notes' — the
 // Keys/Flow rail toggle is hidden and SETTINGS.mode stays as their defaults set it.
 // Anim.hideRail=['clear',...] hides other framework rail buttons that don't apply.
@@ -1056,7 +1095,11 @@ function allRailButtons(){
 function buildRailButtons(){
   railExtra.innerHTML='';
   allRailButtons().forEach(desc=>{
-    const b=document.createElement('button'); b.className='btn'; b.dataset.rail=desc.id;
+    const b=document.createElement('button');
+    // app-provided buttons wear the app's accent ring; framework ones stay neutral
+    b.className='railbtn'+(FRAME_RAIL.includes(desc)?'':' app');
+    b.dataset.rail=desc.id;
+    b.innerHTML='<span class="bic"></span><span class="blb"></span>';
     b.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); pokeSim(); desc.onClick(); refreshRailButtons(); });
     railExtra.appendChild(b);
   });
@@ -1065,7 +1108,10 @@ function buildRailButtons(){
 function refreshRailButtons(){
   allRailButtons().forEach(desc=>{
     const b=railExtra.querySelector('[data-rail="'+desc.id+'"]'); if(!b) return;
-    if(desc.icon)   b.textContent=desc.icon();
+    if(desc.icon)   b.querySelector('.bic').textContent=desc.icon();
+    const lb=b.querySelector('.blb');
+    const L=desc.label ? (typeof desc.label==='function'?desc.label():desc.label) : '';
+    lb.textContent=L; lb.style.display=L?'':'none';
     if(desc.title)  b.title=desc.title();
     if(desc.active) b.classList.toggle('active',!!desc.active());
     if(desc.show)   b.style.display = desc.show() ? '' : 'none';
@@ -1148,7 +1194,12 @@ function boot(){
   buildRailButtons();
   // Apps can rename the menu tabs to match their concepts, e.g. {instrument:'🎵 Songs'}
   if(Anim.paneLabels) for(const k in Anim.paneLabels){
-    const b=document.querySelector('.bbar[data-mode="'+k+'"]'); if(b) b.textContent=Anim.paneLabels[k];
+    const b=document.querySelector('.bbar[data-mode="'+k+'"]'); if(!b) continue;
+    // paneLabels values are '<emoji> <Name>' — split into the tab's icon + label
+    const parts=String(Anim.paneLabels[k]).split(' ');
+    if(parts.length>1){ b.querySelector('.bic').textContent=parts[0];
+      b.querySelector('.blb').textContent=parts.slice(1).join(' '); }
+    else b.querySelector('.blb').textContent=parts[0];
   }
   setTheme(currentTheme);
   applyBg();

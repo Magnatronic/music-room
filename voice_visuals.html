@@ -815,7 +815,7 @@ const Anim = (() => {
       mode:'flow', paint:true, yAxis:'none', colorMode:'theme', showLabels:false },
     schema:[],
     railButtons:[
-      { id:'vvmic', icon:()=>micOn()?'🎤':'🎙️',
+      { id:'vvmic', label:'Mic', icon:()=>micOn()?'🎤':'🎙️',
         title:()=>micOn()?'Microphone is on — tap to turn it off':'Turn the microphone on',
         active:()=>micOn(),
         onClick(){ if(micOn()) disableMic(); else enableMic(); } },
