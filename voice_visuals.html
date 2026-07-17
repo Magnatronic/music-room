@@ -35,8 +35,8 @@
    Visual design (see fx research notes in git history): frequency → colour,
    amplitude → size/brightness, feedback immediate (the cause-effect loop IS
    the therapy). Each mode has a calm slow baseline that the voice energises,
-   sensory-room style. Colour comes from a palette THEME (Prism etc.), from
-   Boomwhacker note colours, or a single locked colour.
+   sensory-room style. Colour comes from a palette THEME (Prism etc.) or a
+   single locked colour.
 
    LISTEN-ONLY by design: the microphone signal is analysed and never routed
    to the speakers, so feedback is impossible. The framework audio chain is
@@ -49,10 +49,6 @@
    then the sim sleeps (last frame stays on screen).
 */
 const Anim = (() => {
-
-  const BW={0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],7:[28,169,169],9:[125,79,181],11:[224,90,156]};
-  function bwOf(pc){ if(BW[pc]) return BW[pc];
-    const b=BW[(pc+11)%12]||[200,200,200]; return b.map(v=>Math.round(v*0.7)); }
 
   // Palette themes: pitch (or band index / position) sweeps across the list.
   const THEMES={
@@ -86,11 +82,12 @@ const Anim = (() => {
   const ABUF=new Float32Array(2048);
   let FBUF=null, bands=null;
   let level=0, meterLvl=0, pitch01=0.4, tp01=0.4, prevLevel=0, lastBurst=-9;
-  let noteCol=[120,200,255];                  // last Boomwhacker colour from pitch
   let col=[120,200,255], tcol=[120,200,255];  // smoothed + target display colour
   let lastPitchAt=0, rot=0;
+  let mandBoost=null, mandReach=null, mandN=0; // Mandala: per-bar touch energy + reach-to-finger (ride on the spectrum)
   let rings=[], parts=[], touchRings=[], shoots=[], stars=[], blobs=[];
   let rippleTimer=0, emitAcc=0, wave=null, wave2=null;
+  let pluckU=null, pluckV=null, pluckLive=false;  // Waves: touch-plucked string overlay
   let glowPatches=[], memStars=[], haze=[];
   let flows=[];                              // Flow field particles
   let pix=null, ledPulses=[], ledChase=0;    // Pixels grid; LED strip pulses
@@ -158,7 +155,6 @@ const Anim = (() => {
   function voiceTargetCol(){
     if(SETTINGS.colorMode==='single'&&SETTINGS.lockedColor)
       return SETTINGS.lockedColor.map(v=>Math.min(1,v)*255);
-    if(SETTINGS.colorMode==='note') return noteCol;
     return palAt(tp01);
   }
   function analyse(dt){
@@ -189,8 +185,6 @@ const Anim = (() => {
     if(bl>0 && best/e>0.3){         // voiced enough to trust
       const f=sr/bl;
       tp01=Math.max(0,Math.min(1,Math.log2(f/80)/Math.log2(800/80)));
-      const midi=Math.round(69+12*Math.log2(f/440));
-      noteCol=bwOf(((midi%12)+12)%12);
     }
   }
   // Log-spaced FFT bands with fast attack / slow release (Mandala).
@@ -239,12 +233,6 @@ const Anim = (() => {
     const o=SETTINGS.tw&&SETTINGS.tw[SETTINGS.visMode];
     const v=o?o[p]:null; return v==null?1:v;
   }
-  // Scene build-up: how much the screen accumulates (therapist setting) —
-  // caps on afterglow / memory stars.
-  function buCap(offV,gentleV,fullV){
-    const b=SETTINGS.buildup||'full';
-    return b==='off'?offV:b==='gentle'?gentleV:fullV;
-  }
   function glowDisc(x,y,R,c,a){
     if(a<=0.002||R<=0) return;
     const g=ctx.createRadialGradient(x,y,0,x,y,R);
@@ -252,12 +240,37 @@ const Anim = (() => {
     ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2); ctx.fill();
   }
 
+  // Touch → Mandala: pour energy into the spectrum bars nearest the finger's
+  // angle (a soft spread over neighbours) so the mandala flares outward there,
+  // in its own bars. The bars keep spinning, so the flare rotates round and the
+  // drag paints a trailing comet. mandHot keeps the sim awake while it fades.
+  function mandTouch(phi,amt,spread,reach){
+    if(!mandBoost||!mandN) return;
+    const centre=Math.round(((phi-rot)/(2*Math.PI))*mandN);
+    for(let k=-spread;k<=spread;k++){
+      const i=((centre+k)%mandN+mandN)%mandN;
+      const g=Math.exp(-(k*k)/(spread*spread*0.5+0.5));
+      mandBoost[i]=Math.min(1.25,mandBoost[i]+amt*g);
+      if(reach>0) mandReach[i]=Math.max(mandReach[i],reach*(0.55+0.45*g));  // stretch out to the finger
+    }
+  }
+  function mandBurst(amt){ if(!mandBoost) return;
+    for(let i=0;i<mandN;i++) mandBoost[i]=Math.min(1.25,mandBoost[i]+amt); }
+  function mandHot(){ if(!mandBoost) return false;
+    for(let i=0;i<mandBoost.length;i++) if(mandBoost[i]>0.01) return true; return false; }
+
   // ── 💠 Mandala: three layers — bass glow washing the whole screen, the main
   //    mirrored spectrum ring, and a counter-rotating outer ring of highs ──
   function drawMandala(W,H,dt){
     const q=activeQuality(), base=q==='high'?56:q==='med'?40:28;
     const N=Math.max(16,Math.min(72,Math.round(base*tw('detail')/4)*4));
     updateBands(N,dt);
+    // touch energy rides on top of the spectrum: same bars, so it reads as
+    // sound. It rotates with the mandala and fades, leaving a spinning trail.
+    if(!mandBoost||mandBoost.length!==N){ mandBoost=new Float32Array(N); mandReach=new Float32Array(N); }
+    mandN=N;
+    const bfade=Math.pow(0.5,dt/0.55);
+    for(let i=0;i<N;i++){ mandBoost[i]*=bfade; mandReach[i]*=bfade; }
     rot+=dt*(0.06+level*0.4);
     const cx=W/2, cy=H/2, m=Math.min(W,H);
     const R0=m*0.13*(1+0.18*level), Rmax=m*0.30*tw('reach');
@@ -265,7 +278,7 @@ const Anim = (() => {
     let bass=0; if(bands){ const nb=Math.max(2,N/6|0); for(let i=0;i<nb;i++) bass+=bands[i]; bass/=nb; }
     glowDisc(cx,cy,m*0.62,SETTINGS.colorMode==='theme'?palAt(0.06):col,vI()*tw('bass')*(0.02+0.12*bass));
     // breathing centre
-    glowDisc(cx,cy,R0*1.5,col,vI()*(0.05+0.30*level));
+    glowDisc(cx,cy,R0*1.5,col,vI()*(0.04+0.16*level));
     // base ring so the mandala exists even in silence
     ctx.strokeStyle=rgba(col,vI()*(0.10+0.15*level)); ctx.lineWidth=Math.max(1.5,m*0.004);
     ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.stroke();
@@ -273,35 +286,48 @@ const Anim = (() => {
     // LAYER 2: main mirrored spectrum
     const bw=2*Math.PI*R0/N*0.42;
     for(let i=0;i<N;i++){
-      const v=bands?bands[i]:0; if(v<0.03) continue;
-      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],v*0.4);
-      const len=Math.pow(v,1.5)*Rmax+bw*0.5;
+      const vs=bands?bands[i]:0;                        // sound only — the mirror's share
+      const v=Math.min(1,vs+mandBoost[i]);              // sound + touch — the primary bar
+      if(v<0.03&&mandReach[i]<1) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],v*0.25);
       const ang=rot+i/N*Math.PI*2;
-      ctx.strokeStyle=rgba(c,vI()*(0.18+0.65*v));
-      ctx.lineWidth=bw*(0.55+0.65*v);
-      for(const s of [1,-1]){   // vertical mirror → kaleidoscope symmetry
-        const ca=Math.cos(ang)*s, sa=Math.sin(ang);
-        ctx.beginPath();
-        ctx.moveTo(cx+ca*R0,cy+sa*R0);
-        ctx.lineTo(cx+ca*(R0+len),cy+sa*(R0+len));
-        ctx.stroke();
+      const ca=Math.cos(ang), sa=Math.sin(ang);
+      // primary bar: sound + touch; touch stretches it out to the finger
+      const len=Math.max(Math.pow(v,1.5)*Rmax+bw*0.5,mandReach[i]);
+      ctx.strokeStyle=rgba(c,vI()*(0.14+0.44*v)); ctx.lineWidth=bw*(0.55+0.65*v);
+      ctx.beginPath(); ctx.moveTo(cx+ca*R0,cy+sa*R0);
+      ctx.lineTo(cx+ca*(R0+len),cy+sa*(R0+len)); ctx.stroke();
+      // mirror: SOUND only (touch lights just the touched side — one clear
+      // cause→effect for students). Fades near the vertical axis, where it
+      // would land on the primary and double up into a white spoke.
+      if(vs>=0.03){
+        const mMul=Math.min(1,Math.abs(ca)*1.5);
+        const lenM=Math.pow(vs,1.5)*Rmax+bw*0.5;
+        ctx.strokeStyle=rgba(c,vI()*(0.14+0.44*vs)*mMul); ctx.lineWidth=bw*(0.55+0.65*vs);
+        ctx.beginPath(); ctx.moveTo(cx-ca*R0,cy+sa*R0);
+        ctx.lineTo(cx-ca*(R0+lenM),cy+sa*(R0+lenM)); ctx.stroke();
       }
     }
     // LAYER 3: outer ring of the high bands, counter-rotating, reaching the edges
     const Ro=m*0.40;
     for(let i=N>>1;i<N;i++){
-      const v=bands?bands[i]:0; if(v<0.05) continue;
-      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],0.5);
-      const len=(Math.pow(v,1.5)*m*0.16+bw*0.3)*tw('reach');
+      const vs=bands?bands[i]:0, v=Math.min(1,vs+mandBoost[i]); if(v<0.05) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],0.35);
       const ang=-rot*1.4+(i-(N>>1))/(N>>1)*Math.PI*2;
-      ctx.strokeStyle=rgba(c,vI()*(0.10+0.40*v));
+      const ca=Math.cos(ang), sa=Math.sin(ang);
       ctx.lineWidth=bw*0.4;
-      for(const s of [1,-1]){
-        const ca=Math.cos(ang)*s, sa=Math.sin(ang);
-        ctx.beginPath();
-        ctx.moveTo(cx+ca*Ro,cy+sa*Ro);
-        ctx.lineTo(cx+ca*(Ro+len),cy+sa*(Ro+len));
-        ctx.stroke();
+      // primary: sound + touch
+      const len=(Math.pow(v,1.5)*m*0.16+bw*0.3)*tw('reach');
+      ctx.strokeStyle=rgba(c,vI()*(0.09+0.34*v));
+      ctx.beginPath(); ctx.moveTo(cx+ca*Ro,cy+sa*Ro);
+      ctx.lineTo(cx+ca*(Ro+len),cy+sa*(Ro+len)); ctx.stroke();
+      // mirror: sound only, fading near the vertical axis (no white doubling)
+      if(vs>=0.05){
+        const mMul=Math.min(1,Math.abs(ca)*1.5);
+        const lenM=(Math.pow(vs,1.5)*m*0.16+bw*0.3)*tw('reach');
+        ctx.strokeStyle=rgba(c,vI()*(0.09+0.34*vs)*mMul);
+        ctx.beginPath(); ctx.moveTo(cx-ca*Ro,cy+sa*Ro);
+        ctx.lineTo(cx-ca*(Ro+lenM),cy+sa*(Ro+lenM)); ctx.stroke();
       }
     }
   }
@@ -321,16 +347,43 @@ const Anim = (() => {
         ph:Math.random()*Math.PI*2,sp:(big?0.08:0.15)+Math.random()*(big?0.2:0.45)});
     }
   }
+  // One lava blob: backlit wax. Near-opaque body — overlapping blobs occlude
+  // each other cleanly instead of mixing into muddy see-through stacks — with
+  // a soft rim, a wobbly organic outline, and a colour-tinted sheen up-left.
+  // Brightness lives in the COLOUR (dim wax → glowing wax), never in
+  // transparency, so hues stay pure at every loudness.
+  function lavaBlob(b,R,c,bright){
+    const cb=c.map(v=>v*bright);
+    const g=ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,R*1.06);
+    g.addColorStop(0,rgba(cb,1));
+    g.addColorStop(0.6,rgba(cb,0.97));
+    g.addColorStop(0.82,rgba(cb,0.75));
+    g.addColorStop(0.94,rgba(cb,0.3));
+    g.addColorStop(1,rgba(cb,0));
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    const K=26, w1=t*b.sp*2+b.ph, w2=t*b.sp*1.3-b.ph*1.7;
+    for(let j=0;j<=K;j++){
+      const th=j/K*Math.PI*2;
+      const rr=R*(1+0.045*Math.sin(3*th+w1)+0.03*Math.sin(5*th+w2));
+      const px=b.x+Math.cos(th)*rr, py=b.y+Math.sin(th)*rr;
+      if(j) ctx.lineTo(px,py); else ctx.moveTo(px,py);
+    }
+    ctx.closePath(); ctx.fill();
+    const hx=b.x-R*0.26, hy=b.y-R*0.3, hc=mix(cb,[255,255,255],0.4);
+    const hg=ctx.createRadialGradient(hx,hy,0,hx,hy,R*0.5);
+    hg.addColorStop(0,rgba(hc,0.3)); hg.addColorStop(1,rgba(hc,0));
+    ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(hx,hy,R*0.5,0,Math.PI*2); ctx.fill();
+  }
   function drawLava(W,H,dt){
     const q=activeQuality();
     const want=Math.max(3,Math.round((q==='high'?16:q==='med'?11:8)*tw('count')));
     if(blobs.length!==want) buildBlobs(W,H);
     updateBands(blobs.length,dt);
     const m=Math.min(W,H);
-    // source-over, not additive: each blob blends between the backdrop and
-    // its own colour, so nothing can ever exceed the palette colour itself.
-    // 'lighter' (and even 'screen', over accumulating frames) pushed every
-    // channel toward the ceiling and pale colours drowned the scene in white.
+    // Drawn on a fully cleared frame (fade=1): motion trails only left ghost
+    // rings behind the breathing gradients. source-over, not additive, so
+    // nothing can ever exceed the palette colour itself.
     ctx.globalCompositeOperation='source-over';
     for(let i=0;i<blobs.length;i++){
       const b=blobs[i], v=Math.min(1,(bands?bands[i]:0)+(b.hot||0)), slow=b.big?0.45:1;
@@ -338,25 +391,37 @@ const Anim = (() => {
       b.vx+=Math.sin(t*b.sp+b.ph)*m*0.05*dt*slow;
       b.vy+=Math.cos(t*b.sp*0.9+b.ph*1.7)*m*0.05*dt*slow;
       b.vx*=Math.pow(0.5,dt); b.vy*=Math.pow(0.5,dt);
+      // snooker-table friction: a struck blob starts fast, then brakes firmly
+      // back down to cruising speed and resumes its lazy drift
+      const spd=Math.hypot(b.vx,b.vy), cruise=m*(b.big?0.05:0.09);
+      if(spd>cruise){ const k=Math.pow(0.5,dt/0.5); b.vx*=k; b.vy*=k; }
       b.x+=b.vx*dt*(1+level*1.5); b.y+=b.vy*dt*(1+level*1.5);
-      const R=m*b.r*tw('size')*(0.8+0.2*Math.sin(t*0.5+b.ph))*(1+(b.big?0.7:1.3)*v+0.5*level);
-      if(b.x<-R) b.x=W+R; else if(b.x>W+R) b.x=-R;   // wrap softly
-      if(b.y<-R) b.y=H+R; else if(b.y>H+R) b.y=-R;
+      const R=m*b.r*tw('size')*(0.85+0.15*Math.sin(t*0.5+b.ph))*(1+(b.big?0.6:1.0)*v+0.4*level);
+      // soft wall bounce (they used to wrap — teleporting to the other side)
+      const mgx=Math.min(R*0.55,W*0.45), mgy=Math.min(R*0.55,H*0.45);
+      if(b.x<mgx){ b.x=mgx; b.vx=Math.abs(b.vx)*0.7; }
+      else if(b.x>W-mgx){ b.x=W-mgx; b.vx=-Math.abs(b.vx)*0.7; }
+      if(b.y<mgy){ b.y=mgy; b.vy=Math.abs(b.vy)*0.7; }
+      else if(b.y>H-mgy){ b.y=H-mgy; b.vy=-Math.abs(b.vy)*0.7; }
       const c=SETTINGS.colorMode==='theme'
-        ?palAt(i/(blobs.length-1))
+        ?palAt(0.04+0.84*i/(blobs.length-1))   // clamp off the palest end — no grey blobs
         :mix(col,[255,255,255],(i%4)*0.06);
-      const a=Math.min(0.85,vI()*(b.big?0.6:1)*(0.09+0.10*level+0.38*v));
-      glowDisc(b.x,b.y,R,c,a);
+      // wax brightness: a calm glow at rest, brightening as the blob's band
+      // sings; background blobs sit dimmer for depth
+      const bright=Math.min(1,vI()*(b.big?0.7:1)*(0.55+0.12*level+0.33*v));
+      lavaBlob(b,R,c,bright);
     }
     ctx.globalCompositeOperation='lighter';   // restore for touch rings
   }
 
   // ── 〰️ Waves: the actual shape of the sound — smoothed oscilloscope trace
-  //    with a soft/bright double stroke (soundpanel's waveform, rebuilt) ──
+  //    with a soft/bright double stroke (soundpanel's waveform, rebuilt).
+  //    A calm baseline is always there, even in silence; touch grabs the line
+  //    itself (a plucked string: drag, release, watch the ripples run). ──
   function drawWaves(W,H,dt){
-    if(level<=0.004) return;
     const N=110;
     if(!wave||wave.length!==N){ wave=new Float32Array(N); wave2=new Float32Array(N); }
+    if(!pluckU||pluckU.length!==N){ pluckU=new Float32Array(N); pluckV=new Float32Array(N); }
     const step=(ABUF.length/N)|0, k=1-Math.exp(-dt/0.06), k2=1-Math.exp(-dt/0.5);
     for(let i=0;i<N;i++){
       let s=0,c=0;
@@ -364,21 +429,34 @@ const Anim = (() => {
       wave[i]+=(s/c-wave[i])*k;
       wave2[i]+=(wave[i]-wave2[i])*k2;   // slow "memory" envelope
     }
+    // plucked-string physics for the touch overlay: fixed ends, sub-stepped
+    // for stability, gently damped so a pluck rings out then settles
+    let rem=Math.min(dt,0.05), mx=0;
+    while(rem>0){
+      const h=Math.min(rem,1/120); rem-=h;
+      const pd=Math.pow(0.5,h/0.9);
+      for(let i=1;i<N-1;i++)
+        pluckV[i]=(pluckV[i]+(pluckU[i-1]+pluckU[i+1]-2*pluckU[i])*2200*h)*pd;
+      for(let i=1;i<N-1;i++) pluckU[i]+=pluckV[i]*h;
+    }
+    for(let i=0;i<N;i++){ const u=Math.abs(pluckU[i]); if(u>mx) mx=u; }
+    pluckLive=mx>0.5;
     const mul=(SENS[SETTINGS.sensitivity]||SENS.talk).mul*(SETTINGS.boost||1);
     const cy=H/2;
     const grad=ctx.createLinearGradient(0,0,W,0);
     if(SETTINGS.colorMode==='theme'){
       for(let s=0;s<=4;s++) grad.addColorStop(s/4,rgba(palAt(s/4),1));
     } else {
-      grad.addColorStop(0,rgba(mix(col,[255,255,255],0.3),1));
+      grad.addColorStop(0,rgba(mix(col,[255,255,255],0.2),1));
       grad.addColorStop(0.5,rgba(col,1));
-      grad.addColorStop(1,rgba(mix(col,[255,255,255],0.3),1));
+      grad.addColorStop(1,rgba(mix(col,[255,255,255],0.2),1));
     }
     const trace=(buf,amp,flip)=>{
       ctx.beginPath();
       for(let i=0;i<N;i++){
         const x=i/(N-1)*W;
-        const y=cy+(flip?-1:1)*Math.max(-1,Math.min(1,buf[i]*mul))*amp;
+        const y=cy+(flip?-1:1)*Math.max(-1,Math.min(1,buf[i]*mul))*amp
+               +(flip?-1:1)*pluckU[i];   // touch pluck rides on the line itself
         if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
       }
       ctx.stroke();
@@ -394,56 +472,41 @@ const Anim = (() => {
     trace(wave,H*0.30*hh,true);
     // LAYER 3: the live trace, halo + body + bright core
     ctx.globalAlpha=vI()*(0.10+0.18*level); ctx.lineWidth=Math.max(6,H*0.022)*th; trace(wave,H*0.30*hh,false);
-    ctx.globalAlpha=vI()*(0.25+0.45*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th; trace(wave,H*0.30*hh,false);
-    ctx.globalAlpha=Math.min(1,vI()*(0.5+0.5*level)); ctx.lineWidth=1.5*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=vI()*(0.20+0.35*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=Math.min(1,vI()*(0.35+0.40*level)); ctx.lineWidth=1.5*th; trace(wave,H*0.30*hh,false);
     ctx.globalAlpha=1;
   }
 
-  // ── 💧 Ripples: a glowing horizon line across the middle of the screen.
-  //    Every sound makes the WHOLE line emit a ripple — a full-width pair of
-  //    lines travelling up and down towards the edges, bouncing back once,
-  //    softer — the old expanding circles, straightened out. ──
-  function rippleWave(str,c){
-    rings.push({off:Math.max(2,canvas.height*0.004),dir:1,
+  // ── 💧 Ripples: circular pulses spreading like drops in a pond. The voice
+  //    drops from the centre of the screen — louder = bigger, faster, brighter;
+  //    a sharp sound is a big splash. Touch drops a pulse right at the finger.
+  //    A soft glow breathes at the centre so the style is never invisible. ──
+  function rippleRing(x,y,str,c){
+    rings.push({x,y,r:Math.max(4,canvas.height*0.012),
       v:(0.22+0.55*str)*canvas.height*tw('speed'),
       a:vI()*(0.30+0.55*str),c});
   }
   function drawRipples(W,H,dt){
+    const cx=W/2, cy=H/2;
     rippleTimer-=dt;
     if(level>0.02&&rippleTimer<=0){
       rippleTimer=(0.4-0.3*level)/tw('rate');
-      rippleWave(level,col.slice());
+      rippleRing(cx,cy,level,col.slice());
     }
-    if(onset()) rippleWave(Math.min(1,level*1.6),col.slice());  // pop = big wave
-    const y0=H/2;
-    // the horizon line itself: always faintly there, breathing with the voice;
-    // in theme mode it wears the palette as a left-to-right gradient
-    const lb=vI()*(0.08+0.45*level+0.015*Math.sin(t*1.7));
-    let lineStyle;
-    if(SETTINGS.colorMode==='theme'){
-      const cols=(THEMES[SETTINGS.theme]||THEMES.prism).colors;
-      const g=ctx.createLinearGradient(0,0,W,0);
-      cols.forEach((cc,i)=>g.addColorStop(i/(cols.length-1),rgba(cc,1)));
-      lineStyle=g;
-    } else lineStyle=rgba(col,1);
-    ctx.globalAlpha=lb*0.35; ctx.strokeStyle=lineStyle; ctx.lineWidth=Math.max(6,H*0.022);
-    ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(W,y0); ctx.stroke();
-    ctx.globalAlpha=lb; ctx.lineWidth=Math.max(2,H*0.005);
-    ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(W,y0); ctx.stroke();
-    ctx.globalAlpha=1;
+    if(onset()) rippleRing(cx,cy,Math.min(1,level*1.6),col.slice());  // pop = big splash
+    // the spring at the centre of the pond: always faintly there, breathing
+    glowDisc(cx,cy,Math.min(W,H)*(0.05+0.09*level+0.006*Math.sin(t*1.7)),
+      col,vI()*(0.10+0.35*level));
+    const maxR=Math.hypot(W,H)*0.55;
     rings=rings.filter(gg=>{
-      gg.off+=gg.dir*gg.v*dt; gg.a*=Math.pow(0.5,dt);
-      if(gg.dir>0&&gg.off>=y0){ gg.dir=-1; gg.off=y0; gg.a*=0.45; }  // one bounce, softer
-      if(gg.a<0.015||(gg.dir<0&&gg.off<=0)) return false;
+      gg.r+=gg.v*dt; gg.a*=Math.pow(0.5,dt);
+      if(gg.a<0.015||gg.r>maxR) return false;
       const lw=Math.max(2,H*0.010)*tw('thick');
-      for(let sgn=-1;sgn<=1;sgn+=2){          // mirrored lines above and below
-        const y=y0+sgn*gg.off;
-        ctx.strokeStyle=rgba(gg.c,gg.a*0.35); ctx.lineWidth=lw*3;    // soft outer
-        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-        ctx.strokeStyle=rgba(mix(gg.c,[255,255,255],0.3),gg.a);      // bright core
-        ctx.lineWidth=lw;
-        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-      }
+      ctx.strokeStyle=rgba(gg.c,gg.a*0.35); ctx.lineWidth=lw*3;    // soft outer
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle=rgba(mix(gg.c,[255,255,255],0.18),gg.a);     // bright core
+      ctx.lineWidth=lw;
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
       return true;
     });
   }
@@ -452,7 +515,7 @@ const Anim = (() => {
   //    sharp sounds = comet bursts that leave a lingering glow in the sky ──
   function drawFireworks(W,H,dt){
     const q=activeQuality(), cap=q==='high'?450:q==='med'?280:140;
-    // afterglow: bursts stain the sky, slowly fading (build-up)
+    // afterglow: bursts stain the sky, slowly fading
     glowPatches=glowPatches.filter(p=>{
       p.life-=dt/8;
       if(p.life<=0) return false;
@@ -470,9 +533,8 @@ const Anim = (() => {
     emitAcc=Math.min(emitAcc,3);
     if(onset()&&parts.length<cap-30){
       const bx=W*(0.15+0.7*Math.random()), by=voiceY(H);
-      const gCap=buCap(0,4,10);
-      if(gCap){ glowPatches.push({x:bx,y:by,R:Math.min(W,H)*(0.15+0.2*level),c:col.slice(),life:1});
-        while(glowPatches.length>gCap) glowPatches.shift(); }
+      glowPatches.push({x:bx,y:by,R:Math.min(W,H)*(0.15+0.2*level),c:col.slice(),life:1});
+      while(glowPatches.length>10) glowPatches.shift();
       const n=Math.min(cap-parts.length,((24+level*56)*tw('burst'))|0);
       const sp=(0.22+0.5*level)*Math.min(W,H)*Math.sqrt(tw('burst'));
       for(let i=0;i<n;i++){
@@ -488,7 +550,7 @@ const Anim = (() => {
       p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt*tw('fall');
       p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*(p.trail?0.8:0.45);
       if(p.life<=0||p.y>H+30) return false;
-      const a=Math.min(1,p.life)*0.85;
+      const a=Math.min(1,p.life)*0.7;
       if(p.trail){
         ctx.strokeStyle=rgba(p.c,a); ctx.lineWidth=p.size; ctx.lineCap='round';
         ctx.beginPath(); ctx.moveTo(p.px,p.py); ctx.lineTo(p.x,p.y); ctx.stroke();
@@ -542,7 +604,7 @@ const Anim = (() => {
     // memory stars: every sharp sound adds a NEW coloured star — the session
     // literally builds this student's sky
     for(const s of memStars) star(s,0.30,s.c);
-    const mCap=buCap(0,14,40), hit=onset();
+    const mCap=40, hit=onset();
     if(hit&&mCap){
       memStars.push({x:W*(0.05+0.9*Math.random()),y:voiceY(H)*(0.85+0.2*Math.random()),
         r:(1.2+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,
@@ -594,7 +656,7 @@ const Anim = (() => {
       p.x+=Math.cos(a)*sp*dt; p.y+=Math.sin(a)*sp*dt;
       p.life-=dt*0.45;
       if(p.life<=0||p.x<-8||p.x>W+8||p.y<-8||p.y>H+8) return false;
-      ctx.strokeStyle=rgba(p.c,vI()*Math.min(0.55,p.life*0.25)*(0.35+1.1*level));
+      ctx.strokeStyle=rgba(p.c,vI()*Math.min(0.5,p.life*0.25)*(0.35+0.8*level));
       ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(p.x,p.y); ctx.stroke();
       return true;
     });
@@ -633,10 +695,10 @@ const Anim = (() => {
     if(level>0.02)
       pixHeat(P.sx,voiceY(H)/s,(1.2+3.4*level)*sc,dt*(3+24*level));
     if(onset()) pixHeat(P.sx,voiceY(H)/s,(2.6+2.5*level)*sc,0.55);  // pop = splash
-    // diffuse to the four neighbours, then cool (build-up = how long heat lives)
+    // diffuse to the four neighbours, then cool (afterglow = how long heat lives)
     const heat=P.heat, tmp=P.tmp;
     const k=Math.min(0.42,dt*5.5*tw('spread'));
-    const cool=Math.exp(-dt/(buCap(1.0,2.6,6.5)*tw('linger')));
+    const cool=Math.exp(-dt/(6.5*tw('linger')));
     for(let y=0;y<R;y++) for(let x=0;x<C;x++){
       const i=y*C+x, h=heat[i];
       const nb=heat[i-(x>0?1:0)]+heat[i+(x<C-1?1:0)]+heat[i-(y>0?C:0)]+heat[i+(y<R-1?C:0)];
@@ -661,8 +723,8 @@ const Anim = (() => {
         // the full theme as rings; only overdriven cores flash white below
         const w=Math.pow(hv,0.7);
         c=palAt(g0+(hv-g0)*w);
-      } else c=mix(col,[255,255,255],hv*0.55);
-      if(h>1) c=mix(c,[255,255,255],Math.min(0.55,(h-1)*2.2));  // white-hot core
+      } else c=mix(col,[255,255,255],hv*0.4);
+      if(h>1) c=mix(c,[255,255,255],Math.min(0.4,(h-1)*1.6));  // white-hot core
       const idle=0.05*(0.75+0.25*Math.sin(t*0.6+(x+y)*0.7));
       ctx.fillStyle=rgba(c,Math.min(1,vI()*(idle+0.92*Math.pow(hv,0.9))));
       ctx.fillRect(x*s+gap*0.5,y*s+gap*0.5,s-gap,s-gap);
@@ -718,7 +780,7 @@ const Anim = (() => {
       const c=SETTINGS.colorMode==='theme'?palAt(cnum/(NB-1)):col;
       for(let j=0;j<rowsN;j++){
         const on=j<lit, top=j===lit-1;
-        ctx.fillStyle=rgba(top?mix(c,[255,255,255],0.5):c,
+        ctx.fillStyle=rgba(top?mix(c,[255,255,255],0.35):c,
           vI()*(on?(top?0.95:0.4+0.3*(j/rowsN)):0.05));
         ctx.beginPath();
         ctx.arc(x0+cnum*colW+colW/2,y0-j*eh,Math.min(colW,eh)*0.26,0,Math.PI*2);
@@ -749,7 +811,7 @@ const Anim = (() => {
         colors:THEMES[k].colors.map(c=>c.map(v=>v/255))};
       return o; })(),
     defaults:{ theme:'prism', sensitivity:'talk', boost:1, visMode:'mandala',
-      buildup:'full', visIntensity:1,
+      visIntensity:1,
       mode:'flow', paint:true, yAxis:'none', colorMode:'theme', showLabels:false },
     schema:[],
     railButtons:[
@@ -761,7 +823,14 @@ const Anim = (() => {
     // expose read-only internals for automated verification (no UI)
     _dbg(){ return {mic:micState, level:+level.toFixed(3), pitch:+pitch01.toFixed(3),
       meter:+meterLvl.toFixed(3), polls:pollCount, mode:SETTINGS.visMode,
-      parts:parts.length, rings:rings.length, stars:stars.length}; },
+      parts:parts.length, rings:rings.length, stars:stars.length,
+      mandMax:+(mandBoost?Math.max.apply(null,mandBoost):0).toFixed(3),
+      mandReach:mandReach?Math.round(Math.max.apply(null,mandReach)):0,
+      mandHot:mandHot(), pluckLive,
+      pluckMax:pluckU?Math.round(Math.max.apply(null,Array.from(pluckU,Math.abs))):0,
+      lava:{n:blobs.length,
+        out:blobs.filter(b=>b.x<0||b.x>canvas.width||b.y<0||b.y>canvas.height).length,
+        spd:Math.round(blobs.reduce((s,b)=>Math.max(s,Math.hypot(b.vx,b.vy)),0))}}; },
     // 🎤 Voice tab
     buildInstrument(el){
       const row=document.createElement('div'); row.className='chips';
@@ -788,9 +857,6 @@ const Anim = (() => {
     // ✨ Visuals tab
     buildVisuals(el){
       el.appendChild(makeChips('Style','visMode',VISMODES,()=>{ pokeSim(); buildVisualsPanel(); }));
-      el.appendChild(makeChips('Scene build-up (how much stays on screen)','buildup',
-        {off:{label:'Just one'},gentle:{label:'Gentle'},full:{label:'Full scene'}},
-        buildVisualsPanel));   // rebuild so tweak counts that depend on this stay true
       el.appendChild(makeSlider({key:'visIntensity',label:'Visual intensity',
         min:0.4,max:1.5,step:0.05,dp:2,onChange:pokeSim}));
       // fine-tune sliders for the current style
@@ -827,7 +893,7 @@ const Anim = (() => {
         rc.appendChild(r); el.appendChild(rc);
       }
       el.appendChild(makeChips('Colour','colorMode',
-        {theme:{label:'🎨 Theme colours'},note:{label:'🎵 Boomwhacker notes'},single:{label:'⬤ One colour'}},
+        {theme:{label:'🎨 Theme colours'},single:{label:'⬤ One colour'}},
         buildVisualsPanel));
       if(SETTINGS.colorMode==='theme'){
         const tc=document.createElement('div'); tc.className='chips';
@@ -882,12 +948,22 @@ const Anim = (() => {
       const X=x*W, Y=(1-y)*H, mode=SETTINGS.visMode, now=performance.now();
       const c=color.map(v=>Math.min(1,v)*255);
       const act=ms=>{ if(now-lastTouchAct<ms) return false; lastTouchAct=now; return true; };
-      if(mode==='lava'){       // stir the lamp: nearby blobs light up and drift away
-        for(const b of blobs){
+      if(mode==='mandala'){    // pour energy into the spectrum bars at the finger's angle
+        const cx=W/2, cy=H/2, r0=m*0.13, d=Math.hypot(X-cx,Y-cy);
+        if(d<r0*1.05){ if(act(180)) mandBurst(0.7); }        // centre → the whole ring flares out
+        else mandTouch(Math.atan2(Y-cy,X-cx),0.9,2,Math.max(0,d-r0));  // finger → beam stretches out to the touch
+        pokeSim();
+        return;
+      }
+      if(mode==='lava'){       // snooker strike: a crisp hit sends the blob away,
+        for(const b of blobs){ // friction (in drawLava) rolls it back to a drift
           const d=Math.hypot(b.x-X,b.y-Y);
-          if(d<m*0.25){ b.hot=Math.min(1,(b.hot||0)+0.6);
-            b.vx+=(b.x-X)/(d+1)*m*0.15; b.vy+=(b.y-Y)/(d+1)*m*0.15; }
+          if(d<m*0.25&&now-(b.lp||0)>150){
+            b.lp=now; b.hot=Math.min(1,(b.hot||0)+0.6);
+            b.vx+=(b.x-X)/(d+1)*m*0.18; b.vy+=(b.y-Y)/(d+1)*m*0.18;
+          }
         }
+        pokeSim();
         return;
       }
       if(mode==='flow'){       // pour particles into the current under the finger
@@ -909,8 +985,20 @@ const Anim = (() => {
         ledPulses.push({s,v:-L*0.45,life:1});
         return;
       }
-      if(mode==='ripples'){     // tap the pool: the line sends out a wave
-        if(act(150)) rippleWave(0.55,c);
+      if(mode==='ripples'){     // tap the pond: a drop lands right at the finger
+        if(act(150)) rippleRing(X,Y,0.55,c);
+        return;
+      }
+      if(mode==='waves'){      // grab the line: drag it and it springs back in ripples
+        if(pluckU){
+          const N=pluckU.length, idx=Math.max(1,Math.min(N-2,Math.round(x*(N-1))));
+          const disp=Math.max(-H*0.35,Math.min(H*0.35,Y-H/2));
+          for(const o of [-1,0,1]){        // hold the string at the finger
+            const j=idx+o;
+            if(j>0&&j<N-1){ pluckU[j]=disp*(o?0.7:1); pluckV[j]=0; }
+          }
+          pluckLive=true; pokeSim();
+        }
         return;
       }
       if(mode==='fountain'){
@@ -926,15 +1014,15 @@ const Anim = (() => {
         return;
       }
       if(mode==='stars'){      // touch a spot in the sky and a star is born there
-        const mCap=buCap(0,14,40);
-        if(mCap&&act(250)){
+        const mCap=40;
+        if(act(250)){
           memStars.push({x:X,y:Y,r:(1.2+Math.random()*1.6)*(H/800),
             ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2,c:c.slice(),mem:true});
           while(memStars.length>mCap) memStars.shift();
           return;
         }
       }
-      // mandala / waves: position carries no meaning — soft ring
+      // fallback (rapid taps on stars): soft ring
       if(touchRings.length>=24) return;
       touchRings.push({x:X,y:Y,r:4,v:0.18*m,a:0.35,c});
     },
@@ -943,7 +1031,7 @@ const Anim = (() => {
       if(!ctx) return;
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
-      const fade={mandala:0.30,lava:0.12,waves:0.30,flow:0.045,
+      const fade={mandala:0.30,lava:1,waves:0.30,flow:0.045,
         pixels:1,leds:0.4,ripples:0.30,fountain:0.10,stars:0.45}[mode]||0.15;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
@@ -964,15 +1052,16 @@ const Anim = (() => {
       // keep a ~20 s animated tail after the last activity, then let the sim
       // sleep (the last frame stays on screen as a calm still)
       if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
-         flows.length||glowPatches.length||
+         flows.length||glowPatches.length||mandHot()||(mode==='waves'&&pluckLive)||
          (pix&&pix.hot)||ledPulses.length) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){
       if(!ctx) return;
       rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[]; blobs=[];
-      flows=[];
+      flows=[]; mandBoost=null; mandReach=null; mandN=0;
       glowPatches=[]; memStars=[]; haze=[]; wave=null; wave2=null;
+      pluckU=null; pluckV=null; pluckLive=false;
       pix=null; ledPulses=[]; ledChase=0;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
