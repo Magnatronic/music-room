@@ -105,16 +105,16 @@ input[type=range]::-moz-range-thumb{width:34px;height:34px;border-radius:50%;bac
   transition:transform 0.15s;flex-shrink:0}
 .swatch:hover{transform:scale(1.12)}
 .swatch.active{border-color:#fff;transform:scale(1.1)}
-.picker{position:relative;width:44px;height:44px;border-radius:50%;overflow:hidden;flex-shrink:0;
+.picker{width:44px;height:44px;border-radius:50%;flex-shrink:0;
   border:2px solid rgba(255,255,255,0.25);cursor:pointer;
-  background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)}
+  background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red);
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .picker.active{border-color:#fff}
-.picker input{position:absolute;inset:-4px;width:200%;height:200%;opacity:0;cursor:pointer;border:none;padding:0}
 .qsep{display:block;width:100%;height:1px;background:rgba(255,255,255,0.15);
   font-size:0;line-height:0;user-select:none;flex-shrink:0;margin:2px 0}
-.bgpick{position:relative;overflow:hidden;cursor:pointer;font-size:12px;
+.bgpick{cursor:pointer;font-size:12px;gap:10px;
   color:rgba(255,255,255,0.75);padding:0 14px;height:44px;border-radius:16px}
-.bgpick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:none;padding:0}
+.bgdot{width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,0.35);flex-shrink:0}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 16px}
 .chip{padding:8px 16px;border-radius:16px;min-height:50px;background:rgba(255,255,255,0.05);
   border:2px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.90);font-size:13px;cursor:pointer;
@@ -141,6 +141,19 @@ input[type=range]::-moz-range-thumb{width:34px;height:34px;border-radius:50%;bac
 .dlgx{width:44px;height:44px;border-radius:14px;background:rgba(255,255,255,0.10);
   border:none;color:#fff;font-size:16px;cursor:pointer;flex-shrink:0;
   touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+
+/* ── Colour picker dialog (replaces the browser-native colour input, which
+   opens an OS dialog that differs per browser and has mouse-scale targets) ── */
+#clrOv{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,0.55);
+  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+#clrDlg{width:min(430px,94vw);max-height:88vh;overflow-y:auto;
+  color:rgba(255,255,255,0.9);font:14px sans-serif}
+#clrDlg .ttl{font-size:16px;font-weight:600}
+#clrGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;padding:18px}
+#clrGrid .clrsw{aspect-ratio:1;min-height:50px;border-radius:14px;cursor:pointer;
+  border:2px solid rgba(255,255,255,0.18);padding:0;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+#clrGrid .clrsw.active{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,0.35)}
 
 /* ── Notes mode: band / grid overlay ─────────────────────── */
 #bands{position:fixed;inset:0;display:grid;z-index:4;pointer-events:none}

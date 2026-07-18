@@ -162,13 +162,7 @@ const Anim = (() => {
       el.appendChild(makeToggle('Spotlight the next note','spotlight',applyGuideLook));
       el.appendChild(makeChips('Next-note pulse','guidePulse',PULSE_OPTS,applyGuideLook));
       el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
-      const bgRow=document.createElement('div'); bgRow.className='swrow';
-      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
-      bgpk.textContent='Background colour';
-      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
-      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
-      bgpk.addEventListener('click',e=>e.stopPropagation());
-      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      appendBgControl(el);
       appendFineTune(el);
     },
     onCell(col,row){

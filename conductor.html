@@ -331,13 +331,7 @@ const Anim = (() => {
     buildVisuals(el){
       el.appendChild(makeChips('Baton trail','trail',TRAIL_OPTS));
       el.appendChild(makeSlider({key:'persistence',label:'Trail persistence',min:0,max:1,step:0.05,dp:2}));
-      const bgRow=document.createElement('div'); bgRow.className='swrow';
-      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
-      bgpk.textContent='Background colour';
-      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
-      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
-      bgpk.addEventListener('click',e=>e.stopPropagation());
-      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      appendBgControl(el);
       appendFineTune(el);
     },
     init(cv){

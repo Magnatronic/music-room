@@ -941,13 +941,7 @@ const Anim = (() => {
       el.appendChild(makeChips('Slider colours','colWash',WASH,pokeSim));
       el.appendChild(makeToggle('Moving pictures with the sounds','visFx'));
       el.appendChild(makeToggle('Icons under the sliders','showLabels',()=>{ buildBands(); restyle(); }));
-      const bgRow=document.createElement('div'); bgRow.className='swrow';
-      const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
-      bgpk.textContent='Background colour';
-      const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
-      bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
-      bgpk.addEventListener('click',e=>e.stopPropagation());
-      bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+      appendBgControl(el);
       appendFineTune(el);
     },
     onCell(colIdx){

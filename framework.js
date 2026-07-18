@@ -785,25 +785,57 @@ function appendColorControls(el){
         SETTINGS.lockedColor=c.slice(); saveSettings(); buildVisualsPanel(); });
       row.appendChild(sw);
     });
-    const pk=document.createElement('label'); pk.className='picker'; pk.title='Pick a custom colour';
+    const pk=document.createElement('div'); pk.className='picker'; pk.title='Pick a custom colour';
     if(lk && !row.querySelector('.swatch.active')) pk.classList.add('active');
-    const inp=document.createElement('input'); inp.type='color';
-    inp.value=lk?'#'+lk.map(v=>('0'+Math.round(Math.min(v,1)*255).toString(16)).slice(-2)).join(''):'#ffffff';
-    inp.addEventListener('input',e=>{ e.stopPropagation(); getAudio();
-      SETTINGS.lockedColor=hexToRGB(inp.value); saveSettings(); });
-    pk.addEventListener('click',e=>e.stopPropagation());
-    pk.appendChild(inp); row.appendChild(pk);
+    pk.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+      const cur=lk?'#'+lk.map(v=>('0'+Math.round(Math.min(v,1)*255).toString(16)).slice(-2)).join(''):'';
+      openColorDialog('Custom colour',cur,hex=>{
+        SETTINGS.lockedColor=hexToRGB(hex); saveSettings(); buildVisualsPanel(); }); });
+    row.appendChild(pk);
     el.appendChild(row);
   }
 }
+// Our own colour dialog: the native <input type=color> opens an OS picker that
+// looks different in every browser and has mouse-scale targets. This is a
+// submenu-styled swatch grid at wall-touch size; taps apply live so the colour
+// can be judged against the running animation, ✕ (or the backdrop) closes.
+const CLR_BASIC=[
+  '#000000','#12141c','#2a2d39','#5a5f6e','#c3c8d4','#ffffff',
+  '#ff4136','#ff851b','#ffdc00','#2ecc40','#00bcd4','#0074d9',
+  '#ff8f88','#ffc04d','#fff176','#7fe08a','#6fd9e8','#63a4ff',
+  '#7a1f1f','#7a4a12','#6e6400','#14532a','#0f5e5e','#0b3d70',
+  '#b10dc9','#f012be','#ff7fb2','#7c5cff','#3f2b96','#26094a',
+];
+function openColorDialog(title,cur,onPick){
+  const ov=document.createElement('div'); ov.id='clrOv';
+  const dlg=document.createElement('div'); dlg.id='clrDlg'; dlg.className='submenu';
+  dlg.innerHTML='<div class="dlghead"><span class="ttl"></span><button class="dlgx">✕</button></div><div id="clrGrid"></div>';
+  dlg.querySelector('.ttl').textContent=title;
+  const grid=dlg.querySelector('#clrGrid');
+  let curHex=(cur||'').toLowerCase();
+  CLR_BASIC.forEach(hex=>{
+    const b=document.createElement('button'); b.className='clrsw'; b.style.background=hex;
+    b.classList.toggle('active',hex===curHex);
+    b.addEventListener('click',e=>{ e.stopPropagation();
+      curHex=hex; onPick(hex);
+      grid.querySelectorAll('.clrsw').forEach(x=>x.classList.toggle('active',x===b)); });
+    grid.appendChild(b);
+  });
+  dlg.querySelector('.dlgx').addEventListener('click',()=>ov.remove());
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  dlg.addEventListener('click',e=>e.stopPropagation());
+  ov.appendChild(dlg); document.body.appendChild(ov);
+}
 function appendBgControl(el){
   const bgRow=document.createElement('div'); bgRow.className='swrow';
-  const bgpk=document.createElement('label'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
+  const bgpk=document.createElement('div'); bgpk.className='bbar bgpick'; bgpk.title='Background colour';
   bgpk.textContent='Background colour';
-  const bgInp=document.createElement('input'); bgInp.type='color'; bgInp.value=SETTINGS.bg;
-  bgInp.addEventListener('input',e=>{ e.stopPropagation(); SETTINGS.bg=bgInp.value; saveSettings(); applyBg(); });
-  bgpk.addEventListener('click',e=>e.stopPropagation());
-  bgpk.appendChild(bgInp); bgRow.appendChild(bgpk); el.appendChild(bgRow);
+  const dot=document.createElement('span'); dot.className='bgdot'; dot.style.background=SETTINGS.bg;
+  bgpk.appendChild(dot);
+  bgpk.addEventListener('click',e=>{ e.stopPropagation();
+    openColorDialog('Background colour',SETTINGS.bg,hex=>{
+      SETTINGS.bg=hex; dot.style.background=hex; saveSettings(); applyBg(); }); });
+  bgRow.appendChild(bgpk); el.appendChild(bgRow);
 }
 // Collapsed "Fine-tune" group at the bottom of every Visuals panel: set-once
 // controls (app sliders, background, performance diagnostics) stay one tap away
