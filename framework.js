@@ -383,6 +383,15 @@ function getAudio(){
     limiter.threshold.value=-9; limiter.knee.value=12; limiter.ratio.value=8;
     limiter.attack.value=0.004; limiter.release.value=0.25;
     limiter.connect(ac.destination);
+    // Keep the OS output stream alive: some devices (HDMI audio especially)
+    // suspend the stream after digital silence and pop when it restarts or
+    // stops — heard as a click around short notes. A looping noise floor at
+    // -80 dB is far below audibility but keeps the pipe open.
+    const ka=ac.createBufferSource(); ka.loop=true;
+    const kab=ac.createBuffer(1,ac.sampleRate,ac.sampleRate);
+    const kad=kab.getChannelData(0);
+    for(let i=0;i<kad.length;i++) kad[i]=(Math.random()*2-1)*1e-4;
+    ka.buffer=kab; ka.connect(ac.destination); ka.start();
     // Reverb (send connected on demand in applyReverb)
     convolver=ac.createConvolver(); convolver.buffer=makeImpulse(ac,3.8,2.0);
     reverbWet=ac.createGain(); reverbWet.gain.value=SETTINGS.reverb?0.9:0;
@@ -424,11 +433,12 @@ function startVoice(x,y){
     // ramp into a step (an audible click, worst under CPU load).
     const freq=freqForX(x,y)*Math.pow(2,V.oct), t=ac.currentTime+0.012;
     const gain=ac.createGain(); gain.gain.value=0.0001;
+    const art=ac.createGain();   // articulation dips live here, away from the envelope
     const vol=ac.createGain(); vol.gain.value=yLoudness(y);
     const pan=ac.createStereoPanner(); pan.pan.value=(x*2-1)*0.6;
     const filt=ac.createBiquadFilter(); filt.type=V.filter.type; filt.frequency.value=filtFreq(V,y);
     if(V.filter.q) filt.Q.value=V.filter.q;
-    filt.connect(gain); gain.connect(vol); vol.connect(pan); pan.connect(masterGain);
+    filt.connect(gain); gain.connect(art); art.connect(vol); vol.connect(pan); pan.connect(masterGain);
     const nodes=[];
     for(const o of V.oscs){
       const ratio=o.ratio||1;
@@ -457,8 +467,10 @@ function startVoice(x,y){
     }
     gain.gain.setValueAtTime(0.0001,t);
     gain.gain.linearRampToValueAtTime(V.gain,t+attackTime());
-    if(V.pluck) gain.gain.exponentialRampToValueAtTime(0.0008, t+attackTime()+V.pluck*ringMul());
-    voices[vid]={nodes,lfo,gain,vol,pan,filt,freq,V,lastStrike:t,strikeDist:0};
+    // Pluck decay lives on the articulation node (see restrikePluck) — the
+    // envelope gain only ever carries the attack, so nothing needs cancelling.
+    if(V.pluck) art.gain.setTargetAtTime(0, t+attackTime(), pluckTc(V));
+    voices[vid]={nodes,lfo,gain,art,vol,pan,filt,freq,V,lastStrike:t,strikeDist:0};
     soundingVoices++; updatePolyGain();
     return vid;
   }catch(e){ return 0; }
@@ -468,24 +480,27 @@ function startVoice(x,y){
 // Re-strike the envelope as the pointer travels — distance-based, so a fast
 // sweep rolls like a mallet roll / glissando while a resting finger decays
 // naturally like the real instrument.
+// The whole strike/decay cycle is scheduled with setTargetAtTime on the
+// articulation node — a setTarget segment always starts from the value the
+// param actually has, so overlapping re-strikes are continuous by construction.
+// (The cancel/anchor approach on the envelope gain measurably clicked on fast
+// sweeps, whichever way it was anchored.) tc ≈ duration/5: an exponential
+// reaches ~0.7% of start level after 5 time constants, matching the old
+// exponentialRampToValueAtTime endpoint.
+function pluckTc(V){ return Math.max(0.02, V.pluck*ringMul()/5); }
 function restrikePluck(v,now){
   const V=v.V;
-  const hold=p=>{
-    if(p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
-    p.setValueAtTime(p.value,now);
-  };
   v.nodes.forEach(n=>{
-    if(n.mod){ hold(n.g.gain);
-      n.g.gain.linearRampToValueAtTime(v.freq*V.fm.depth,now+0.008);
-      n.g.gain.setTargetAtTime(v.freq*V.fm.depth*V.fm.decayTo,now+0.008,V.fm.decay);
-    } else if(n.decayTo!==undefined){ hold(n.g.gain);
-      n.g.gain.linearRampToValueAtTime(n.base,now+0.008);
-      n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.008,0.5);
+    if(n.mod){ // re-strike the FM tine
+      n.g.gain.setTargetAtTime(v.freq*V.fm.depth,now,0.006);
+      n.g.gain.setTargetAtTime(v.freq*V.fm.depth*V.fm.decayTo,now+0.02,V.fm.decay);
+    } else if(n.decayTo!==undefined){ // re-strike decaying partials
+      n.g.gain.setTargetAtTime(n.base,now,0.006);
+      n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.02,0.5);
     }
   });
-  const g=v.gain.gain; hold(g);
-  g.linearRampToValueAtTime(V.gain,now+0.012);
-  g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
+  v.art.gain.setTargetAtTime(1,now,0.004);
+  v.art.gain.setTargetAtTime(0,now+0.015,pluckTc(V));
   v.lastStrike=now; v.strikeDist=0;
 }
 // How long the voice takes to travel to a new note in Flow mode. It always LANDS
@@ -525,43 +540,34 @@ function retuneVoice(vid,x,y){
     const ac=getAudio(), now=ac.currentTime+0.012, V=v.V;   // scheduling headroom, see startVoice
     const f=freqForX(x,y)*Math.pow(2,V.oct);
     v.freq=f;
-    // Anchor before ramping: linear/exponential ramps interpolate from the LAST
-    // timeline event — for a held note that's its attack from seconds ago, so an
-    // un-anchored ramp JUMPS the value instantly (a hard click on every crossing).
-    // cancelAndHoldAtTime alone does NOT anchor when no future events exist.
-    const hold=p=>{
-      if(p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
-      p.setValueAtTime(p.value,now);
-    };
-    // One articulation per 100 ms: a fast sweep fires crossings faster than the
-    // dip/restrike envelopes finish, and re-anchoring a gain mid-ramp snaps it
-    // to a stale value — an audible click on every crossing. Pitch always
-    // retunes; a dip already in flight articulates the crossing anyway.
-    const artic = now-(v.lastArtic||0)>0.1;
+    // Articulation is scheduled with setTargetAtTime ONLY: a setTarget segment
+    // always starts from the value the param actually has at its start time, so
+    // overlapping events from a fast sweep stay continuous by construction.
+    // Cancel/anchor-based dips on the envelope gain clicked no matter how they
+    // were anchored — cancelAndHoldAtTime alone and an explicit stale
+    // setValueAtTime both produced hard sample jumps (verified by capture).
     v.nodes.forEach(n=>{
       n.osc.frequency.setTargetAtTime(f*n.ratio,now,0.005);
-      if(!artic) return;
       if(n.mod){ // re-strike the FM tine: depth rescales with the new frequency
-        hold(n.g.gain);
-        n.g.gain.linearRampToValueAtTime(f*V.fm.depth,now+0.008);
-        n.g.gain.setTargetAtTime(f*V.fm.depth*V.fm.decayTo,now+0.008,V.fm.decay);
+        n.g.gain.setTargetAtTime(f*V.fm.depth,now,0.006);
+        n.g.gain.setTargetAtTime(f*V.fm.depth*V.fm.decayTo,now+0.02,V.fm.decay);
       } else if(n.decayTo!==undefined){ // re-strike decaying partials (bell/glass sparkle)
-        hold(n.g.gain);
-        n.g.gain.linearRampToValueAtTime(n.base,now+0.008);
-        n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.008,0.5);
+        n.g.gain.setTargetAtTime(n.base,now,0.006);
+        n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.02,0.5);
       }
     });
-    if(artic){
-      const g=v.gain.gain; hold(g);
-      if(V.pluck){ // re-fire the pluck envelope so glissandos strike each note
-        g.linearRampToValueAtTime(V.gain,now+0.012);
-        g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
-        v.lastStrike=now; v.strikeDist=0;   // a zone crossing counts as a strike
-      } else {     // brief dip so each zone still reads as its own note
-        g.linearRampToValueAtTime(V.gain*0.45,now+0.02);
-        g.linearRampToValueAtTime(V.gain,now+0.08);
+    if(V.pluck){
+      // re-fire the pluck decay so glissandos strike each note (a zone crossing
+      // counts as a strike); rate-limited so a fast sweep can't machine-gun it
+      if(now-(v.lastArtic||0)>0.1){
+        v.art.gain.setTargetAtTime(1,now,0.004);
+        v.art.gain.setTargetAtTime(0,now+0.015,pluckTc(V));
+        v.lastStrike=now; v.strikeDist=0;
+        v.lastArtic=now;
       }
-      v.lastArtic=now;
+    } else { // brief dip on the articulation node so each zone reads as its own note
+      v.art.gain.setTargetAtTime(0.45,now,0.01);
+      v.art.gain.setTargetAtTime(1,now+0.03,0.04);
     }
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
     if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
@@ -580,15 +586,17 @@ function stopVoice(vid){
     // Ring macro scales the release tail — floored so Ring 0 stays a quick damp,
     // not a click (a ~30 ms tail cuts a Low-register note in about two cycles)
     const rel=Math.max(0.06, 0.25*ringMul());
-    // cancelAndHoldAtTime freezes the envelope where it is; the fallback's
-    // cancel+setValue can snap a mid-attack ramp back to ~0 (an audible click).
-    if(v.gain.gain.cancelAndHoldAtTime) v.gain.gain.cancelAndHoldAtTime(t);
-    else { v.gain.gain.cancelScheduledValues(t); v.gain.gain.setValueAtTime(v.gain.gain.value,t); }
-    v.gain.gain.setTargetAtTime(0,t,rel);
+    // Release on the articulation node, not the envelope gain: art's timeline
+    // only ever holds setTargetAtTime events, which start from the value the
+    // param actually has — continuous by construction. Cancelling the envelope
+    // gain here (any anchor variant) clicks when a quick tap releases while the
+    // attack ramp is still in flight (verified by sample capture). The envelope
+    // just completes on its own behind the closing art node.
+    v.art.gain.setTargetAtTime(0,t,rel);
     const stopAt=t+rel*7;
     v.nodes.forEach(n=>{try{n.osc.stop(stopAt);}catch(e){}});
     if(v.lfo){try{v.lfo.stop(stopAt);}catch(e){}}
-    v.nodes[0].osc.onended=()=>{soundingVoices=Math.max(0,soundingVoices-1);updatePolyGain();try{v.gain.disconnect();v.vol.disconnect();v.pan.disconnect();v.filt.disconnect();}catch(e){}};
+    v.nodes[0].osc.onended=()=>{soundingVoices=Math.max(0,soundingVoices-1);updatePolyGain();try{v.gain.disconnect();v.art.disconnect();v.vol.disconnect();v.pan.disconnect();v.filt.disconnect();}catch(e){}};
   }catch(e){}
 }
 // One-shot note with its own attack-decay envelope, for discrete animation sounds
