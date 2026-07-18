@@ -260,15 +260,16 @@ const Anim = (function(){
     },
     // Calm-first defaults: pad voice + smooth glide so touches sound like the app looks.
     defaults:{ mode:'flow', voice:'pad', glide:'smooth',
-      theme:'cosmic', brushSize:0.12, intensity:5000, persistence:0.75, velFade:0.20,
-      curl:20, glow:0.6, shading:true, ambient:false },
+      theme:'cosmic', brushSize:0.10, intensity:2000, persistence:0.85, velFade:0.20,
+      curl:5, glow:0.6, shading:true, ambient:false },
+    // Same four styles as Fluid Keys — four distinct corners of brush/force/
+    // fade/swirl space, named for what you see; in-between looks come from the
+    // Fine-tune sliders.
     styles:{
-      calm:    { label:'😌 Calm',      paint:true, brushSize:0.10, intensity:2000,  persistence:0.85, curl:5  },
-      silk:    { label:'🎀 Silk',      paint:true, brushSize:0.10, intensity:3000,  persistence:0.75, curl:15 },
-      nebula:  { label:'🌌 Nebula',    paint:true, brushSize:0.14, intensity:4000,  persistence:0.90, curl:25 },
-      lavalamp:{ label:'🫧 Lava lamp', paint:true, brushSize:0.20, intensity:1500,  persistence:0.95, curl:0  },
-      smoke:   { label:'💨 Smoke',     paint:true, brushSize:0.12, intensity:5000,  persistence:0.55, curl:30 },
-      storm:   { label:'⛈️ Storm',     paint:true, brushSize:0.22, intensity:12000, persistence:0.20, curl:50 },
+      ink:  { label:'✍️ Ink lines',  paint:true, brushSize:0.05, intensity:1600,  persistence:1.0,  curl:5  },
+      glow: { label:'🕯️ Soft glow', paint:true, brushSize:0.10, intensity:2000,  persistence:0.85, curl:5  },
+      storm:{ label:'⛈️ Storm',     paint:true, brushSize:0.24, intensity:13000, persistence:0.18, curl:50 },
+      lava: { label:'🫧 Lava lamp', paint:true, brushSize:0.25, intensity:1000,  persistence:1.0,  curl:0  },
     },
     schema:[
       {key:'brushSize',  label:'Brush size',        min:0.02, max:0.30,  step:0.01, dp:2},

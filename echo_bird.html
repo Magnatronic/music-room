@@ -161,7 +161,7 @@ const Anim = (() => {
     paneLabels:{ instrument:'🦜 Bird' },
     themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
     defaults:{ theme:'glow', birdMode:'free', callFrom:'random', phraseLen:3, tempo:1.0,
-      song:'twinkle', pressFx:'bloom', mode:'notes', paint:false, yAxis:'none',
+      song:'twinkle', pressFx:'none', mode:'notes', paint:false, yAxis:'none',
       zoneLook:'tint', colorMode:'note', scale:'major', noteCount:5, showLabels:true },
     schema:[],
     railButtons:[
@@ -196,10 +196,9 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
-      el.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
       el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
       appendBgControl(el);
-      appendFineTune(el);
+      appendFineTune(el, ft=>ft.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS)));
     },
     onCell(col,row){
       fxCell(col,0);

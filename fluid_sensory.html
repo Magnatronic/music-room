@@ -169,14 +169,15 @@ const Anim = (function(){
       neon:  {label:'⚡ Neon',  colors:[[1,0,0.8],[0,1,0.2],[1,0.9,0],[0,0.8,1],[1,0.1,0.5]]},
       prism: {label:'🌈 Prism', colors:[[1,0,0.2],[1,0.6,0],[0.2,1,0.2],[0,0.8,1],[0.7,0.2,1]]},
     },
-    defaults:{ theme:'cosmic', brushSize:0.12, intensity:7000, persistence:0.55, velFade:0.20, curl:0 },
+    defaults:{ theme:'cosmic', brushSize:0.10, intensity:2000, persistence:0.85, velFade:0.20, curl:0 },
+    // Four styles in four distinct corners of brush/force/fade space, named for
+    // what you see (in-between looks come from the Fine-tune sliders). No
+    // "off" style — Paint trails Off is the one way to disable painting.
     styles:{
-      blank: { label:'⬛ Blank (sound only)', paint:false },
-      calm:  { label:'😌 Calm', paint:true, brushSize:0.10, intensity:2000, persistence:0.85 },
-      ink:   { label:'Ink',   paint:true, brushSize:0.08, intensity:2000,  persistence:1.0  },
-      smoke: { label:'Smoke', paint:true, brushSize:0.12, intensity:5000,  persistence:0.55 },
-      storm: { label:'Storm', paint:true, brushSize:0.22, intensity:12000, persistence:0.20 },
-      silk:  { label:'Silk',  paint:true, brushSize:0.10, intensity:3000,  persistence:0.75 },
+      ink:  { label:'✍️ Ink lines',  paint:true, brushSize:0.05, intensity:1600,  persistence:1.0  },
+      glow: { label:'🕯️ Soft glow', paint:true, brushSize:0.10, intensity:2000,  persistence:0.85 },
+      storm:{ label:'⛈️ Storm',     paint:true, brushSize:0.24, intensity:13000, persistence:0.18 },
+      lava: { label:'🫧 Lava lamp', paint:true, brushSize:0.25, intensity:1000,  persistence:1.0  },
     },
     schema:[
       {key:'brushSize',  label:'Brush size',        min:0.02, max:0.30,  step:0.01, dp:2},

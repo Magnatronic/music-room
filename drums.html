@@ -501,7 +501,7 @@ const Anim = (() => {
   // padSounds (with per-pad shaping) rides along in SETTINGS, so Reset restores
   // the default kit and presets capture a whole custom one. padLayout '' is the
   // "migrate from older settings" sentinel — applyLayout resolves it.
-  const DEFAULTS={ theme:'kit', padLayout:'', noteCount:4, btVolume:0.7, pressFx:'bloom',
+  const DEFAULTS={ theme:'kit', padLayout:'', noteCount:4, btVolume:0.7, pressFx:'none',
     padSounds:DEFAULT_PADS, loopFlash:true, layerView:true,
     mode:'notes', paint:false, yAxis:'none', octaveRows:'1', zoneLook:'tint', colorMode:'note', showLabels:true };
 
@@ -577,12 +577,11 @@ const Anim = (() => {
     },
     // ✨ Visuals tab
     buildVisuals(el){
-      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
       el.appendChild(makeToggle('Drum icons on pads','showLabels',buildBands));
       el.appendChild(makeToggle('Show hits during playback','loopFlash'));
       el.appendChild(makeToggle('Layer timeline','layerView'));
       appendBgControl(el);
-      appendFineTune(el);
+      appendFineTune(el, ft=>ft.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS)));
     },
     onCell(col,row){
       const idx=padOf(col,row);

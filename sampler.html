@@ -515,7 +515,7 @@ const Anim = (() => {
       for(const k in PADTHEMES) t[k]={label:PADTHEMES[k].label,
         colors:PADTHEMES[k].pads.slice(0,5).map(c=>c.map(v=>v/255))};
       return t; })(),
-    defaults:{ theme:'bright', padLayout:'g6', pressFx:'bloom', padFill:0.6,
+    defaults:{ theme:'bright', padLayout:'g6', pressFx:'none', padFill:0.6,
       mode:'notes', paint:false, yAxis:'octaves', octaveRows:'2', noteCount:3,
       zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major' },
     schema:[],
@@ -566,10 +566,9 @@ const Anim = (() => {
       el.appendChild(tc);
       el.appendChild(makeSlider({key:'padFill',label:'Pad colour strength',
         min:0.2,max:0.9,step:0.05,dp:2,onChange:restyle}));
-      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
       el.appendChild(makeToggle('Icons on pads','showLabels',()=>{ buildBands(); restyle(); }));
       appendBgControl(el);
-      appendFineTune(el);
+      appendFineTune(el, ft=>ft.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS)));
     },
     onCell(col,row){
       pokeSim();

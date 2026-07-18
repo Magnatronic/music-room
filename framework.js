@@ -45,7 +45,7 @@ const SHARED_DEFAULTS = {
   tone:0.5, attack:0.5, ring:0.5,   // sound macros; 0.5 = the engine's original values
   mode:'notes', rootNote:'C', octave:'4', noteCount:5,
   showLabels:true, yAxis:'none', octaveRows:'2', zoneLook:'tint', paint:true, glide:'gentle',
-  paintKeys:'subtle', pressFx:'bloom',
+  paintKeys:'off', pressFx:'none',
   locked:false, quality:'auto', showStats:false,
 };
 
@@ -68,9 +68,10 @@ function initSettings(){
 }
 
 // What painting does in the current mode. Keys mode has its own three-way
-// setting: full-screen trails smear across the zone grid and visually dissolve
-// the keys, so 'subtle' (a small, contained bloom at the fingertip) is the
-// default there; Flow keeps the simple on/off flag that motion styles use.
+// setting: trails smear across the zone grid and visually dissolve the keys,
+// so Keys defaults to 'off' — the keyboard is the instrument — with 'subtle'
+// (a small contained bloom at the fingertip) and 'full' available in Fine-tune.
+// Flow keeps the simple on/off flag that motion styles use.
 // Apps that lock their mode (drums, voice visuals, …) keep the legacy flag —
 // their splats were designed for their fixed mode.
 const SUBTLE_PAINT={radius:0.06, vel:0.25};   // small blob, barely swirls
@@ -532,8 +533,14 @@ function retuneVoice(vid,x,y){
       if(p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
       p.setValueAtTime(p.value,now);
     };
+    // One articulation per 100 ms: a fast sweep fires crossings faster than the
+    // dip/restrike envelopes finish, and re-anchoring a gain mid-ramp snaps it
+    // to a stale value — an audible click on every crossing. Pitch always
+    // retunes; a dip already in flight articulates the crossing anyway.
+    const artic = now-(v.lastArtic||0)>0.1;
     v.nodes.forEach(n=>{
       n.osc.frequency.setTargetAtTime(f*n.ratio,now,0.005);
+      if(!artic) return;
       if(n.mod){ // re-strike the FM tine: depth rescales with the new frequency
         hold(n.g.gain);
         n.g.gain.linearRampToValueAtTime(f*V.fm.depth,now+0.008);
@@ -544,16 +551,17 @@ function retuneVoice(vid,x,y){
         n.g.gain.setTargetAtTime(n.base*n.decayTo,now+0.008,0.5);
       }
     });
-    const g=v.gain.gain; hold(g);
-    if(V.pluck){ // re-fire the pluck envelope so glissandos strike each note
-      g.linearRampToValueAtTime(V.gain,now+0.012);
-      g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
-      v.lastStrike=now; v.strikeDist=0;   // a zone crossing counts as a strike
-    } else {     // brief dip so each zone still reads as its own note
-      // 45% over 20 ms is deep enough to articulate but shallow/slow enough not
-      // to read as a click when a fast swipe fires it several times a second
-      g.linearRampToValueAtTime(V.gain*0.45,now+0.02);
-      g.linearRampToValueAtTime(V.gain,now+0.08);
+    if(artic){
+      const g=v.gain.gain; hold(g);
+      if(V.pluck){ // re-fire the pluck envelope so glissandos strike each note
+        g.linearRampToValueAtTime(V.gain,now+0.012);
+        g.exponentialRampToValueAtTime(0.0008,now+0.012+V.pluck*ringMul());
+        v.lastStrike=now; v.strikeDist=0;   // a zone crossing counts as a strike
+      } else {     // brief dip so each zone still reads as its own note
+        g.linearRampToValueAtTime(V.gain*0.45,now+0.02);
+        g.linearRampToValueAtTime(V.gain,now+0.08);
+      }
+      v.lastArtic=now;
     }
     v.pan.pan.setTargetAtTime((x*2-1)*0.6,now,0.08);
     if(yAxisMode()==='bright') v.filt.frequency.setTargetAtTime((V.filter.base+y*V.filter.track)*toneMul(),now,0.08);
@@ -569,7 +577,9 @@ function stopVoice(vid){
   delete voices[vid];
   try{
     const ac=getAudio(), t=ac.currentTime+0.012;   // scheduling headroom, see startVoice
-    const rel=0.25*ringMul();   // Ring macro scales the release tail
+    // Ring macro scales the release tail — floored so Ring 0 stays a quick damp,
+    // not a click (a ~30 ms tail cuts a Low-register note in about two cycles)
+    const rel=Math.max(0.06, 0.25*ringMul());
     // cancelAndHoldAtTime freezes the envelope where it is; the fallback's
     // cancel+setValue can snap a mid-attack ramp back to ~0 (an audible click).
     if(v.gain.gain.cancelAndHoldAtTime) v.gain.gain.cancelAndHoldAtTime(t);
@@ -759,23 +769,27 @@ function makeChips(label,key,map,onChange){
 }
 
 // ── Visuals panel: mode-aware — Keys shows zone/key feedback, Flow shows paint ──
-const COLORMODE_OPTS={note:{label:'🌈 Note colours'},theme:{label:'🎨 Theme'},single:{label:'⬤ One colour'}};
 const PAINTKEYS_OPTS={off:{label:'Off'},subtle:{label:'✨ Subtle'},full:{label:'🌊 Full trails'}};
 function appendColorControls(el){
-  el.appendChild(makeChips('Paint colours','colorMode',COLORMODE_OPTS,()=>{
-    if(SETTINGS.colorMode==='single'&&!SETTINGS.lockedColor){ SETTINGS.lockedColor=[1,1,1]; saveSettings(); }
-    buildVisualsPanel();
-  }));
-  if(SETTINGS.colorMode==='theme'){
-    const chips=document.createElement('div'); chips.className='chips';
-    for(const k in Anim.themes){
-      const c=document.createElement('div'); c.className='chip'+(k===currentTheme?' active':'');
-      c.textContent=Anim.themes[k].label||k;
-      c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); setTheme(k); });
-      chips.appendChild(c);
-    }
-    el.appendChild(chips);
-  } else if(SETTINGS.colorMode==='single'){
+  // One flat row: note colours, each palette theme and single-colour are sibling
+  // chips — the old two-level selector (mode row, then a theme row) was hard to
+  // scan. colorMode/theme stay separate settings underneath.
+  const h=document.createElement('div'); h.className='sectn'; h.textContent='Paint colours'; el.appendChild(h);
+  const chips=document.createElement('div'); chips.className='chips';
+  const add=(label,active,pick)=>{
+    const c=document.createElement('div'); c.className='chip'+(active?' active':'');
+    c.textContent=label;
+    c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); pick(); saveSettings(); buildVisualsPanel(); });
+    chips.appendChild(c);
+  };
+  add('🌈 Note colours',SETTINGS.colorMode==='note',()=>{ SETTINGS.colorMode='note'; });
+  for(const k in Anim.themes)
+    add(Anim.themes[k].label||k, SETTINGS.colorMode==='theme'&&k===currentTheme,
+        ()=>{ SETTINGS.colorMode='theme'; setTheme(k); });
+  add('⬤ One colour',SETTINGS.colorMode==='single',
+      ()=>{ SETTINGS.colorMode='single'; if(!SETTINGS.lockedColor) SETTINGS.lockedColor=[1,1,1]; });
+  el.appendChild(chips);
+  if(SETTINGS.colorMode==='single'){
     const row=document.createElement('div'); row.className='swrow';
     const lk=SETTINGS.lockedColor;
     STANDARD_SWATCHES.forEach(c=>{
@@ -868,21 +882,24 @@ function buildVisualsPanel(){
   // QUALITY/setPerf/applyStats/applyBg and the make* helpers are in scope for it.
   if(Anim.buildVisuals){ Anim.buildVisuals(el); return; }
   if(SETTINGS.mode==='notes' && !Anim.lockMode){
-    // Keys mode: the grid is the instrument — feedback stays contained in the
-    // cells (zone look, press effect) and paint is an explicit choice.
-    el.appendChild(makeChips('Paint trails','paintKeys',PAINTKEYS_OPTS,()=>{ refreshRailButtons(); buildVisualsPanel(); }));
-    if(SETTINGS.paintKeys!=='off') appendColorControls(el);
-    el.appendChild(makeChips('Zone look','zoneLook',ZONE_OPTS,()=>{ buildBands(); buildVisualsPanel(); }));
+    // Keys mode: the keyboard is the instrument — the everyday panel is about
+    // how the keys look. Trails and press effects are set-once extras that live
+    // in Fine-tune, off by default, for students who need a bigger visual reward.
+    el.appendChild(makeChips('Key look','zoneLook',ZONE_OPTS,()=>{ buildBands(); buildVisualsPanel(); }));
     if(SETTINGS.zoneLook!=='off')
       el.appendChild(makeToggle('Note letters on screen','showLabels',buildBands));
-    el.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
-    appendFineTune(el, ft=>appendBgControl(ft));
+    appendFineTune(el, ft=>{
+      ft.appendChild(makeChips('Paint trails','paintKeys',PAINTKEYS_OPTS,()=>{ refreshRailButtons(); buildVisualsPanel(); }));
+      if(SETTINGS.paintKeys!=='off') appendColorControls(ft);
+      ft.appendChild(makeChips('When a key is pressed','pressFx',PRESSFX_OPTS));
+      appendBgControl(ft);
+    });
   } else {
     // Flow mode: painting IS the app — colours and styles stay up top, the
     // per-app sliders tuck into Fine-tune.
     el.appendChild(makeToggle('Paint trails','paint',buildVisualsPanel));
     if(SETTINGS.paint!==false) appendColorControls(el);
-    if(Anim.styles){
+    if(Anim.styles && SETTINGS.paint!==false){
       const h=document.createElement('div'); h.className='sectn'; h.textContent='Style'; el.appendChild(h);
       const chips=document.createElement('div'); chips.className='chips';
       const activeKey=getCurrentStyleKey();
@@ -1101,14 +1118,29 @@ function updateBarButtons(){
 // Anim.railButtons: [{ id, icon():str, title():str, active():bool, show():bool, key:str, onClick() }]
 const FRAME_RAIL=[
   { id:'mode',
-    icon:()=>SETTINGS.mode==='notes'?'🎹':'🌊',
-    label:()=>SETTINGS.mode==='notes'?'Keys':'Flow',
-    title:()=>SETTINGS.mode==='notes'?'Keys mode — tap for free Flow':'Flow mode — tap for Keys zones',
-    onClick(){
-      SETTINGS.mode = SETTINGS.mode==='notes' ? 'flow' : 'notes';
-      saveSettings(); buildScale(); buildBands();
-      if(currentQuickMode==='instrument') buildInstrumentPanel();
-      else if(currentQuickMode==='visuals') buildVisualsPanel();
+    // Rendered as a segmented Keys|Flow block (both choices visible, active one
+    // lit) — a lone toggle labelled with the current mode gave no hint that
+    // pressing it switches. render/refresh descriptors bypass the plain-button
+    // path in buildRailButtons/refreshRailButtons.
+    render(){
+      const seg=document.createElement('div'); seg.className='railseg';
+      [['notes','🎹','Keys','Keys mode — note zones'],
+       ['flow', '🌊','Flow','Flow mode — free play']].forEach(([m,ic,lb,ti])=>{
+        const b=document.createElement('button'); b.className='segbtn'; b.dataset.mode=m; b.title=ti;
+        b.innerHTML='<span class="bic"></span><span class="blb"></span>';
+        b.querySelector('.bic').textContent=ic; b.querySelector('.blb').textContent=lb;
+        b.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); pokeSim();
+          if(SETTINGS.mode===m) return;
+          SETTINGS.mode=m; saveSettings(); buildScale(); buildBands();
+          if(currentQuickMode==='instrument') buildInstrumentPanel();
+          else if(currentQuickMode==='visuals') buildVisualsPanel();
+          refreshRailButtons(); });
+        seg.appendChild(b);
+      });
+      return seg;
+    },
+    refresh(seg){
+      seg.querySelectorAll('.segbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===SETTINGS.mode));
     }},
   { id:'clear', icon:()=>'🧹', label:'Clear', title:()=>'Clear the painting',
     show:()=>paintMode()!=='off',   // nothing to clear when the mode isn't painting
@@ -1127,6 +1159,7 @@ function allRailButtons(){
 function buildRailButtons(){
   railExtra.innerHTML='';
   allRailButtons().forEach(desc=>{
+    if(desc.render){ const n=desc.render(); n.dataset.rail=desc.id; railExtra.appendChild(n); return; }
     const b=document.createElement('button');
     // app-provided buttons wear the app's accent ring; framework ones stay neutral
     b.className='railbtn'+(FRAME_RAIL.includes(desc)?'':' app');
@@ -1140,6 +1173,7 @@ function buildRailButtons(){
 function refreshRailButtons(){
   allRailButtons().forEach(desc=>{
     const b=railExtra.querySelector('[data-rail="'+desc.id+'"]'); if(!b) return;
+    if(desc.refresh){ desc.refresh(b); if(desc.show) b.style.display=desc.show()?'':'none'; return; }
     if(desc.icon)   b.querySelector('.bic').textContent=desc.icon();
     const lb=b.querySelector('.blb');
     const L=desc.label ? (typeof desc.label==='function'?desc.label():desc.label) : '';
