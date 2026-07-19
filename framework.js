@@ -58,6 +58,10 @@ function initSettings(){
   try { SETTINGS = Object.assign(SETTINGS, JSON.parse(localStorage.getItem(STORE_KEY)||'{}')); } catch(e){}
   const themeKeys = Object.keys(Anim.themes);
   currentTheme = themeKeys.includes(SETTINGS.theme) ? SETTINGS.theme : themeKeys[0];
+  // A string lockMode pins the play mode itself — saved settings may hold the
+  // other mode from before the app locked it, which would strand the user with
+  // no toggle to escape.
+  if(typeof Anim.lockMode==='string') SETTINGS.mode=Anim.lockMode;
   // Saved settings may hold a retired press effect (smoke/pixel/ripple/press)
   if(SETTINGS.pressFx && !PRESSFX_OPTS[SETTINGS.pressFx]) SETTINGS.pressFx='bloom';
   // Retired voices: Retro's territory folded into Synth, Pluck's into Kalimba
