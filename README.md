@@ -33,16 +33,16 @@ Sibling project: [touch](https://github.com/Magnatronic/touch) — visual-focuse
 | `big_switch.html` | 🔘 Big Switch Songs — one giant button plays the song | ✅ Built |
 | `echo_bird.html` | 🦜 Echo Bird — call-and-response tunes | ✅ Built |
 | `bubbles.html` | 🫧 Music Bubbles — pop drifting note bubbles | ✅ Built |
-| `beat_builder.html` | 🏗️ Beat Builder — place sounds on big steps, loop forever | ✅ Built |
-| `conductor.html` | 🪄 Conductor — the music plays only while you move | ✅ Built |
 | **Sensory & Calm** | *Mesmerising visuals and soundscapes for regulation.* | |
 | `soundscape.html` | 🌧️ Soundscape Mixer — rain, waves, birds on big sliders | ✅ Built |
 | `voice_visuals.html` | 🎤 Voice Visuals — the mic turns sound into light | ✅ Built |
-| `fluid_paint.html` | 🌀 Fluid Paint — liquid light around every touch | ✅ Built |
 | `flock.html` | 🕊️ Flock — a glowing swarm gathers around your fingers | ✅ Built |
 | `slime.html` | 🍄 Slime Mould — living networks of light | ✅ Built |
 | `life.html` | 🧬 Game of Life — paint cells, new births play soft notes | ✅ Built |
 | `voice_play.html` | 🗣️ Voice Play | ❌ Cancelled |
+| `beat_builder.html` | 🏗️ Beat Builder | ❌ Removed |
+| `conductor.html` | 🪄 Conductor | ❌ Removed |
+| `fluid_paint.html` | 🌀 Fluid Paint | ❌ Removed |
 
 See **`APPS.md`** for the full roadmap and per-app specs.
 

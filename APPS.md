@@ -285,49 +285,17 @@ sideways / falling like snow), which notes/colours appear, game-mode goals.
 
 ---
 
-## 12. 🏗️ Beat Builder — `beat_builder.html` ✅ BUILT
+## 12. 🏗️ Beat Builder — `beat_builder.html` ❌ REMOVED
 
-**Concept.** A big-cell step sequencer: 4 or 8 steps across, 2–4 sound rows (drums and/or notes).
-Tap cells to toggle them; the loop plays continuously with a bouncing playhead. The student
-*composes* something that keeps existing — different agency from every performance app.
-
-**Therapy goals.** Planning and prediction (place a sound, anticipate when it returns), pattern
-awareness, ownership and identity ("YOUR song"), session continuity — saved beats reload next
-week ("remember what you made?"). Also a natural collaboration surface: therapist fills one row,
-student fills another.
-
-**Sound.** Drum rows reuse the synthesized Drum Pads kit; note rows use the current scale/voice.
-Tempo slider with a big visual pulse; swing toggle for instant groove.
-
-**Features.** Row count and step count are therapist controls (start 2×4 for emerging users);
-clear-row and clear-all behind the therapist panel (students can't wipe work accidentally);
-compositions save into the existing named-preset system for recall across sessions.
+Removed 2026-07-31 at the therapist's call — it was built and trialled but not wanted in
+the suite. See git history (through `dc2d3f0`) for the full spec and implementation.
 
 ---
 
-## 13. 🪄 Conductor — `conductor.html` ✅ BUILT
+## 13. 🪄 Conductor — `conductor.html` ❌ REMOVED
 
-**Concept.** The inverse of every other app: music plays only while the student *moves*. A song
-(existing library) flows while the pointer/finger is in motion — movement speed sets tempo,
-vertical position sets volume/brightness — and fades gracefully to a shimmer when they stop.
-A comet trail follows the "baton".
-
-**Therapy goals.** Sustained continuous movement rather than discrete presses — range-of-motion
-and movement-endurance work (including wheelchair users doing arm sweeps); self-regulation
-(fast/slow, loud/quiet under the student's control); the profound reward of an orchestra that
-obeys you.
-
-**Modes.**
-- **Conduct a song** — song engine supplies the notes; movement is the transport.
-- **Conduct a texture** — no song, just a rich chord pad in the current key that swells with
-  motion; calmer, no sequencing demand.
-
-**Settings.** Motion sensitivity (tiny tremor movements can count — the "whisper mode"
-equivalent for motor control), fade-out patience (how long stillness lasts before the music
-rests), tempo range clamp, trail visuals.
-
-**Build notes.** Input is pointer-move deltas smoothed over ~300 ms; no camera needed for v1.
-A webcam-motion input mode can arrive later via the framework input-adapter work.
+Removed 2026-07-31 at the therapist's call — it was built and trialled but not wanted in
+the suite. See git history (through `dc2d3f0`) for the full spec and implementation.
 
 ---
 
@@ -352,16 +320,14 @@ Soundscape and Voice Visuals. The `touch` repo is now superseded/frozen.
 
 ---
 
-## 17. 🌀 Fluid Paint — `fluid_paint.html` ✅ BUILT (2026-07)
+## 17. 🌀 Fluid Paint — `fluid_paint.html` ❌ REMOVED
 
-Sensory fork of Fluid Keys: same Navier–Stokes core, deliberately diverged. Locked to
-Flow (no Keys grid), calm defaults (pad voice, smooth glide), plus visual enhancements
-that stay OUT of the instrument on purpose: **bloom** (soft-knee prefilter + separable
-blur at low res, Glow slider), **3D shading** (dye brightness lit as a heightfield),
-an exposed **Swirl** (vorticity) slider, and opt-in **Ambient drift** — the canvas
-paints itself with soft splats, intentionally keeping the sim awake (skips idle-sleep
-power saving, so it's off by default). Styles: Calm / Silk / Nebula / Lava lamp /
-Smoke / Storm. The fork does not track fluid_sensory.html — don't sync them.
+Removed 2026-07-31 at the therapist's call: Fluid Keys does the job better, so the
+sensory-only fork was not worth keeping alongside it. It was a fork of Fluid Keys sharing
+the Navier–Stokes core but deliberately not synced, adding bloom, 3D dye shading, an
+exposed Swirl slider and ambient drift. See git history for the full spec and
+implementation — those visual extras are the place to start if the instrument ever wants
+them.
 
 ---
 

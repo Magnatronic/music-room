@@ -27,8 +27,8 @@ const STORE_KEY = 'settings:' + location.pathname.split('/').pop();
 const APP_ACCENTS={'fluid_sensory.html':'#7ad7ff','strummer.html':'#e05a9c','drums.html':'#e2641c',
   'sweep_chimes.html':'#8fd3ff','sampler.html':'#c0a0ff','song_grid.html':'#f5d117',
   'big_switch.html':'#3bb54a','echo_bird.html':'#7dffb0','bubbles.html':'#9ee7ff',
-  'beat_builder.html':'#ffb36b','conductor.html':'#e8c8ff','soundscape.html':'#1ca9a9',
-  'voice_visuals.html':'#8affd0','fluid_paint.html':'#b48cff','flock.html':'#7fa8ff',
+  'soundscape.html':'#1ca9a9',
+  'voice_visuals.html':'#8affd0','flock.html':'#7fa8ff',
   'slime.html':'#9dff57','life.html':'#57ffb0'};
 document.documentElement.style.setProperty('--accent', APP_ACCENTS[location.pathname.split('/').pop()]||'#8fb4ff');
 
