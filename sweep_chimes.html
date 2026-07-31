@@ -169,15 +169,30 @@ const Anim = (() => {
     chimeStrike(b, vel);
     burst(sx===undefined?b.px:sx, sy===undefined?b.py+b.L*0.55:sy, vel, barColor(b));
   }
+  // One dial behind every glow layer. 0 = no effects at all (the bars still swing),
+  // 1 = the liveliest the retuned look goes. Effects are deliberately sized in bar
+  // spacings, not screen pixels: a ripple must stay near the chime that made it, or
+  // a sweep across 8 bars buries the rack under overlapping full-screen rings.
+  function fxAmt(){
+    const v=+SETTINGS.fxAmount;
+    return Math.max(0,Math.min(1,isNaN(v)?0.5:v));
+  }
   // expanding colour-matched ripple from the touch point, bigger with harder hits
   function burst(x, y, vel, col){
     if(!SETTINGS.strikeRipples) return;
-    if(ripples.length>24) ripples.shift();
-    ripples.push({x, y, r:barW*0.8, v:(60+320*vel)*(W/1280), a:0.28+0.45*vel, col});
+    const fx=fxAmt(); if(fx<=0) return;
+    if(ripples.length>10) ripples.shift();
+    const r0=barW*0.5;
+    // capped at roughly one bar spacing, so ripple size tracks bar count instead
+    // of screen width — 15 chimes get small rings, 3 chimes get generous ones
+    const rMax=spacing*(0.35+0.75*fx);
+    ripples.push({x, y, r:r0, rMax, v:(rMax-r0)/0.45,
+      a:(0.16+0.26*vel)*(0.4+0.6*fx), col});
   }
   function trailPush(x,y,col){
     if(!SETTINGS.sweepTrail) return;
-    if(trail.length>48) trail.shift();
+    if(fxAmt()<=0) return;
+    if(trail.length>32) trail.shift();
     trail.push({x,y,a:0.8,col:col||[160,200,255]});
   }
   // grab-to-damp: a held, still finger quiets a bar like grabbing a real chime
@@ -260,9 +275,11 @@ const Anim = (() => {
     }
     // ring halos fade with the true acoustic decay
     for(const b of bars){ if(b.ring>0.02){ b.ring*=Math.exp(-dt/Math.max(0.3,b.ringTc*1.2)); moving=true; } }
-    // strike ripples expand and fade
+    // strike ripples expand to their cap and fade out quickly — lingering rings are
+    // what stacked up into the screen-filling tangle during a sweep
     for(let i=ripples.length-1;i>=0;i--){ const r=ripples[i];
-      r.r+=r.v*dt; r.a-=dt*0.9; if(r.a<=0) ripples.splice(i,1); else moving=true; }
+      r.r=Math.min(r.rMax,r.r+r.v*dt); r.a-=dt*1.6;
+      if(r.a<=0) ripples.splice(i,1); else moving=true; }
     // sweep trail ages
     for(let i=trail.length-1;i>=0;i--){ trail[i].a-=dt*2.4; if(trail[i].a<=0) trail.splice(i,1); else moving=true; }
     // one-touch auto sweep: a comet crosses the rack, striking as it goes
@@ -297,7 +314,7 @@ const Anim = (() => {
     ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
     ctx.fillRect(0,0,W,H);
     if(!bars.length) return;
-    const glowOk=activeQuality()!=='low';
+    const glowOk=activeQuality()!=='low', fx=fxAmt();
     // rail through the pivots
     ctx.strokeStyle='rgba(255,255,255,0.22)'; ctx.lineWidth=Math.max(2,H*0.006);
     ctx.beginPath();
@@ -312,16 +329,22 @@ const Anim = (() => {
       ctx.beginPath(); ctx.moveTo(b.px,b.py-H*0.015); ctx.lineTo(b.px,b.py); ctx.stroke();
       ctx.save();
       ctx.translate(b.px,b.py); ctx.rotate(b.th);
-      if(glowOk && b.ring>0.02){
+      if(glowOk && fx>0 && b.ring>0.02){
         // resonance halo: pulses gently and fades with the bar's true ring time,
-        // so the eye sees how long the ear still hears it
-        const rr=(barW*(1.6+0.5*Math.sin(time*5+b.px))+b.ring*barW*1.6)*2.2;
+        // so the eye sees how long the ear still hears it. Kept to a few bar widths —
+        // at 8x it was a screen-wide colour wash that hid which bar was ringing.
+        const rr=barW*(0.9+0.25*Math.sin(time*5+b.px)+b.ring*0.8)*(0.75+1.2*fx);
         const hg=ctx.createRadialGradient(0,b.L*0.55,0,0,b.L*0.55,rr);
-        hg.addColorStop(0,'rgba('+col.join(',')+','+(0.30*b.ring).toFixed(3)+')');
+        hg.addColorStop(0,'rgba('+col.join(',')+','+(0.22*b.ring*(0.5+0.5*fx)).toFixed(3)+')');
         hg.addColorStop(1,'rgba('+col.join(',')+',0)');
         ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(0,b.L*0.55,rr,0,Math.PI*2); ctx.fill();
       }
-      if(glowOk && b.glow>0.03){ ctx.shadowColor=cs; ctx.shadowBlur=b.glow*barW*1.6; }
+      // capped: an uncapped shadowBlur reached ~180px on a wide screen and was the
+      // single biggest frame cost (med quality sat at ~19 fps during a sweep)
+      if(glowOk && fx>0 && b.glow>0.03){
+        ctx.shadowColor=cs;
+        ctx.shadowBlur=Math.min(barW*0.5,b.glow*barW*0.7)*(0.5+0.5*fx);
+      }
       const grad=ctx.createLinearGradient(-barW/2,0,barW/2,0);
       const mat=SETTINGS.material, shade=(MATERIALS[mat]||MATERIALS.metal).shade;
       if(shade==='metal'){
@@ -370,15 +393,16 @@ const Anim = (() => {
     }
     for(const r of ripples){
       ctx.strokeStyle='rgba('+r.col.join(',')+','+Math.max(0,r.a).toFixed(3)+')';
-      ctx.lineWidth=Math.max(2,barW*0.12);
+      ctx.lineWidth=Math.max(1.5,barW*0.07);
       ctx.beginPath(); ctx.arc(r.x,r.y,r.r,0,Math.PI*2); ctx.stroke();
     }
-    if(SETTINGS.sweepTrail){
+    if(SETTINGS.sweepTrail && fx>0){
+      const tr=brushR*(1.1+0.5*fx);
       for(const tp of trail){
-        const g2=ctx.createRadialGradient(tp.x,tp.y,0,tp.x,tp.y,brushR*1.6);
-        g2.addColorStop(0,'rgba('+tp.col.join(',')+','+(0.35*tp.a).toFixed(3)+')');
+        const g2=ctx.createRadialGradient(tp.x,tp.y,0,tp.x,tp.y,tr);
+        g2.addColorStop(0,'rgba('+tp.col.join(',')+','+(0.26*tp.a*(0.5+0.5*fx)).toFixed(3)+')');
         g2.addColorStop(1,'rgba('+tp.col.join(',')+',0)');
-        ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(tp.x,tp.y,brushR*1.6,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(tp.x,tp.y,tr,0,Math.PI*2); ctx.fill();
       }
     }
   }
@@ -396,7 +420,7 @@ const Anim = (() => {
     paneLabels:{ instrument:'🎐 Chimes' },
     themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
     defaults:{ theme:'glow', material:'metal', barCount:8, layout:'row', chainKnock:true,
-      breeze:0, oneTouch:false, sweepTrail:true, strikeRipples:true,
+      breeze:0, oneTouch:false, sweepTrail:true, strikeRipples:true, fxAmount:0.5,
       mode:'flow', paint:true, yAxis:'none', colorMode:'note',
       scale:'major', showLabels:true },
     schema:[],
@@ -426,6 +450,10 @@ const Anim = (() => {
     // ✨ Visuals tab
     buildVisuals(el){
       el.appendChild(makeToggle('Note letters on screen','showLabels'));
+      // one dial over halos, ripples, bar bloom and trail — 0 leaves just the
+      // swinging bars, for students who find the glow too busy
+      el.appendChild(makeSlider({key:'fxAmount',label:'Effect strength',min:0,max:1,step:0.05,dp:2,
+        onChange:()=>pokeSim()}));
       el.appendChild(makeToggle('Sweep trail','sweepTrail'));
       el.appendChild(makeToggle('Touch ripples','strikeRipples'));
       appendBgControl(el);
