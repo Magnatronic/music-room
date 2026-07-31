@@ -22,15 +22,27 @@ Sibling project: [touch](https://github.com/Magnatronic/touch) — visual-focuse
 
 | File | App | Status |
 |---|---|---|
+| **Instruments** | *Open-ended music-making — every touch plays in key.* | |
 | `fluid_sensory.html` | 🎹 Fluid Keys — fluid painting + playable note grid | ✅ Built |
-| `song_grid.html` | 🎵 Song Grid — follow-along song player | ✅ Built |
+| `strummer.html` | 🎸 Chord Strummer — sweep across the strings to strum | ✅ Built |
 | `drums.html` | 🥁 Drum Pads — synthesized kit + backing track | ✅ Built |
+| `sweep_chimes.html` | 🎐 Sweep Chimes — hanging chime bars that swing and knock | ✅ Built |
+| `sampler.html` | 📼 Sampler Pads — record any sound onto a pad | ✅ Built |
+| **Songs & Games** | *Structured activities with gentle goals — never a fail.* | |
+| `song_grid.html` | 🎵 Song Grid — follow-along song player | ✅ Built |
 | `big_switch.html` | 🔘 Big Switch Songs — one giant button plays the song | ✅ Built |
-| `strummer.html` | 🎸 Chord Strummer | Planned |
-| `voice_visuals.html` | 🎤 Voice Visuals | Planned |
-| `voice_play.html` | 🗣️ Voice Play | Planned |
-| `sampler.html` | 📼 Sampler Pads | Planned |
-| `soundscape.html` | 🌧️ Soundscape Mixer | Planned |
+| `echo_bird.html` | 🦜 Echo Bird — call-and-response tunes | ✅ Built |
+| `bubbles.html` | 🫧 Music Bubbles — pop drifting note bubbles | ✅ Built |
+| `beat_builder.html` | 🏗️ Beat Builder — place sounds on big steps, loop forever | ✅ Built |
+| `conductor.html` | 🪄 Conductor — the music plays only while you move | ✅ Built |
+| **Sensory & Calm** | *Mesmerising visuals and soundscapes for regulation.* | |
+| `soundscape.html` | 🌧️ Soundscape Mixer — rain, waves, birds on big sliders | ✅ Built |
+| `voice_visuals.html` | 🎤 Voice Visuals — the mic turns sound into light | ✅ Built |
+| `fluid_paint.html` | 🌀 Fluid Paint — liquid light around every touch | ✅ Built |
+| `flock.html` | 🕊️ Flock — a glowing swarm gathers around your fingers | ✅ Built |
+| `slime.html` | 🍄 Slime Mould — living networks of light | ✅ Built |
+| `life.html` | 🧬 Game of Life — paint cells, new births play soft notes | ✅ Built |
+| `voice_play.html` | 🗣️ Voice Play | ❌ Cancelled |
 
 See **`APPS.md`** for the full roadmap and per-app specs.
 
