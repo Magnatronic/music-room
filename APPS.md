@@ -151,6 +151,25 @@ fallback; **no audio output** (feedback safety). Sensitivity presets ("whisper" 
 vocalizers is the key therapy feature — tiny sounds must produce big rewards). Pitch detection
 via autocorrelation on the time-domain buffer (good enough for voice).
 
+**💧 Ripples — one ring per frame, and a pop wins.** The timed ring and the onset splash used to be
+independent, so a loud sound landed both at once and then — because the level release is slow
+(~0.35 s) — the timer kept re-triggering all the way down the decay, turning one clap into a train
+of ripples over the next second. Timed rings now only fire while the sound holds or builds. The
+decay test must be **relative** to the level (`> -level*0.8`): a release always falls at
+`level/0.35` per second, so any fixed threshold gets cleared once the level grows small and the
+train starts up again about a second after the clap — which was exactly the reported symptom, and
+which a first fix using an absolute rate did not cure. Measured: one clap went 6 rings → 1, while a
+sustained 2 s note still gives its steady train of 16.
+
+**Idle sleep — read this before adding a style.** The frame loop keeps the sim awake while anything
+is "still busy", and every one of those tests must be gated on the style that owns it. A style's
+leftovers are only wound down by its own draw function, which stops running the instant you switch
+away, so an ungated test latches true forever and the projector renders a frozen picture all night.
+This was live for Pixels, Flow, Ripples and Mandala (measured: 152 pokes in 2.5 s after switching
+away, never sleeping). `touchRings` is the one exemption — it is drawn and decayed every frame in
+every style. Note that sleep lands ~32 s after the last activity, not 20: the app pokes for 20 s of
+frame time and each poke buys 12 s, which matters when testing it.
+
 **💡 LEDs style.** The whole screen is one LED matrix panel running a polar plasma — the look WLED
 people actually reach for on a big matrix (Stefan Petrick's Animartrix family, Soap, Octopus) rather
 than a spectrum analyser. Spiral arms wind outward from the middle while a second set counter-rotates
@@ -354,6 +373,15 @@ the old continuous x→pitch mapping that confused therapists.
   (renamed — the framework owns `colorMode`).
 - **🕊️ Flock — `flock.html`** Boids swarm that gathers to (or flees) the fingers;
   Murmuration/Fireflies/Plasma/Embers/Aurora styles.
+  Attractors are built from `pointers` at the top of `frame()`, **not** from `splat()`. splat only
+  fires when a touch *moves*, and `_attractors` is rebuilt every frame, so a finger resting still
+  used to exert no pull at all; splat also fired once per interpolated step, so a fast flick stacked
+  up to ten attractors and yanked far harder than a slow drag over the same ground. One attractor
+  per finger per frame is consistent either way. Touch pull runs 2–10 (was 1–8) against a ×4.2 gain
+  (was ×3.2) — the old bottom of the range barely moved the swarm — and `pull` is clamped to the
+  slider minimum so a device carrying an old saved value doesn't sit below what the UI can express.
+  `Anim._dbg(x,y)` reports agents within the touch radius; measure pull with that, **not** with lit
+  pixel counts, which swing several-fold frame to frame on trails and glow alone.
 
 All three default to **Flow mode** (`defaults.mode:'flow'`) — sensory-first, with the
 Keys grid one rail-tap away. The home page groups them under **Sensory & Calm** with

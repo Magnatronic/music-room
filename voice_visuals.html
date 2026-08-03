@@ -490,11 +490,26 @@ const Anim = (() => {
   function drawRipples(W,H,dt){
     const cx=W/2, cy=H/2;
     rippleTimer-=dt;
-    if(level>0.02&&rippleTimer<=0){
+    // At most one ring per frame, and a pop always wins. Previously the timed
+    // ring and the onset splash were independent, so a loud sound landed both
+    // at once and then — because the level release is slow (~0.35 s) — the
+    // timer kept re-triggering all the way down the decay, turning one clap
+    // into a train of ripples over the next second. Timed rings now only fire
+    // while the sound is holding or building, never while it dies away.
+    const pop=onset();
+    if(pop){
+      rippleRing(cx,cy,Math.min(1,level*1.6),col.slice());   // pop = big splash
+      rippleTimer=0.30/tw('rate');           // and no timed ring on its heels
+    // The decay test has to be RELATIVE to the level, not an absolute rate: a
+    // release always falls at level/0.35 per second, so any fixed threshold is
+    // cleared once the level gets small and the train starts up again a second
+    // after the clap — which is the bug. level*0.8 sits well under the 2.9*level
+    // of a real release but well over a note the singer is letting fade.
+    } else if(level>0.02&&rippleTimer<=0&&
+              (level-prevLevel)/Math.max(dt,1e-4)>-level*0.8){
       rippleTimer=(0.4-0.3*level)/tw('rate');
       rippleRing(cx,cy,level,col.slice());
     }
-    if(onset()) rippleRing(cx,cy,Math.min(1,level*1.6),col.slice());  // pop = big splash
     // the spring at the centre of the pond: always faintly there, breathing
     glowDisc(cx,cy,Math.min(W,H)*(0.05+0.09*level+0.006*Math.sin(t*1.7)),
       col,vI()*(0.10+0.35*level));
@@ -1107,9 +1122,19 @@ const Anim = (() => {
       prevLevel=level;
       // keep a ~20 s animated tail after the last activity, then let the sim
       // sleep (the last frame stays on screen as a calm still)
-      if(level>0.01||rings.length||touchRings.length||
-         flows.length||mandHot()||(mode==='waves'&&pluckLive)||
-         (pix&&pix.hot)||(mode==='leds'&&led&&led.hot)) lastActive=t;
+      // Every "still busy" test is gated on the style that owns it. A style's
+      // leftovers are only wound down by its own draw function, which stops
+      // running the moment you switch away — so an unguarded test latches true
+      // forever and the sim never sleeps, leaving the projector rendering a
+      // frozen picture all night. touchRings are exempt: they are drawn (and
+      // decayed) every frame in every style.
+      if(level>0.01||touchRings.length||
+         (mode==='ripples'&&rings.length)||
+         (mode==='flow'&&flows.length)||
+         (mode==='mandala'&&mandHot())||
+         (mode==='waves'&&pluckLive)||
+         (mode==='pixels'&&pix&&pix.hot)||
+         (mode==='leds'&&led&&led.hot)) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){

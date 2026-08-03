@@ -156,7 +156,10 @@ const Anim = (() => {
     const sepW   = SETTINGS.separation != null ? SETTINGS.separation : 1;
     const alignW = SETTINGS.alignment  != null ? SETTINGS.alignment  : 1;
     const cohW   = SETTINGS.cohesion   != null ? SETTINGS.cohesion   : 1;
-    const pull   = SETTINGS.pull   != null ? SETTINGS.pull   : 1;
+    // Clamped to the slider's minimum: the old range started at 1, which barely
+    // moved the flock, and a device carrying a saved value from back then would
+    // otherwise sit below anything the slider can now express.
+    const pull   = Math.max(2, SETTINGS.pull != null ? SETTINGS.pull : 3.5);
     const repel  = SETTINGS.repel;
 
     buildHash();
@@ -222,8 +225,8 @@ const Anim = (() => {
         const d=Math.sqrt(d2);
         const falloff=1-d/TOUCH_RADIUS;
         const dir=repel?-1:1;
-        ax+=(dx/d*maxSpeed - a.vx*dir)*pull*3.2*falloff*dir;
-        ay+=(dy/d*maxSpeed - a.vy*dir)*pull*3.2*falloff*dir;
+        ax+=(dx/d*maxSpeed - a.vx*dir)*pull*4.2*falloff*dir;
+        ay+=(dy/d*maxSpeed - a.vy*dir)*pull*4.2*falloff*dir;
       }
 
       // ── Integrate ──
@@ -424,7 +427,7 @@ const Anim = (() => {
       theme:'sky', renderStyle:'streaks',
       count:500, speed:1.8,
       cohesion:1.44, separation:1.04, alignment:2.08,
-      pull:2.0, trailLen:20, glowSize:4, repel:false,
+      pull:3.5, trailLen:20, glowSize:4, repel:false,
     },
 
     styles: {
@@ -441,7 +444,7 @@ const Anim = (() => {
       {key:'cohesion',   label:'Cohesion',     min:0,   max:2,    step:0.05, dp:2},
       {key:'separation', label:'Separation',   min:0,   max:2,    step:0.05, dp:2},
       {key:'alignment',  label:'Alignment',    min:0,   max:2,    step:0.05, dp:2},
-      {key:'pull',       label:'Touch pull',   min:1,   max:8,    step:0.1,  dp:1},
+      {key:'pull',       label:'Touch pull',   min:2,   max:10,   step:0.1,  dp:1},
       {key:'trailLen',   label:'Trail length', min:0,   max:60,   step:1,    dp:0},
       {key:'glowSize',   label:'Glow size',    min:1,   max:12,   step:0.5,  dp:1},
       {key:'repel',      label:'Repel',        type:'toggle'},
@@ -466,9 +469,12 @@ const Anim = (() => {
       for(let i=0; i<agents.length; i++){ agents[i].x*=sx; agents[i].y*=sy; }
     },
 
-    splat(x,y,dx,dy,color){
-      _attractors.push({x:x*W, y:(1-y)*H, color});
-    },
+    // Attraction is driven off the pointer list in frame(), not from here:
+    // splat() only fires when a touch MOVES, and _attractors is rebuilt every
+    // frame, so a finger resting still used to exert no pull at all. It also
+    // fired once per interpolated step, so a fast flick stacked up to ten
+    // attractors and yanked far harder than a slow drag over the same ground.
+    splat(){},
 
     frame(dt){
       if(!ctx||W<2||H<2) return;
@@ -482,6 +488,13 @@ const Anim = (() => {
       const q=activeQuality();
       const ceiling={high:desired, med:Math.round(desired*0.6), low:Math.round(desired*0.35)}[q]||desired;
       if(activeCount!==ceiling) resizePool(ceiling);
+
+      // one attractor per finger per frame, held or moving, fast or slow
+      _attractors.length=0;
+      for(let i=0;i<pointers.length;i++){
+        const p=pointers[i];
+        if(p.down) _attractors.push({x:p.x*W, y:(1-p.y)*H, color:p.color});
+      }
 
       const th=THEME_DATA[currentTheme]||THEME_DATA.sky;
 
@@ -503,8 +516,20 @@ const Anim = (() => {
       else if(style==='constellation') renderConstellation(th);
       else if(style==='sparks')        renderSparks(th);
       else if(style==='blobs')         renderBlobs(th);
+    },
 
-      _attractors=[];
+    // exposed read-only for automated verification (no UI). Pixel counts are
+    // useless for measuring pull — trails and glow swing them several-fold
+    // frame to frame — so report where the agents actually are.
+    _dbg(px,py){
+      let sum=0, near=0;
+      for(let i=0;i<activeCount;i++){
+        const a=agents[i], d=Math.hypot(a.x-px,a.y-py);
+        sum+=d; if(d<TOUCH_RADIUS) near++;
+      }
+      return {agents:activeCount, attractors:_attractors.length,
+        meanDist:activeCount?Math.round(sum/activeCount):0, withinTouch:near,
+        pull:Math.max(2,SETTINGS.pull!=null?SETTINGS.pull:3.5)};
     },
 
     reset(){
