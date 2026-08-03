@@ -1,20 +1,7 @@
 # Music Room
 
-Accessible **music-making web apps for a sensory room**, built for music therapists working with
-students with physical and learning disabilities. Every app runs fullscreen on a touch projector,
-responds to up to five simultaneous fingers, and works **entirely offline** — open `index.html`
-straight from a local folder or USB stick.
-
-## Design principles
-
-- **Big, obvious cause-and-effect** — large touch zones, immediate sound + light.
-- **Boomwhacker note colours everywhere** (C red, D orange, E yellow, F green, G teal, A purple,
-  B pink) — matching the coloured instruments therapists already use.
-- **Self-paced, no fail states** — apps wait for the student; nothing punishes a wrong press.
-- **Therapist control** — range/scale controls, named per-student presets, and a session lock
-  (🔒, hold the top-left corner 3 s to unlock).
-- **Offline-first** — no network at runtime, no build step, no dependencies. Binary assets
-  (e.g. sample packs) ship as base64 inside `.js` files so they load from `file://`.
+Some experimental web apps for use in sensory rooms. Everything runs fullscreen on a touch
+projector and works entirely offline — open `index.html` straight from a local folder or USB stick.
 
 ## Apps
 
