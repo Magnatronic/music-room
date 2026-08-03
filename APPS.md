@@ -150,6 +150,22 @@ fallback; **no audio output** (feedback safety). Sensitivity presets ("whisper" 
 vocalizers is the key therapy feature — tiny sounds must produce big rewards). Pitch detection
 via autocorrelation on the time-domain buffer (good enough for voice).
 
+**💡 LEDs style.** The whole screen is one LED matrix panel running a polar plasma — the look WLED
+people actually reach for on a big matrix (Stefan Petrick's Animartrix family, Soap, Octopus) rather
+than a spectrum analyser. Spiral arms wind outward from the middle while a second set counter-rotates
+through them, both warped by a drifting noise field, so the pattern never repeats. Colour comes from
+the field itself and so varies in **both** directions — that is the whole point, and the thing an
+earlier scrolling-equalizer version could never do (it mapped colour to row only, so the panel could
+only ever show one fixed vertical rainbow with brightness flickering on top; it read as flat).
+Silence leaves it drifting slowly; a voice speeds the field up, blooms it brighter and slides the
+palette by pitch; a sharp sound rolls a surge out from the centre. A finger drags the bright heart of
+the pattern around the panel. Dials: LEDs across (16–96), drift speed, pattern scale.
+
+Two things that matter if this is ever retuned: the noise warp feeding the spiral phase must stay
+**low frequency** — a warp that turns over faster than a couple of LEDs aliases into confetti — and
+the palette position must **ping-pong** rather than wrap, because a theme runs red→purple and
+wrapping snaps straight back to red at the seam.
+
 ---
 
 ## 6. 🗣️ Voice Play — `voice_play.html` ❌ CANCELLED

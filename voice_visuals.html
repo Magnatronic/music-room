@@ -90,7 +90,7 @@ const Anim = (() => {
   let pluckU=null, pluckV=null, pluckLive=false;  // Waves: touch-plucked string overlay
   let glowPatches=[], memStars=[], haze=[];
   let flows=[];                              // Flow field particles
-  let pix=null, ledPulses=[], ledChase=0;    // Pixels grid; LED strip pulses
+  let pix=null, led=null;                    // Pixels grid; LEDs panel (scrolling matrix)
   let lastTouchAct=0;                        // rate-limit for discrete touch spawns
 
   // ── microphone ──
@@ -224,7 +224,8 @@ const Anim = (() => {
     flow:   [['density','Density',0.2,1.5],['speed','Speed',0.3,2],['length','Trail length',0.4,2]],
     pixels: [['px','Pixels across',0.27,2.4,v=>''+Math.max(8,Math.round(30*v)),0.01],
              ['spread','Bloom spread',0.4,2],['linger','Afterglow',0.3,2.5]],
-    leds:   [['size','LED size',0.7,1.6],['chase','Chase speed',0,2.5],['eq','Equalizer height',0.4,1.5]],
+    leds:   [['px','LEDs across',0.5,2,v=>''+Math.max(16,Math.round(48*v)),0.01],
+             ['speed','Drift speed',0.2,2.5],['zoom','Pattern scale',0.4,2.2]],
     ripples:[['rate','Wave rate',0.4,2.5],['speed','Wave speed',0.4,2],['thick','Wave thickness',0.4,2.5]],
     fountain:[['embers','Embers',0,2],['burst','Burst size',0.4,2],['fall','Fall speed',0.3,2]],
     stars:  [['count','Stars',0.4,2],['twinkle','Twinkle',0.2,2],['band','Voice band',0.4,2]],
@@ -732,61 +733,149 @@ const Anim = (() => {
     P.hot=mx>0.015;
   }
 
-  // ── 💡 LEDs: the sensory-room LED strip, in software. A ring of LEDs around
-  //    the screen edge fills like a VU meter and carries a travelling chase;
-  //    sharp sounds fire pulses along the strip in both directions. In the
-  //    middle, a classic LED-matrix equalizer bounces with the spectrum. ──
+  // ── 💡 LEDs: the whole screen is one LED matrix panel running a polar
+  //    plasma — the look WLED people actually reach for on a big matrix
+  //    (Stefan Petrick's Animartrix family, Soap, Octopus) rather than a
+  //    spectrum analyser. Spiral arms wind outward from the middle while a
+  //    second set counter-rotates through them, both warped by a drifting
+  //    noise field, so the pattern never repeats. Colour comes from the field
+  //    itself, which is the whole point: it varies in BOTH directions and
+  //    slides as things move, where the old scrolling equalizer could only
+  //    ever show one fixed vertical rainbow. Silence leaves it drifting
+  //    slowly; a voice speeds the field up, blooms it brighter and slides the
+  //    palette by pitch; a sharp sound rolls a surge out from the centre. A
+  //    finger drags the bright heart of the pattern around the panel. ──
+  const TAU=Math.PI*2;
+  // 3D value noise — cheap enough to run over every LED every frame, and
+  // organic in a way plain sines never are. Fixed seed so the room looks the
+  // same every session.
+  const NPERM=(function(){
+    const p=new Uint8Array(512); let s=1337;
+    for(let i=0;i<256;i++) p[i]=i;
+    for(let i=255;i>0;i--){ s=(s*1103515245+12345)&0x7fffffff;
+      const j=s%(i+1), q=p[i]; p[i]=p[j]; p[j]=q; }
+    for(let i=0;i<256;i++) p[i+256]=p[i];
+    return p; })();
+  function nz(x,y,z){
+    const xi=Math.floor(x), yi=Math.floor(y), zi=Math.floor(z);
+    let u=x-xi, v=y-yi, w=z-zi;
+    u=u*u*(3-2*u); v=v*v*(3-2*v); w=w*w*(3-2*w);
+    const P=NPERM, A=P[xi&255]+(yi&255), B=P[(xi+1)&255]+(yi&255);
+    const AA=P[A&255]+(zi&255), AB=P[(A+1)&255]+(zi&255);
+    const BA=P[B&255]+(zi&255), BB=P[(B+1)&255]+(zi&255);
+    const x00=P[AA&255]+(P[BA&255]-P[AA&255])*u;
+    const x10=P[AB&255]+(P[BB&255]-P[AB&255])*u;
+    const x01=P[(AA+1)&255]+(P[(BA+1)&255]-P[(AA+1)&255])*u;
+    const x11=P[(AB+1)&255]+(P[(BB+1)&255]-P[(AB+1)&255])*u;
+    const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+    return (y0+(y1-y0)*w)*0.00392156862745098;   // /255
+  }
+
+  function ledCols(){ return Math.max(16,Math.round(48*tw('px'))); }
+  function initLed(W,H){
+    const cols=ledCols(), s=W/cols, rows=Math.max(4,Math.round(H/s)), n=cols*rows;
+    // polar coordinates are fixed for the life of the panel, so they are paid
+    // for once here instead of an atan2 per LED per frame
+    const D=new Float32Array(n), AT=new Float32Array(n),
+          CA=new Float32Array(n), SA=new Float32Array(n);
+    const cx=(cols-1)/2, cy=(rows-1)/2, rad=Math.hypot(cx,cy)||1;
+    for(let j=0;j<rows;j++) for(let i=0;i<cols;i++){
+      const dx=(i-cx)/rad, dy=(j-cy)/rad, k=j*cols+i, d=Math.sqrt(dx*dx+dy*dy);
+      const a=Math.atan2(dy,dx);
+      D[k]=d;                       // 0 in the middle, 1 out at the corners
+      AT[k]=a/TAU;                  // angle in turns, so whole-number arm counts
+      CA[k]=Math.cos(a); SA[k]=Math.sin(a);   //  stay seamless across the wrap
+    }
+    led={W,H,cols,rows,s,n,D,AT,CA,SA,
+         bx:cx,by:cy,tx:cx,ty:cy,   // the bright "heart": current + target, in cells
+         T:0,rot:0,pal:0,touchAt:-9,surges:[],lut:null,lutKey:'',hot:false};
+  }
   function drawLeds(W,H,dt){
-    const m=Math.min(W,H), sp=Math.max(14,(m/32*tw('size'))|0), o=sp*0.7, L=2*(W+H);
-    const total=Math.floor(L/sp);
-    const pt=s=>{
-      s=((s%L)+L)%L;
-      if(s<W) return [s,H-o];
-      s-=W; if(s<H) return [W-o,H-s];
-      s-=H; if(s<W) return [W-s,o];
-      s-=W; return [o,s];
-    };
-    ledChase=(ledChase+dt*L*(0.04+0.35*level)*tw('chase'))%L;
-    if(onset()&&ledPulses.length<6){
-      ledPulses.push({s:W/2,v:L*0.45,life:1});
-      ledPulses.push({s:W/2,v:-L*0.45,life:1});
+    if(!led||led.W!==W||led.H!==H||led.cols!==ledCols()) initLed(W,H);
+    const L=led, C=L.cols, R=L.rows, s=L.s, I=vI();
+    const zoom=2.4*tw('zoom'), spd=tw('speed');
+    const themeMode=SETTINGS.colorMode==='theme';
+
+    // the field runs on its own clock, so the panel is alive before anyone
+    // makes a sound; a voice just makes it hurry
+    L.T  +=dt*spd*(0.16+1.5*level);
+    L.rot+=dt*spd*(0.05+0.55*level);
+    L.pal+=dt*(0.02+0.35*level);
+    // the heart wanders on a slow Lissajous unless a finger is holding it
+    if(t-L.touchAt>1.5){
+      L.tx=(C-1)*(0.5+0.34*Math.sin(t*0.13));
+      L.ty=(R-1)*(0.5+0.30*Math.sin(t*0.091+2.1));
     }
-    ledPulses=ledPulses.filter(p=>{ p.s+=p.v*dt; p.life-=dt*0.8; return p.life>0; });
-    const fillArc=level*L/2;                    // VU fill outward from bottom-centre
-    const r=sp*0.28;
-    for(let k=0;k<total;k++){
-      const s=k*sp+sp/2, p=pt(s);
-      // distance along the strip from bottom-centre (wrap-aware)
-      let d=Math.abs(s-W/2); d=Math.min(d,L-d);
-      let b=0.05;                               // idle: the strip itself stays visible
-      if(d<fillArc) b+=0.45*(1-d/(fillArc+1));
-      let dc=Math.abs(s-ledChase); dc=Math.min(dc,L-dc);
-      b+=0.6*Math.max(0,1-dc/(sp*2.5));         // travelling chase hotspot
-      for(const pu of ledPulses){
-        let dp=Math.abs(s-pu.s); dp=Math.min(dp,L-dp);
-        b+=pu.life*Math.max(0,1-dp/(sp*2));
-      }
-      b=Math.min(1,b)*vI();
-      const c=SETTINGS.colorMode==='theme'?palAt(k/(total-1)):col;
-      ctx.fillStyle=rgba(c,0.12+0.85*b);
-      ctx.beginPath(); ctx.arc(p[0],p[1],r*(1+0.5*b),0,Math.PI*2); ctx.fill();
-      if(b>0.5) glowDisc(p[0],p[1],r*4,c,(b-0.5)*0.5);
+    const kk=1-Math.exp(-dt*2.4);
+    L.bx+=(L.tx-L.bx)*kk; L.by+=(L.ty-L.by)*kk;
+    // a sharp sound rolls a bright ring out to the edges of the panel
+    if(onset()&&L.surges.length<4) L.surges.push({r:0,life:1});
+    L.surges=L.surges.filter(g=>{ g.r+=dt*0.85; g.life-=dt*0.7; return g.life>0; });
+
+    // palette lookup table: colour varies per LED now, so building an rgb()
+    // string for each one would allocate thousands of strings a frame
+    const PN=96;
+    if(themeMode&&L.lutKey!==SETTINGS.theme){
+      L.lutKey=SETTINGS.theme; L.lut=[]; L.lutC=[];
+      for(let q=0;q<PN;q++){ const c=palAt(q/PN);
+        L.lutC.push(c); L.lut.push('rgb('+(c[0]|0)+','+(c[1]|0)+','+(c[2]|0)+')'); }
     }
-    // LED-matrix equalizer in the middle
-    const NB=16; updateBands(NB,dt);
-    const rowsN=12, colW=W*0.72/NB, x0=W*0.14, eh=H*0.42*tw('eq')/rowsN, y0=H*0.72;
-    for(let cnum=0;cnum<NB;cnum++){
-      const v=bands?bands[cnum]:0, lit=Math.round(Math.pow(v,0.8)*rowsN);
-      const c=SETTINGS.colorMode==='theme'?palAt(cnum/(NB-1)):col;
-      for(let j=0;j<rowsN;j++){
-        const on=j<lit, top=j===lit-1;
-        ctx.fillStyle=rgba(top?mix(c,[255,255,255],0.35):c,
-          vI()*(on?(top?0.95:0.4+0.3*(j/rowsN)):0.05));
+    if(!themeMode) ctx.fillStyle='rgb('+(col[0]|0)+','+(col[1]|0)+','+(col[2]|0)+')';
+
+    const T=L.T, T2=T*0.55, cosR=Math.cos(L.rot), sinR=Math.sin(L.rot);
+    const rotT=L.rot/TAU, palOff=L.pal+0.4*pitch01;
+    const heartR=(C*0.17)*(C*0.17);          // heart falloff, in cells²
+    const gain=0.38+0.5*level, rBase=s*0.30;
+    const D=L.D, AT=L.AT, CA=L.CA, SA=L.SA, SU=L.surges;
+    const glows=[];
+    for(let j=0;j<R;j++){
+      const y=j*s+s*0.5, bdy=j-L.by;
+      for(let i=0;i<C;i++){
+        const k=j*C+i, d=D[k], at=AT[k]+rotT;
+        // Two big, slow noise lobes — sampled on a circle so they stay seamless
+        // where the angle wraps. These are deliberately low frequency: a warp
+        // that turns over faster than a couple of LEDs aliases into confetti.
+        const ca=CA[k]*cosR-SA[k]*sinR, sa=CA[k]*sinR+SA[k]*cosR;
+        const w1=nz(ca*1.15+8,sa*1.15+8,T*0.20);
+        const w2=nz(d*1.3+3,T*0.26+4,12);
+        // two arms winding outward, three counter-rotating through them, each
+        // nudged off true by a lobe so they breathe instead of marching
+        const v1=0.5+0.5*Math.sin(TAU*(d*zoom-T+2*at+(w1-0.5)*0.5));
+        const v2=0.5+0.5*Math.sin(TAU*(d*zoom*0.62+T2-3*at+(w2-0.5)*0.6));
+        // ridges, contrast-stretched: a flat wash reads as nothing, so the
+        // valleys between the arms have to go properly dark
+        let b=(v2*0.58+v1*0.42-0.38)*2.2;
+        b=b<0?0:b>1?1:b*b*(3-2*b);
+        b*=gain;
+        const bdx=i-L.bx;
+        b+=0.5/(1+(bdx*bdx+bdy*bdy)/heartR);
+        for(let q=0;q<SU.length;q++){
+          const g=SU[q], dd=d-g.r<0?g.r-d:d-g.r;
+          if(dd<0.17) b+=g.life*(1-dd/0.17);
+        }
+        b=b>1?1:b;
+        let c;
+        if(themeMode){
+          // colour rides the big lobes, not the arms, so neighbouring LEDs stay
+          // close in hue and the panel reads as fields of light rather than
+          // speckle; ping-pong (not wrap) because a theme runs red→purple and
+          // wrapping would snap straight back to red at the seam
+          let p=palOff+w1*0.45+w2*0.30+v1*0.12;
+          p%=2; if(p<0) p+=2; if(p>1) p=2-p;
+          const q=(p*PN)|0; ctx.fillStyle=L.lut[q]; c=L.lutC[q];
+        } else c=col;
+        ctx.globalAlpha=Math.min(1,0.05+0.95*b)*I;
         ctx.beginPath();
-        ctx.arc(x0+cnum*colW+colW/2,y0-j*eh,Math.min(colW,eh)*0.26,0,Math.PI*2);
+        ctx.arc(i*s+s*0.5,y,rBase*(0.72+0.62*b),0,TAU);
         ctx.fill();
+        if(b>0.66&&glows.length<120) glows.push([i*s+s*0.5,y,c,(b-0.66)*1.1*I]);
       }
     }
+    ctx.globalAlpha=1;
+    for(let q=0;q<glows.length;q++){
+      const o=glows[q]; glowDisc(o[0],o[1],rBase*3.4,o[2],o[3]);
+    }
+    L.hot=level>0.01||SU.length>0||t-L.touchAt<2;
   }
 
   function drawTouchRings(W,H,dt){
@@ -827,6 +916,9 @@ const Anim = (() => {
       mandMax:+(mandBoost?Math.max.apply(null,mandBoost):0).toFixed(3),
       mandReach:mandReach?Math.round(Math.max.apply(null,mandReach)):0,
       mandHot:mandHot(), pluckLive,
+      leds:led?{cols:led.cols,rows:led.rows,hot:led.hot,surges:led.surges.length,
+        T:+led.T.toFixed(2),rot:+led.rot.toFixed(2),
+        heart:[Math.round(led.bx),Math.round(led.by)]}:null,
       pluckMax:pluckU?Math.round(Math.max.apply(null,Array.from(pluckU,Math.abs))):0,
       lava:{n:blobs.length,
         out:blobs.filter(b=>b.x<0||b.x>canvas.width||b.y<0||b.y>canvas.height).length,
@@ -970,13 +1062,10 @@ const Anim = (() => {
         if(pix) pixHeat(X/pix.s,Y/pix.s,2.2*Math.sqrt(pix.cols/30),0.4);
         return;
       }
-      if(mode==='leds'&&act(250)){   // fire pulses along the strip from the nearest edge
-        const dEdge=[Y,H-Y,X,W-X];   // top, bottom, left, right
-        const e=dEdge.indexOf(Math.min.apply(null,dEdge));
-        const L=2*(W+H);
-        const s=e===1?X : e===3?W+(H-Y) : e===0?W+H+(W-X) : W+H+W+Y;
-        ledPulses.push({s,v:L*0.45,life:1});
-        ledPulses.push({s,v:-L*0.45,life:1});
+      if(mode==='leds'&&led){  // drag the bright heart of the pattern about
+        led.tx=X/led.s; led.ty=Y/led.s; led.touchAt=t;
+        if(act(400)&&led.surges.length<4) led.surges.push({r:0,life:0.7});
+        pokeSim();
         return;
       }
       if(mode==='ripples'){     // tap the pond: a drop lands right at the finger
@@ -1026,7 +1115,7 @@ const Anim = (() => {
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
       const fade={mandala:0.30,lava:1,waves:0.30,flow:0.045,
-        pixels:1,leds:0.4,ripples:0.30,fountain:0.10,stars:0.45}[mode]||0.15;
+        pixels:1,leds:1,ripples:0.30,fountain:0.10,stars:0.45}[mode]||0.15;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
       ctx.fillRect(0,0,W,H);
@@ -1047,7 +1136,7 @@ const Anim = (() => {
       // sleep (the last frame stays on screen as a calm still)
       if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
          flows.length||glowPatches.length||mandHot()||(mode==='waves'&&pluckLive)||
-         (pix&&pix.hot)||ledPulses.length) lastActive=t;
+         (pix&&pix.hot)||(mode==='leds'&&led&&led.hot)) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){
@@ -1056,7 +1145,7 @@ const Anim = (() => {
       flows=[]; mandBoost=null; mandReach=null; mandN=0;
       glowPatches=[]; memStars=[]; haze=[]; wave=null; wave2=null;
       pluckU=null; pluckV=null; pluckLive=false;
-      pix=null; ledPulses=[]; ledChase=0;
+      pix=null; led=null;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
       ctx.fillRect(0,0,canvas.width,canvas.height);
