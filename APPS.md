@@ -139,8 +139,9 @@ voice); strings tuned to the current chord's notes across 2–3 octaves.
 ## 5. 🎤 Voice Visuals — `voice_visuals.html` ✅ BUILT
 
 **Concept.** Microphone-driven visuals: vocalize and the room responds with light. Loudness =
-size/brightness, pitch = colour/height. Visual modes: bloom (a glow that swells), ripples,
-particle fountain, aurora bands.
+size/brightness, pitch = colour/height. Visual styles: Mandala, Lava, Waves, Flow, Pixels, LEDs,
+Ripples, Starfield. (A 🎆 Fireworks style shipped and was retired — the bursts read as noise next to
+the calmer styles and nothing was lost by dropping it.)
 
 **Therapy goals.** Rewards vocalization for non-verbal students; breath control; call-and-response
 with the therapist's voice or instruments; the room "hears" the student.
@@ -161,8 +162,32 @@ Silence leaves it drifting slowly; a voice speeds the field up, blooms it bright
 palette by pitch; a sharp sound rolls a surge out from the centre. A finger drags the bright heart of
 the pattern around the panel. Dials: LEDs across (16–96), drift speed, pattern scale.
 
-Two things that matter if this is ever retuned: the noise warp feeding the spiral phase must stay
-**low frequency** — a warp that turns over faster than a couple of LEDs aliases into confetti — and
+**⭐ Starfield style.** Not a photo of a sky — you fly through it. Stars live in 3D and rush outward
+past a vanishing point, so there is real depth: far ones crawl, dim and cool; near ones tear past
+fat, bright and white-cored. The voice is the throttle (quiet = a slow drift, a shout = full warp),
+**holding a finger anywhere on the wall** throttles up too, pitch slides the palette, and coloured
+nebula clouds swell past as you go. Colour is a function of depth and pitch together, so the whole
+theme is on screen at every moment. Dials: stars, warp speed, trail length.
+
+**The vanishing point is pinned to the centre and nothing may move it.** Every star is projected
+from it, so shifting it re-projects the whole sky at once and the field lurches sideways — which is
+disorientating however gently it is eased, and is not fixable by softening the spring. An earlier
+version let a finger drag it (and snapped it back 1.2 s after release, a second lurch the other way)
+and let pitch slide it up and down; both were wrong for the same structural reason. Touch is now a
+pure throttle with no aim — the whole wall is the accelerator, which also suits a student who cannot
+target precisely. Note that a held-but-still finger emits no `splat()` at all (the framework only
+calls it when a touch *moves*), so the throttle reads `pointers` directly.
+
+The version this replaced drew all ~140 stars pure white (`[255,255,255]` hardcoded), never moved
+them, and hid its only background colour behind a 3.5%-alpha haze — hence "not very colourful and a
+bit boring". If the star alpha is ever retuned, keep a **floor** on it: a squared falloff makes
+everything that is not right on top of you invisible and leaves a black hole around the vanishing
+point. The old memory-stars (a sharp sound permanently added a coloured star to the sky) do not
+survive the move to a moving field — the reward is now a burst of speed instead.
+
+Two things that matter if the LEDs style is ever retuned: the noise warp feeding the spiral phase
+must stay **low frequency** — a warp that turns over faster than a couple of LEDs aliases into
+confetti — and
 the palette position must **ping-pong** rather than wrap, because a theme runs red→purple and
 wrapping snaps straight back to red at the seam.
 

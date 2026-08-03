@@ -72,7 +72,7 @@ const Anim = (() => {
                    lava:{label:'🫧 Lava'}, waves:{label:'〰️ Waves'},
                    flow:{label:'🌀 Flow'}, pixels:{label:'🟩 Pixels'},
                    leds:{label:'💡 LEDs'},
-                   ripples:{label:'💧 Ripples'}, fountain:{label:'🎆 Fireworks'},
+                   ripples:{label:'💧 Ripples'},
                    stars:{label:'⭐ Starfield'} };
   const GATE=0.05;
 
@@ -85,10 +85,11 @@ const Anim = (() => {
   let col=[120,200,255], tcol=[120,200,255];  // smoothed + target display colour
   let lastPitchAt=0, rot=0;
   let mandBoost=null, mandReach=null, mandN=0; // Mandala: per-bar touch energy + reach-to-finger (ride on the spectrum)
-  let rings=[], parts=[], touchRings=[], shoots=[], stars=[], blobs=[];
+  let rings=[], touchRings=[], stars=[], blobs=[];
   let rippleTimer=0, emitAcc=0, wave=null, wave2=null;
   let pluckU=null, pluckV=null, pluckLive=false;  // Waves: touch-plucked string overlay
-  let glowPatches=[], memStars=[], haze=[];
+  let haze=[];                               // Starfield: nebula clouds
+  let warpThr=0, warpHue=0.4;                // Starfield: throttle + palette slide
   let flows=[];                              // Flow field particles
   let pix=null, led=null;                    // Pixels grid; LEDs panel (scrolling matrix)
   let lastTouchAct=0;                        // rate-limit for discrete touch spawns
@@ -203,7 +204,7 @@ const Anim = (() => {
       bands[i]+=(v-bands[i])*k2;
     }
   }
-  // Onset = sharp level attack; drives Fireworks bursts and shooting stars.
+  // Onset = sharp level attack; drives shooting stars and the LED panel surge.
   function onset(){
     const hit=level-prevLevel>0.10 && level>0.16 && t-lastBurst>0.3;
     if(hit) lastBurst=t;
@@ -227,8 +228,7 @@ const Anim = (() => {
     leds:   [['px','LEDs across',0.5,2,v=>''+Math.max(16,Math.round(48*v)),0.01],
              ['speed','Drift speed',0.2,2.5],['zoom','Pattern scale',0.4,2.2]],
     ripples:[['rate','Wave rate',0.4,2.5],['speed','Wave speed',0.4,2],['thick','Wave thickness',0.4,2.5]],
-    fountain:[['embers','Embers',0,2],['burst','Burst size',0.4,2],['fall','Fall speed',0.3,2]],
-    stars:  [['count','Stars',0.4,2],['twinkle','Twinkle',0.2,2],['band','Voice band',0.4,2]],
+    stars:  [['count','Stars',0.4,2],['speed','Warp speed',0.3,2.5],['trail','Trail length',0.3,2.5]],
   };
   function tw(p){
     const o=SETTINGS.tw&&SETTINGS.tw[SETTINGS.visMode];
@@ -512,122 +512,110 @@ const Anim = (() => {
     });
   }
 
-  // ── 🎆 Fireworks: quiet sounds = rising embers across the whole skyline,
-  //    sharp sounds = comet bursts that leave a lingering glow in the sky ──
-  function drawFireworks(W,H,dt){
-    const q=activeQuality(), cap=q==='high'?450:q==='med'?280:140;
-    // afterglow: bursts stain the sky, slowly fading
-    glowPatches=glowPatches.filter(p=>{
-      p.life-=dt/8;
-      if(p.life<=0) return false;
-      glowDisc(p.x,p.y,p.R,p.c,vI()*p.life*0.10);
-      return true;
-    });
-    emitAcc+=dt*level*55*tw('embers');
-    while(emitAcc>=1&&parts.length<cap){
-      emitAcc--;
-      parts.push({x:W*Math.random(),y:H*0.98,
-        vx:(Math.random()-0.5)*W*0.06,
-        vy:-(0.18+0.45*level)*H*(0.7+Math.random()*0.5),
-        size:(1+Math.random()*2)*(H/800),c:col.slice(),life:1,trail:false,px:0,py:0});
-    }
-    emitAcc=Math.min(emitAcc,3);
-    if(onset()&&parts.length<cap-30){
-      const bx=W*(0.15+0.7*Math.random()), by=voiceY(H);
-      glowPatches.push({x:bx,y:by,R:Math.min(W,H)*(0.15+0.2*level),c:col.slice(),life:1});
-      while(glowPatches.length>10) glowPatches.shift();
-      const n=Math.min(cap-parts.length,((24+level*56)*tw('burst'))|0);
-      const sp=(0.22+0.5*level)*Math.min(W,H)*Math.sqrt(tw('burst'));
-      for(let i=0;i<n;i++){
-        const a=Math.random()*Math.PI*2, s=sp*(0.3+0.7*Math.random());
-        const c=SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],Math.random()*0.4);
-        parts.push({x:bx,y:by,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
-          size:(1.2+Math.random()*2.2)*(H/800),c,life:1+Math.random()*0.4,trail:true,px:bx,py:by});
-      }
-    }
-    parts=parts.filter(p=>{
-      p.px=p.x; p.py=p.y;
-      const drag=p.trail?Math.pow(0.30,dt):1;
-      p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt*tw('fall');
-      p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*(p.trail?0.8:0.45);
-      if(p.life<=0||p.y>H+30) return false;
-      const a=Math.min(1,p.life)*0.7;
-      if(p.trail){
-        ctx.strokeStyle=rgba(p.c,a); ctx.lineWidth=p.size; ctx.lineCap='round';
-        ctx.beginPath(); ctx.moveTo(p.px,p.py); ctx.lineTo(p.x,p.y); ctx.stroke();
-      } else {
-        ctx.fillStyle=rgba(p.c,a);
-        ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
-      }
-      return true;
-    });
-  }
-
-  // ── ⭐ Starfield: calm twinkling sky; the voice lights a band of stars at its
-  //    pitch height, sharp sounds send a shooting star ──
+  // ── ⭐ Starfield: not a photo of a sky — you are flying through it. Stars
+  //    live in 3D and rush outward past a vanishing point, so there is real
+  //    depth: far ones crawl, dim and deep-coloured; near ones tear past fat,
+  //    bright and white-cored. Colour is a function of depth, which means the
+  //    whole theme is on screen at every moment (the old version drew every
+  //    star pure white and never moved them, which is why it read as flat).
+  //    The voice is the throttle — quiet is a slow drift, a shout is full
+  //    warp — and holding a finger anywhere on the wall throttles up too.
+  //    Coloured nebula clouds swell past as you go.
+  //
+  //    The vanishing point is PINNED to the middle of the screen and nothing
+  //    is allowed to move it. Every star is projected from it, so shifting it
+  //    re-projects the whole sky at once and the field lurches sideways —
+  //    disorientating however gently it is eased. An earlier version let a
+  //    finger drag it (and snapped it back on release, a second lurch the
+  //    other way) and let pitch slide it up and down; both were wrong for the
+  //    same reason. Pitch now slides the palette instead, so a high note
+  //    flies you through different colours without touching the geometry. ──
+  const Z_FAR=2.2, Z_NEAR=0.075;
   function starCount(){
     const q=activeQuality();
-    return Math.round((q==='high'?140:q==='med'?90:55)*tw('count'));
+    return Math.round((q==='high'?320:q==='med'?200:110)*tw('count'));
+  }
+  function newStar(reborn){
+    // spread through the depth range on first build so the sky starts full
+    return {x:(Math.random()*2-1),y:(Math.random()*2-1),
+      z:reborn?Z_FAR:Z_NEAR+Math.random()*(Z_FAR-Z_NEAR),
+      hue:Math.random(),ph:Math.random()*Math.PI*2,sp:0.4+Math.random()*1.3,
+      big:Math.random()<0.09?1.9:1};       // a few bright ones to lead the eye
   }
   function buildStars(W,H){
     const n=starCount();
     stars=[]; haze=[];
-    for(let i=0;i<n;i++)
-      stars.push({x:Math.random()*W,y:Math.random()*H,
-        r:(0.6+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2});
-    for(let i=0;i<3;i++)   // faint fixed nebula haze behind the sky
-      haze.push({x:W*(0.15+0.7*Math.random()),y:H*(0.15+0.7*Math.random()),
-        R:Math.min(W,H)*(0.25+0.2*Math.random()),ci:0.15+0.35*i});
+    for(let i=0;i<n;i++) stars.push(newStar(false));
+    for(let i=0;i<7;i++){                  // nebula clouds ride the same depth
+      const c=newStar(false); c.R=0.5+Math.random()*0.9; haze.push(c);
+    }
   }
   function drawStars(W,H,dt){
     if(stars.length!==starCount()) buildStars(W,H);
-    for(const hz of haze)
-      glowDisc(hz.x,hz.y,hz.R,SETTINGS.colorMode==='theme'?palAt(hz.ci):col,vI()*0.035);
-    const bandY=voiceY(H), bandW=H*0.22*tw('band'), twAmp=0.12*tw('twinkle');
-    const star=(s,base,c0)=>{
-      const tw=base+twAmp*Math.sin(t*s.sp+s.ph);
-      const d=Math.abs(s.y-bandY)/bandW;
-      const lit=level*Math.max(0,1-d*d);            // gaussian-ish band at pitch height
-      const c=lit>0.02?mix(c0,col,Math.min(1,lit*1.5)):c0;
-      const a=Math.min(1,vI()*(tw+lit*0.9));
-      const r=s.r*(1+lit*1.6);
-      ctx.fillStyle=rgba(c,a);
-      ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fill();
-      if(lit>0.25||(s.mem&&a>0.4)){                  // cross-sparkle on bright stars
-        ctx.strokeStyle=rgba(c,a*0.5); ctx.lineWidth=1;
-        ctx.beginPath();
-        ctx.moveTo(s.x-r*3,s.y); ctx.lineTo(s.x+r*3,s.y);
-        ctx.moveTo(s.x,s.y-r*3); ctx.lineTo(s.x,s.y+r*3);
-        ctx.stroke();
+    const m=Math.min(W,H), themeMode=SETTINGS.colorMode==='theme';
+    // throttle: smoothed so the sky surges rather than stutters, and a sharp
+    // sound kicks it into a jump
+    if(onset()) warpThr=Math.min(2.2,warpThr+0.9);
+    // a finger held anywhere is a second throttle. Read straight off the
+    // pointer list: the framework only calls splat() when a touch MOVES, so a
+    // finger resting still would otherwise report nothing at all
+    let held=false;
+    for(let i=0;i<pointers.length;i++) if(pointers[i].down){ held=true; break; }
+    let target=0.22+2.4*level;
+    if(held&&target<2.6) target=2.6;
+    warpThr+=(target-warpThr)*(1-Math.exp(-dt*(target>warpThr?5:1.6)));
+    const spd=warpThr*0.55*tw('speed'), trail=0.055*tw('trail');
+    // pitch slides the palette rather than the camera; smoothed so the sky
+    // drifts through colours instead of flickering between them
+    warpHue+=(pitch01-warpHue)*(1-Math.exp(-dt*1.1));
+    const vx=W*0.5, vy=H*0.5, F=0.55*W;   // centre pinned — see the note above
+
+    // nebula clouds first, behind everything
+    for(let hi=0;hi<haze.length;hi++){
+      const c=haze[hi];
+      c.z-=spd*dt*0.55;
+      if(c.z<Z_NEAR){ const n2=newStar(true); n2.R=0.5+Math.random()*0.9;
+        haze[hi]=n2; continue; }
+      const near=1-c.z/Z_FAR;
+      // fade in from the far plane and back out as you fly into it
+      const env=Math.min(1,near*2.4)*Math.min(1,(c.z-Z_NEAR)*3.5);
+      let cp=c.hue*0.55+warpHue*0.45; if(cp>1) cp=2-cp;
+      glowDisc(vx+c.x/c.z*F, vy+c.y/c.z*F, c.R/c.z*m*0.5,
+        themeMode?palAt(cp):col, vI()*0.15*env);
+    }
+
+    for(let si=0;si<stars.length;si++){
+      const s=stars[si];
+      const zb=s.z+spd*trail*(0.4+s.z);    // where the star was: the streak tail
+      s.z-=spd*dt;
+      if(s.z<Z_NEAR){ stars[si]=newStar(true); continue; }
+      const near=1-s.z/Z_FAR;              // 0 at the far plane, 1 up close
+      const x=vx+s.x/s.z*F, y=vy+s.y/s.z*F;
+      if(x<-60||x>W+60||y<-60||y>H+60) continue;
+      // colour by depth, nudged per star so stars at one depth do not all
+      // land on the same hue and band the sky. Near = the hot end of the
+      // theme, so what rushes at you is what catches the eye
+      // ping-pong, not wrap: a theme runs red→purple and wrapping would snap
+      // straight back to red at the seam
+      let cp=(1-near)*0.60+s.hue*0.20+warpHue*0.42; if(cp>1) cp=2-cp;
+      const c=themeMode?palAt(cp):col;
+      const tk=0.86+0.14*Math.sin(t*s.sp+s.ph);
+      // the deep sky has to stay populated: a squared falloff wipes out
+      // everything not right on top of you and leaves a hole round the middle
+      const a=Math.min(1,vI()*(0.10+0.95*Math.pow(near,1.4))*tk);
+      const r=Math.max(0.5,m/900*s.big*(0.35+2.1*near));
+      const xb=vx+s.x/zb*F, yb=vy+s.y/zb*F;
+      const len=Math.hypot(x-xb,y-yb);
+      if(len>r*1.4){                       // moving fast enough to streak
+        const g=ctx.createLinearGradient(xb,yb,x,y);
+        g.addColorStop(0,rgba(c,0)); g.addColorStop(1,rgba(c,a));
+        ctx.strokeStyle=g; ctx.lineWidth=r*1.5; ctx.lineCap='round';
+        ctx.beginPath(); ctx.moveTo(xb,yb); ctx.lineTo(x,y); ctx.stroke();
       }
-    };
-    for(const s of stars) star(s,0.14,[255,255,255]);
-    // memory stars: every sharp sound adds a NEW coloured star — the session
-    // literally builds this student's sky
-    for(const s of memStars) star(s,0.30,s.c);
-    const mCap=40, hit=onset();
-    if(hit&&mCap){
-      memStars.push({x:W*(0.05+0.9*Math.random()),y:voiceY(H)*(0.85+0.2*Math.random()),
-        r:(1.2+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,
-        sp:0.3+Math.random()*1.2,c:col.slice(),mem:true});
-      while(memStars.length>mCap) memStars.shift();
+      ctx.fillStyle=rgba(near>0.72?mix(c,[255,255,255],(near-0.72)*2.4):c,a);
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+      if(near>0.8) glowDisc(x,y,r*5,c,a*0.35*(near-0.8)*5);
     }
-    if(hit&&shoots.length<3){
-      const fromLeft=Math.random()<0.5;
-      shoots.push({x:fromLeft?-40:W+40,y:H*(0.08+Math.random()*0.35),
-        vx:(fromLeft?1:-1)*W*(0.55+0.4*Math.random()),vy:H*(0.06+0.10*Math.random()),
-        life:1,c:col.slice()});
-    }
-    shoots=shoots.filter(s=>{
-      const px=s.x,py=s.y;
-      s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt*0.7;
-      if(s.life<=0||s.x<-80||s.x>W+80) return false;
-      const grad=ctx.createLinearGradient(px-s.vx*0.12,py-s.vy*0.12,s.x,s.y);
-      grad.addColorStop(0,rgba(s.c,0)); grad.addColorStop(1,rgba(mix(s.c,[255,255,255],0.6),s.life*0.9));
-      ctx.strokeStyle=grad; ctx.lineWidth=Math.max(1.5,H*0.003); ctx.lineCap='round';
-      ctx.beginPath(); ctx.moveTo(px-s.vx*0.12,py-s.vy*0.12); ctx.lineTo(s.x,s.y); ctx.stroke();
-      return true;
-    });
   }
 
   // ── 🌀 Flow: particles carried along a time-varying vector field (layered
@@ -912,7 +900,10 @@ const Anim = (() => {
     // expose read-only internals for automated verification (no UI)
     _dbg(){ return {mic:micState, level:+level.toFixed(3), pitch:+pitch01.toFixed(3),
       meter:+meterLvl.toFixed(3), polls:pollCount, mode:SETTINGS.visMode,
-      parts:parts.length, rings:rings.length, stars:stars.length,
+      rings:rings.length, stars:stars.length,
+      warp:{thr:+warpThr.toFixed(2),hue:+warpHue.toFixed(3),
+        z0:+(stars.length?stars[0].z:0).toFixed(3),
+        clouds:haze.length},
       mandMax:+(mandBoost?Math.max.apply(null,mandBoost):0).toFixed(3),
       mandReach:mandReach?Math.round(Math.max.apply(null,mandReach)):0,
       mandHot:mandHot(), pluckLive,
@@ -1084,28 +1075,11 @@ const Anim = (() => {
         }
         return;
       }
-      if(mode==='fountain'){
-        if(act(250)&&parts.length<400){
-          const n=18, sp2=m*0.3*Math.sqrt(tw('burst'));
-          for(let i=0;i<n;i++){
-            const a=Math.random()*Math.PI*2, s=sp2*(0.3+0.7*Math.random());
-            parts.push({x:X,y:Y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
-              size:(1.2+Math.random()*2.2)*(H/800),c:c.slice(),
-              life:1+Math.random()*0.4,trail:true,px:X,py:Y});
-          }
-        }
+      if(mode==='stars'){      // the whole wall is the accelerator; where you
+        pokeSim();             // touch means nothing, so nothing can lurch
         return;
       }
-      if(mode==='stars'){      // touch a spot in the sky and a star is born there
-        const mCap=40;
-        if(act(250)){
-          memStars.push({x:X,y:Y,r:(1.2+Math.random()*1.6)*(H/800),
-            ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2,c:c.slice(),mem:true});
-          while(memStars.length>mCap) memStars.shift();
-          return;
-        }
-      }
-      // fallback (rapid taps on stars): soft ring
+      // fallback: soft ring
       if(touchRings.length>=24) return;
       touchRings.push({x:X,y:Y,r:4,v:0.18*m,a:0.35,c});
     },
@@ -1115,7 +1089,7 @@ const Anim = (() => {
       t+=dt;
       const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
       const fade={mandala:0.30,lava:1,waves:0.30,flow:0.045,
-        pixels:1,leds:1,ripples:0.30,fountain:0.10,stars:0.45}[mode]||0.15;
+        pixels:1,leds:1,ripples:0.30,stars:0.60}[mode]||0.15;
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgba('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+','+fade+')';
       ctx.fillRect(0,0,W,H);
@@ -1127,23 +1101,23 @@ const Anim = (() => {
       else if(mode==='pixels') drawPixels(W,H,dt);
       else if(mode==='leds') drawLeds(W,H,dt);
       else if(mode==='ripples') drawRipples(W,H,dt);
-      else if(mode==='fountain') drawFireworks(W,H,dt);
       else drawStars(W,H,dt);
       drawTouchRings(W,H,dt);
       ctx.globalCompositeOperation='source-over';
       prevLevel=level;
       // keep a ~20 s animated tail after the last activity, then let the sim
       // sleep (the last frame stays on screen as a calm still)
-      if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
-         flows.length||glowPatches.length||mandHot()||(mode==='waves'&&pluckLive)||
+      if(level>0.01||rings.length||touchRings.length||
+         flows.length||mandHot()||(mode==='waves'&&pluckLive)||
          (pix&&pix.hot)||(mode==='leds'&&led&&led.hot)) lastActive=t;
       if(t-lastActive<20) pokeSim();
     },
     reset(){
       if(!ctx) return;
-      rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[]; blobs=[];
+      rings=[]; touchRings=[]; stars=[]; blobs=[];
       flows=[]; mandBoost=null; mandReach=null; mandN=0;
-      glowPatches=[]; memStars=[]; haze=[]; wave=null; wave2=null;
+      haze=[]; wave=null; wave2=null;
+      warpThr=0; warpHue=0.4;
       pluckU=null; pluckV=null; pluckLive=false;
       pix=null; led=null;
       ctx.globalCompositeOperation='source-over';
