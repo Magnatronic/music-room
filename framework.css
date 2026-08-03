@@ -189,7 +189,8 @@ input[type=range]::-moz-range-thumb{width:34px;height:34px;border-radius:50%;bac
 .prow .chip{min-width:50px;justify-content:center}
 
 /* ── press effects (fxCell in framework.js; SETTINGS.pressFx) ───────────────
-   Set + tuning chosen in fx_lab.html (open that page to retune). Three
+   Tuned in a scratch page that has since been deleted; the values below are
+   the result and are edited here directly now. Three
    deliberately distinct options: bloom = brightness + a little motion (default),
    glow = colour only / zero motion, pop = motion only / zero brightness. */
 .band{position:relative;overflow:hidden}
