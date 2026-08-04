@@ -11,6 +11,20 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
   A purple, B pink) — matches the physical instruments the therapists use.
 - **Therapist controls**: scale/root/register/number-of-notes where pitched; named per-student
   **presets**; **session lock** (hold top-left 3 s to unlock); volume + voice + effects.
+- **Launchable from other software** (2026-08, for the shared sensory room):
+  `app.html?s=voice:bell,volume:0.22&lock=1` opens an app on an exact setup, optionally straight
+  into locked play. The link carries the settings themselves — only the diff from the app's
+  defaults — so **nothing on the room PC defines a launch**, and nothing anyone does there can
+  break one. **Presets ▸ 🔗 Copy launch link** produces it in any app. Presets are stored in the
+  same diff shape, so loading one and pressing the button gives that preset's link.
+  `guide.html` is the step-by-step version for whoever configures the launching software. See
+  README. A `launch.html` bulk link-generator was built and removed the same day as redundant —
+  you have to be at the touchscreen to dial a setup in, so the in-app button already emits the
+  right link for that machine.
+  A `presets.js` of undeletable "locked" presets, with a download-and-drop-in flow to maintain it,
+  was built and then removed the same day: it existed only to stop `?preset=<name>` links breaking
+  when someone deleted a preset, and settings-carrying links made the entire problem — and the
+  `?preset=` parameter — disappear.
 - **Self-paced, no fail states** — apps wait for the student. "Wrong" input is never punished;
   at most it is quieter or neutral.
 - **Offline-first**: zero network at runtime. Binary assets (samples) ship as base64 inside `.js`
@@ -31,7 +45,8 @@ build sequence. Effort is relative (S/M/L). Update this doc as therapist feedbac
   The root-note chips are always labelled **"Starting note"**, never "Key".
 - **Fine-tune drawer**: set-once controls (app sliders, background colour, Performance quality,
   stats) live in the collapsed `Fine-tune` disclosure at the bottom of the Visuals panel —
-  `appendFineTune(el, build?)` in framework.js. Keep the everyday top level to what changes
+  `appendFineTune(el, build?)` in framework.js. `makeDrawer(el, build, label?)` builds the same
+  disclosure under any name and remembers each one's open state separately. Keep the everyday top level to what changes
   mid-session: Style chips, paint colours, and (Keys mode) zone/press feedback.
 - **Voices** (expanded 2026-07): Pure, Warm, Bell, Glass, Deep, Harp (layered decaying
   harmonics — a Karplus-Strong delay-line version was tried and cut, see the note in

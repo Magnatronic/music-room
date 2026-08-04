@@ -20,7 +20,22 @@ const ui        = document.getElementById('ui');
 const panel     = document.getElementById('panel');
 const railExtra = document.getElementById('railExtra');
 
-const STORE_KEY = 'settings:' + location.pathname.split('/').pop();
+const APP_FILE  = location.pathname.split('/').pop();
+const STORE_KEY = 'settings:' + APP_FILE;
+
+// ── Launch parameters: other software can open an app on a named preset ───────
+//   fluid_sensory.html?preset=Calm%20—%205%20notes&lock=1
+// Both ?query and #hash are read, since some launchers mangle one or the other.
+// A launch preset lands exactly as if someone had tapped it in the panel — it
+// becomes the saved setup for this app too, so launching always starts from the
+// same place no matter what the last session left behind.
+const LAUNCH = (function(){
+  try{
+    const q=(location.search||'').slice(1), h=(location.hash||'').slice(1);
+    return new URLSearchParams(q + (q&&h?'&':'') + h);
+  }catch(e){ return new URLSearchParams(''); }
+})();
+let launchNote = '';   // shown as a toast at boot, confirming the link was read
 
 // Per-app accent colour (matches the home-page tile): context colour for app
 // rail buttons (.railbtn.app ring) and sub-menu dialogs (.submenu) via --accent.
@@ -30,7 +45,7 @@ const APP_ACCENTS={'fluid_sensory.html':'#7ad7ff','strummer.html':'#e05a9c','dru
   'soundscape.html':'#1ca9a9',
   'voice_visuals.html':'#8affd0','flock.html':'#7fa8ff',
   'slime.html':'#9dff57','life.html':'#57ffb0'};
-document.documentElement.style.setProperty('--accent', APP_ACCENTS[location.pathname.split('/').pop()]||'#8fb4ff');
+document.documentElement.style.setProperty('--accent', APP_ACCENTS[APP_FILE]||'#8fb4ff');
 
 // Rail visibility is touch-recency driven — there is no hover on the wall.
 const railEl=document.getElementById('rail'); let railWakeT=null;
@@ -56,6 +71,19 @@ let currentQuickMode = null;
 function initSettings(){
   SETTINGS = Object.assign({}, SHARED_DEFAULTS, Anim.defaults||{});
   try { SETTINGS = Object.assign(SETTINGS, JSON.parse(localStorage.getItem(STORE_KEY)||'{}')); } catch(e){}
+  // ?s= carries the whole setup in the link, so a launcher gets the same starting
+  // point whatever the last person left behind, and nothing on this PC defines it
+  // — there is nothing anyone can delete. Starts from the app's defaults, then
+  // applies what the link lists. ?lock= then decides whether it opens ready to play.
+  const sParam=LAUNCH.get('s');
+  if(sParam){
+    SETTINGS=Object.assign({}, SHARED_DEFAULTS, Anim.defaults||{});
+    applySettingsParam(sParam);
+    launchNote='⭐ Setup from launch link';
+  }
+  const lk=LAUNCH.get('lock');
+  if(lk==='1'||lk==='true')  SETTINGS.locked=true;
+  if(lk==='0'||lk==='false') SETTINGS.locked=false;
   const themeKeys = Object.keys(Anim.themes);
   currentTheme = themeKeys.includes(SETTINGS.theme) ? SETTINGS.theme : themeKeys[0];
   // A string lockMode pins the play mode itself — saved settings may hold the
@@ -870,11 +898,18 @@ function appendBgControl(el){
 // Open state is remembered for the session only, so panel rebuilds (chip taps
 // re-run buildVisualsPanel) don't snap it shut while someone is in it.
 let fineTuneOpen=false;
-function makeDrawer(el, build){
-  const det=document.createElement('details'); det.className='finetune'; det.open=fineTuneOpen;
-  const sum=document.createElement('summary'); sum.textContent='Fine-tune';
+// Collapsed disclosure for set-once controls. `label` names it — the panel is
+// rebuilt on every change, so each drawer remembers whether it was open.
+const drawerOpen={};
+function makeDrawer(el, build, label){
+  const name=label||'Fine-tune';
+  const open = name==='Fine-tune' ? fineTuneOpen : !!drawerOpen[name];
+  const det=document.createElement('details'); det.className='finetune'; det.open=open;
+  const sum=document.createElement('summary'); sum.textContent=name;
   sum.addEventListener('click',e=>e.stopPropagation());
-  det.addEventListener('toggle',()=>{ fineTuneOpen=det.open; });
+  det.addEventListener('toggle',()=>{
+    if(name==='Fine-tune') fineTuneOpen=det.open; else drawerOpen[name]=det.open;
+  });
   det.appendChild(sum);
   const body=document.createElement('div');
   build(body);
@@ -1008,10 +1043,59 @@ function buildSoundPanel(){
   });
 }
 
-// ── Named presets (per-student setups, stored locally) ─────────────────────────
-const PRESET_KEY = 'presets:' + location.pathname.split('/').pop();
+// ── Named presets (per-student setups, saved on this machine) ─────────────────
+// Presets are an in-room convenience: recall a student's setup without dialling
+// it back in. Launch links do NOT depend on them — a link carries its own
+// settings (see below) — so deleting a preset can never break a link that has
+// already been handed to the launching software.
+const PRESET_KEY = 'presets:' + APP_FILE;
 function loadPresets(){ try{ return JSON.parse(localStorage.getItem(PRESET_KEY)||'{}'); }catch(e){ return {}; } }
 function storePresets(o){ try{ localStorage.setItem(PRESET_KEY, JSON.stringify(o)); }catch(e){} }
+
+// ── Launch links that carry the setup, so nothing has to be saved ─────────────
+// A named preset has to live somewhere, and anywhere it lives can be deleted. A
+// settings link lives in the launching software's own configuration instead:
+// `app.html?s=noteCount:7,voice:bell&lock=1`. Only what differs from the app's
+// defaults is listed, so the links stay short and readable — and stay correct
+// when a default changes later.
+function baseDefaults(){ return Object.assign({}, SHARED_DEFAULTS, Anim.defaults||{}); }
+function settingsDiff(){
+  const base=baseDefaults(), out={};
+  for(const k in SETTINGS){
+    if(k==='locked') continue;               // the lock is ?lock=, not a setting
+    if(JSON.stringify(SETTINGS[k])!==JSON.stringify(base[k])) out[k]=SETTINGS[k];
+  }
+  return out;
+}
+// encodeURIComponent escapes both ',' and ':', so those stay safe as separators.
+function encodeSettings(o){
+  return Object.keys(o).map(k=>{
+    const v=o[k];
+    const s = Array.isArray(v) ? v.join('|') : (typeof v==='boolean' ? (v?'1':'0') : String(v));
+    return encodeURIComponent(k)+':'+encodeURIComponent(s);
+  }).join(',');
+}
+// Values arrive as text; the matching default tells us what type it should be.
+// (octave and octaveRows are strings that look numeric — guessing would break them.)
+function applySettingsParam(str){
+  const base=baseDefaults();
+  String(str).split(',').forEach(pair=>{
+    const i=pair.indexOf(':'); if(i<0) return;
+    const k=decodeURIComponent(pair.slice(0,i)), raw=decodeURIComponent(pair.slice(i+1));
+    if(k==='locked') return;
+    const d=base[k];
+    let v=raw;
+    if(typeof d==='number')       v=Number(raw);
+    else if(typeof d==='boolean') v=(raw==='1'||raw==='true');
+    else if(Array.isArray(d) || (d===null&&raw.indexOf('|')>=0)) v=raw.split('|').map(Number);
+    if(typeof d==='number' && !isFinite(v)) return;   // ignore junk rather than break
+    SETTINGS[k]=v;
+  });
+}
+function launchLink(){
+  const enc=encodeSettings(settingsDiff());
+  return location.href.split(/[?#]/)[0] + '?' + (enc?'s='+enc+'&':'') + 'lock=1';
+}
 function applyAllSettings(){
   saveSettings();
   const tk=Object.keys(Anim.themes); currentTheme=tk.includes(SETTINGS.theme)?SETTINGS.theme:tk[0];
@@ -1021,14 +1105,16 @@ function applyAllSettings(){
   refreshRailButtons();
   if(currentQuickMode && PANE_BUILDERS[currentQuickMode]) PANE_BUILDERS[currentQuickMode]();
 }
-function applyPreset(name){
-  const p=loadPresets()[name]; if(!p) return;
+function applyPresetData(p){
+  if(!p) return;
   SETTINGS=Object.assign({}, SHARED_DEFAULTS, Anim.defaults||{}, p);
   SETTINGS.locked=false;   // loading a preset never locks you out
   applyAllSettings();
 }
 function buildPresetsPanel(){
   const el=document.getElementById('presetsContent'); el.innerHTML='';
+  const out=document.createElement('div'); out.style.display='none';
+
   const h=document.createElement('div'); h.className='sectn'; h.textContent='Save current setup'; el.appendChild(h);
   const inp=document.createElement('input'); inp.type='text'; inp.maxLength=48;
   inp.placeholder='Preset name, e.g. "Alex — 5 notes, calm"';
@@ -1039,15 +1125,25 @@ function buildPresetsPanel(){
   const doSave=()=>{
     const name=inp.value.trim(); if(!name){ inp.focus(); return; }
     const all=loadPresets();
-    const snap=Object.assign({},SETTINGS); delete snap.locked;
-    all[name]=snap; storePresets(all);
+    // Store only what differs from the app's defaults — the same shape a launch
+    // link uses, so loading a preset and pressing 🔗 gives that preset's link, and
+    // a preset follows a later change to a default instead of pinning the old one.
+    all[name]=settingsDiff(); storePresets(all);
     inp.value=''; buildPresetsPanel();
   };
   save.addEventListener('click',e=>{ e.stopPropagation(); doSave(); });
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter') doSave(); });
   el.appendChild(save);
-  const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Saved presets'; el.appendChild(h2);
+  // The launch link carries the setup itself, so it needs no preset saved and
+  // there is nothing anyone can delete — the link IS the setup.
+  const lnk=document.createElement('button'); lnk.className='btn';
+  lnk.style.cssText='margin-top:8px;width:100%;text-align:center';
+  lnk.textContent='🔗 Copy launch link';
+  lnk.addEventListener('click',e=>{ e.stopPropagation(); showLaunchLink(out); });
+  el.appendChild(lnk); el.appendChild(out);
+
   const all=loadPresets(), names=Object.keys(all).sort((a,b)=>a.localeCompare(b));
+  const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Saved presets'; el.appendChild(h2);
   if(!names.length){
     const none=document.createElement('div');
     none.style.cssText='color:rgba(255,255,255,0.4);font-size:13px';
@@ -1056,13 +1152,15 @@ function buildPresetsPanel(){
   }
   names.forEach(name=>{
     const row=document.createElement('div'); row.className='prow';
-    const load=document.createElement('button'); load.className='chip pname'; load.textContent=name; load.title='Load this preset';
-    load.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); applyPreset(name); buildPresetsPanel(); });
+    const load=document.createElement('button'); load.className='chip pname';
+    load.textContent=name; load.title='Load this preset';
+    load.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); applyPresetData(all[name]); buildPresetsPanel(); });
     const del=document.createElement('button'); del.className='chip'; del.textContent='✕'; del.title='Delete preset';
     del.addEventListener('click',e=>{ e.stopPropagation();
       const a=loadPresets(); delete a[name]; storePresets(a); buildPresetsPanel(); });
     row.appendChild(load); row.appendChild(del); el.appendChild(row);
   });
+
   const h3=document.createElement('div'); h3.className='sectn'; h3.textContent='Start over'; el.appendChild(h3);
   const resetBtn=document.createElement('button'); resetBtn.className='btn';
   resetBtn.style.cssText='width:100%;text-align:center';
@@ -1073,6 +1171,38 @@ function buildPresetsPanel(){
     if(Anim.reset) Anim.reset();
   });
   el.appendChild(resetBtn);
+}
+
+// The whole setup as one link. Copied to the clipboard and left on screen, since
+// the projector PC is usually not the machine the launcher is configured on.
+function showLaunchLink(host){
+  const url=launchLink(), n=Object.keys(settingsDiff()).length;
+  host.innerHTML=''; host.style.display='';
+  const note=document.createElement('div');
+  note.style.cssText='color:rgba(255,255,255,0.5);font-size:12px;margin-top:10px;line-height:1.5';
+  note.textContent='This link opens the app with exactly this setup ('+n+' setting'+(n===1?'':'s')+
+    ' changed from the app\'s normal ones), locked ready to play. It needs no saved preset — the '+
+    'setup travels in the link. Remove &lock=1 to have it open unlocked.';
+  const ta=document.createElement('textarea');
+  ta.value=url; ta.rows=4; ta.readOnly=true;
+  ta.style.cssText='width:100%;margin-top:8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.22);'+
+    'border-radius:12px;color:#fff;padding:10px 12px;font:12px/1.5 monospace;outline:none;resize:vertical';
+  ta.addEventListener('click',e=>{ e.stopPropagation(); ta.select(); });
+  host.appendChild(note); host.appendChild(ta);
+  ta.select();
+  try{ navigator.clipboard.writeText(url).then(()=>{ note.textContent='Copied to the clipboard. '+note.textContent; },()=>{}); }catch(e){}
+}
+
+// Confirm on screen that a launch link was read, so a misconfigured launcher
+// shows up immediately rather than looking like the app "just opened wrong".
+function announceLaunch(){
+  if(!launchNote) return;
+  const bad=launchNote.charAt(0)==='⚠';
+  if(SETTINGS.locked && !bad) return;    // locked: the unlock hint is the more useful message
+  const hint=document.getElementById('lockHint');
+  const show=()=>{ hint.textContent=launchNote; hint.classList.add('show');
+    clearTimeout(hint._ht); hint._ht=setTimeout(()=>hint.classList.remove('show'), bad?9000:3000); };
+  if(SETTINGS.locked) setTimeout(show,5200); else show();
 }
 
 // ── Session lock: hide every control so a student can only paint & play ────────
@@ -1286,5 +1416,6 @@ function boot(){
   setupGL();
   canvas.addEventListener('webglcontextlost', e=>{ e.preventDefault(); glLost=true; }, false);
   canvas.addEventListener('webglcontextrestored', ()=>{ glLost=false; setupGL(); }, false);
+  announceLaunch();
   loop();
 }

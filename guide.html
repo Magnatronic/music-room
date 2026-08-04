@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Music Room — How to make a launch link</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  color:#fff;background:#0a070c;
+  background-image:radial-gradient(circle at 15% 8%,rgba(226,28,28,0.11),transparent 45%),
+                   radial-gradient(circle at 85% 22%,rgba(28,169,169,0.13),transparent 45%),
+                   radial-gradient(circle at 50% 100%,rgba(125,79,181,0.15),transparent 50%);
+  padding:48px 24px 72px;line-height:1.65;
+}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:clamp(30px,5vw,44px);font-weight:700;letter-spacing:-0.02em;line-height:1.15;
+  background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9,#7d4fb5);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{margin-top:14px;font-size:17px;color:rgba(255,255,255,0.72);max-width:64ch}
+.lede+.lede{margin-top:10px}
+
+h2{font-size:13px;letter-spacing:0.1em;text-transform:uppercase;font-weight:600;
+  color:rgba(255,255,255,0.35);margin:44px 0 16px}
+
+/* Steps */
+ol.steps{list-style:none;counter-reset:step}
+ol.steps > li{counter-increment:step;position:relative;padding:0 0 4px 60px;margin-bottom:26px}
+ol.steps > li::before{content:counter(step);position:absolute;left:0;top:-4px;
+  width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:700;color:#0a070c;background:linear-gradient(135deg,#7dffb0,#1ca9a9)}
+ol.steps > li h3{font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-0.01em}
+ol.steps > li p{color:rgba(255,255,255,0.72);font-size:16px}
+ol.steps > li p+p{margin-top:9px}
+ol.steps ul{margin:9px 0 0 20px;color:rgba(255,255,255,0.72);font-size:16px}
+ol.steps ul li{margin-top:5px}
+ol.steps ul+p{margin-top:12px}
+
+b,strong{color:#fff;font-weight:600}
+.btnlike{display:inline-block;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.24);
+  border-radius:8px;padding:1px 9px;font-size:15px;white-space:nowrap;color:#fff}
+code{font-family:ui-monospace,Consolas,monospace;font-size:14px;
+  background:rgba(255,255,255,0.08);padding:2px 7px;border-radius:6px;color:#fff;
+  overflow-wrap:break-word}
+.url{display:block;font-family:ui-monospace,Consolas,monospace;font-size:13.5px;
+  background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.12);border-radius:10px;
+  padding:11px 13px;margin-top:10px;color:rgba(255,255,255,0.85);overflow-x:auto;white-space:nowrap}
+
+.card{background:rgba(255,255,255,0.045);border:1px solid rgba(255,255,255,0.1);
+  border-radius:14px;padding:18px 22px;margin:18px 0;font-size:15.5px;color:rgba(255,255,255,0.72)}
+.card.tip{border-color:rgba(80,220,140,0.3);background:rgba(80,220,140,0.06)}
+.card.warn{border-color:rgba(255,190,60,0.32);background:rgba(255,190,60,0.06)}
+.card p+p{margin-top:10px}
+.card h3{font-size:16px;font-weight:600;color:#fff;margin-bottom:6px}
+
+dl.faq dt{font-weight:600;color:#fff;margin-top:20px;font-size:16px}
+dl.faq dd{color:rgba(255,255,255,0.72);font-size:15.5px;margin-top:4px}
+
+a{color:#7dffb0}
+.go{display:inline-block;margin-top:8px;text-decoration:none;font-size:16px;font-weight:600;
+  background:rgba(125,255,176,0.14);border:1px solid rgba(125,255,176,0.4);color:#7dffb0;
+  border-radius:10px;padding:10px 16px}
+.go:hover{background:rgba(125,255,176,0.22)}
+footer{margin-top:52px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.1);
+  font-size:14px;color:rgba(255,255,255,0.35)}
+footer a{color:rgba(255,255,255,0.55)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>How to make a launch link</h1>
+<p class="lede">A <b>launch link</b> opens one of these apps already set up the way you want it —
+   the right notes, the right sound, ready to play. Other software (a room control panel, a menu
+   button, a desktop shortcut) can use that link to start the app directly.</p>
+<p class="lede">This takes about five minutes. You do not need to know anything about code, and
+   nothing here can break the apps — the worst case is you make a preset you don't like and
+   delete it.</p>
+
+<div class="card tip">
+  <h3>The short version</h3>
+  Set the app up on screen → <b>⭐ Presets</b> ▸ <b>🔗 Copy launch link</b> → paste it into your
+  software. The setup is carried inside the link, so nothing is saved on the computer and there is
+  nothing anyone can delete. The three steps below are the same thing, spelled out.
+</div>
+
+<div class="card warn">
+  <h3>First: decide where this folder is going to live</h3>
+  <p>A link includes the folder's location, so <b>links stop working if the folder is later moved
+     or renamed</b>. Decide its permanent home before you hand any links over — somewhere short and
+     stable like <code>C:\Music Room</code>, not the Desktop or a Downloads folder.</p>
+  <p>If it does get moved later, nothing is lost: open the app from the folder's new home and copy
+     the link again — it is always built from wherever the app actually is. Your presets and
+     settings are unaffected by a move.</p>
+</div>
+
+<h2>Making the link</h2>
+
+<ol class="steps">
+
+<li>
+  <h3>Set the app up exactly as you want it</h3>
+  <p>Open the app and use the tabs down the left — <b>Notes</b>, <b>Sound</b>, <b>Visuals</b> —
+     until it looks and sounds right. How many notes, which scale, the voice, the volume, the
+     colours. (Some apps call the first tab <b>Songs</b>, <b>Chords</b> or <b>Scenes</b> instead,
+     depending on what it does.)</p>
+  <p>Play with it properly at this stage. Whatever is on screen at the end is what the link will
+     reproduce, every single time.</p>
+</li>
+
+<li>
+  <h3>Copy the launch link</h3>
+  <p>Tap <b>⭐ Presets</b> in the left-hand menu, then
+     <span class="btnlike">🔗 Copy launch link</span>.</p>
+  <p>That's it — the link is on the clipboard, and also on screen so you can copy it by hand if
+     you need to. It looks like this:</p>
+  <span class="url">file:///C:/Music&nbsp;Room/drums.html?s=voice:bell,volume:0.22&amp;lock=1</span>
+  <p>Everything you changed in step 1 is written into the link itself. Nothing has been saved on
+     the computer, so there is nothing for anyone to delete, and nothing to copy to another
+     machine.</p>
+</li>
+
+<li>
+  <h3>Paste it into the launching software</h3>
+  <p>Wherever that software keeps the address it should open, paste the link in. Test it by opening
+     the link yourself first — it should bring up the app looking exactly as you left it, with the
+     menu hidden and ready to play.</p>
+  <p>The <code>&amp;lock=1</code> on the end is what hides the menu. Delete that bit if you want the
+     app to open with its controls showing.</p>
+</li>
+
+</ol>
+
+<div class="card tip">
+  <h3>Changing a setup later</h3>
+  <p>Set the app up the new way and copy a fresh link, then paste the new link into the launching
+     software in place of the old one. The old link keeps working — it just opens the old setup.</p>
+</div>
+
+<h2>Presets, and how they relate to this</h2>
+
+<div class="card">
+  <p>The <b>⭐ Presets</b> panel also lets a therapist save a setup under a name
+     (<b>💾 Save preset</b>) and load it back with one tap later. That is for use in the room — it
+     saves dialling a familiar setup in from scratch every session.</p>
+  <p>Presets and launch links are independent. A link never refers to a preset by name: it carries
+     its own settings. So a therapist can rename, change or delete presets freely and <b>no link
+     you have handed over is affected</b>.</p>
+  <p>To get a link for a preset, load it with one tap and then press
+     <span class="btnlike">🔗 Copy launch link</span> — the link is built from whatever is on
+     screen, however it got there.</p>
+</div>
+
+<h2>Locked, and how to get back out</h2>
+
+<div class="card">
+  <p><b>Start locked</b> hides the whole menu when the app opens, so the person using it can only
+     play. Nothing can be changed by accident — which is usually what you want in a sensory room.</p>
+  <p style="margin-top:10px">To get the menu back: <b>press and hold the top-left corner of the
+     screen for 3 seconds</b>. That is the only way in, and it is the same in every app. The app
+     reminds you on screen when it opens locked.</p>
+  <p style="margin-top:10px">The lock stays on until someone unlocks it, even if the app is closed
+     and reopened.</p>
+</div>
+
+<h2>If something isn't right</h2>
+
+<dl class="faq">
+
+<dt>The link opens the app, but not with my setup</dt>
+<dd>Make sure you copied the whole link — they can be long, and a link cut short loses the settings
+    from the point it was cut. Opening the link yourself is the quickest way to check: what you see
+    is exactly what the launching software will get.</dd>
+
+<dt>Can someone delete or change my setup?</dt>
+<dd>No. The setup lives inside the link, held by the launching software — nothing on the room
+    computer defines it. Anyone can change the app while they are using it, and anyone can delete
+    any preset, and the next launch still starts from your link exactly as before.</dd>
+
+<dt>The link is quite long</dt>
+<dd>It lists everything you changed from the app's normal settings, so the more you changed, the
+    longer it is — typically a line or two, and it does not matter to the software reading it.</dd>
+
+<dt>I moved the Music Room folder and the links stopped working</dt>
+<dd>The links include the folder's location, so they change when it moves. Open each app from the
+    folder's new home and copy its link again — the link is always built from wherever the app
+    actually is, so it corrects itself.</dd>
+
+<dt>I want a link for an app but no particular setup</dt>
+<dd>Open the app, press <b>↺ Reset all settings to defaults</b>, then
+    <span class="btnlike">🔗 Copy launch link</span> — with nothing changed you get a short link
+    like <code>drums.html?lock=1</code>, which opens the app normally, ready to play.</dd>
+
+</dl>
+
+<footer>
+  <a href="index.html">← Music Room home</a> ·
+  <a href="README.md">Technical notes</a>
+</footer>
+
+</div>
+</body>
+</html>
