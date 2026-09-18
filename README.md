@@ -1,7 +1,17 @@
 # Music Room
 
 Some experimental web apps for use in sensory rooms. Everything runs fullscreen on a touch
-projector and works entirely offline — open `index.html` straight from a local folder or USB stick.
+projector, from a hosted page or straight off a USB stick.
+
+## Running it
+
+Two ways, both fine:
+
+- **Hosted** — <https://magnatronic.github.io/music-room/>. Nothing to install, and launch
+  links work the same way. Voice Visuals needs microphone access, which browsers only grant
+  over HTTPS, so it works here and not from a local folder.
+- **Offline** — copy the whole folder to the machine or a USB stick and open `index.html`.
+  No network needed at all. Paths resolve relative on `file://`, so keep the folder together.
 
 ## Apps
 
@@ -26,6 +36,22 @@ projector and works entirely offline — open `index.html` straight from a local
 | `life.html` | 🧬 Game of Life — paint cells, new births play soft notes |
 
 See **`APPS.md`** for per-app specs, the roadmap, and the retired apps and why they went.
+
+## Safety and intended use
+
+A side project, not a clinical or certified product. Intended for supervised use by staff who
+know the people in the room.
+
+Voice Visuals, Flock, Slime Mould, Fluid Keys and Game of Life put moving light on a large
+screen. Nothing strobes by design, but any bright animation on a projector carries some risk
+for people with photosensitive epilepsy or visual sensitivity. Try a new app out before using
+it in a session, keep the room lit, and stop if anyone shows discomfort.
+
+The audio engine has a soft limiter, but real output depends on the amplifier. Set levels
+before a session rather than trusting the app.
+
+Nothing is collected or transmitted. Settings and presets live in `localStorage` on that
+machine; there are no accounts, no analytics and no network calls.
 
 ## Presets
 
@@ -64,8 +90,9 @@ hold on the top-left corner, and like the Lock button it sticks until someone un
 and `#hash` are read, since some launchers mangle one or the other.
 
 The link is absolute — an external launcher has no working directory to resolve against — and is
-built from wherever the app actually is, so it self-corrects if the folder moves: open the app from
-its new home and copy the link again.
+built from wherever the app actually is, so it self-corrects if the folder moves, and works the
+same whether that is a local folder or the hosted page: open the app from its new home and copy
+the link again.
 
 A `launch.html` page once generated these in bulk, with a Folder location field for targeting a
 path you were not sitting at. It was removed as redundant: you have to be at the touchscreen to
@@ -110,3 +137,19 @@ stick, not a single file.
 2. In `apps.js`, set that tile's `file:` from `null` to the filename.
 3. Verify: Node syntax check, open from `file://`, test 5 touches + Reset settings.
    `.claude/skills/verify/SKILL.md` has the headless-browser recipe and its traps.
+
+## Music
+
+The tunes in Song Grid, Big Switch Songs and Echo Bird are traditional and long out of
+copyright. All sounds are synthesized in the browser — there are no sampled recordings here.
+
+If you add songs, check the tune is public domain first. Well known is not the same as out of
+copyright, and the arrangement and the recording can be protected separately from the melody.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE). Use it, change it, pass it on, at no cost; keep the copyright
+notice with it. No warranty of any kind.
+
+A personal project, maintained in my own time. Happy to answer questions about setting it up,
+but there is no support commitment attached.
