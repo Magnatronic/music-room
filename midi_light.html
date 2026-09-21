@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>MIDI Light – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   MIDI Light — plug any MIDI instrument in and play it, together.
+   Design: PHASE-9-MIDI.md. Not on the launcher.
+
+     MIDI in ─▶ THE READER ─▶ hit / hold / release ─▶ A STYLE ─▶ screen
+
+   The reader is the only part that knows MIDI exists. A style sees neutral
+   events and cannot be broken by an unusual instrument because it never sees one.
+
+   A NOTE'S OWN LENGTH decides whether it is an impact or a sustain, not the
+   device it came from. Classification is a hint on the pane, never a gate.
+
+   THE CANVAS IS CLEARED AND REDRAWN, never faded toward the background — a fade
+   does not converge on an accelerated canvas and leaves a ghost of everything
+   ever drawn (APPS.md, Soundscape). Persistence is a SEPARATE layer that is
+   stamped and never faded, so a session can build a picture without that fault.
+*/
+const Anim = (function(){
+
+  // `screen` is the canvas. `ctx` is what the STYLES draw on: a transparent
+  // offscreen layer, redrawn every frame. Keeping the two apart is what lets
+  // persistence be a snapshot of what a style actually drew rather than a token
+  // mark left at the note's position — see stampFrame().
+  let screen=null, ctx=null, W=0, H=0;
+  let keep=null, kctx=null, liveC=null;
+
+  /* ══ PALETTES ════════════════════════════════════════════════════════════
+     Note colours are the default because they agree with the Boomwhackers in
+     the room. The others are for making a picture. */
+  const PALETTES = {
+    notes:  {label:'🎵 Note colours'},
+    ocean:  {label:'🌊 Ocean',  ramp:[[20,60,150],[20,140,200],[40,205,205],[150,240,230],[240,255,250]]},
+    fire:   {label:'🔥 Fire',   ramp:[[130,10,10],[225,60,20],[255,140,20],[255,215,80],[255,250,215]]},
+    forest: {label:'🌿 Forest', ramp:[[20,75,40],[40,145,60],[130,205,70],[220,245,120],[250,255,220]]},
+    candy:  {label:'🍬 Candy',  ramp:[[235,60,150],[255,120,190],[165,120,255],[120,200,255],[255,240,185]]},
+    white:  {label:'⚪ White',  ramp:[[130,135,150],[185,190,205],[230,235,245],[255,255,255],[255,255,255]]},
+    // Random gives each NOTE its own colour, held steady for that note so a
+    // phrase keeps its identity — a colour redrawn at random every frame would
+    // strobe, which is the last thing a sensory room wants.
+    random: {label:'🎲 Random', rnd:true},
+  };
+  // Random is per HIT, not per note. Keyed on the note it only ever produced as
+  // many colours as there were notes — and with the scale snapped to eight of
+  // them, a painting came out in eight repeating colours, which is not what
+  // "random" promises. Every press now draws its own hue and carries it, so the
+  // mark keeps one colour for its whole life (a colour rerolled each frame would
+  // strobe) while the picture as a whole gets real variety.
+  // MIX THE COLOURS. A ramp palette normally takes its colour from `t`, the
+  // note's position across the keyboard — and the mark is DRAWN at that same
+  // position, so a note always paints the same colour in the same place. Playing
+  // a phrase repeatedly then builds a picture in a handful of colours, each one
+  // pinned to its own stripe of the screen. The user: "if you are trying to build
+  // up a picture through persistence it is very samey, as they go in the same
+  // area."
+  //
+  // `Mix the colours` takes the point on the ramp from the hit's own random
+  // `hue` instead, which is why this needed no new plumbing: every event has
+  // carried a per-hit `hue` since Random was fixed to be per-HIT rather than
+  // per-note. The mark still keeps ONE colour for its whole life — a colour
+  // rerolled each frame would strobe, which is the last thing a sensory room
+  // wants.
+  //
+  // NO TOGGLE. It was built as one, tried in the room's own build and kept: "the
+  // mixed colour works well, toggle not needed, I want it mixed as a default."
+  // A control nobody will turn off is a control that only adds a decision.
+  // `Note colours` and `Random` never reach this branch.
+  function paletteRGB(t, hue){
+    const p=PALETTES[SETTINGS.palette]||PALETTES.notes;
+    if(p.rnd) return hsl(((hue==null?0.5:hue)*360)%360, 0.62+((hue*7)%1)*0.38,
+                          0.52+((hue*13)%1)*0.24);
+    if(!p.ramp) return null;
+    const pick = hue!=null ? hue : t;
+    const r=p.ramp, x=Math.max(0,Math.min(0.999,pick))*(r.length-1);
+    const i=Math.floor(x), f=x-i, a=r[i], b=r[Math.min(r.length-1,i+1)];
+    return [a[0]+(b[0]-a[0])*f|0, a[1]+(b[1]-a[1])*f|0, a[2]+(b[2]-a[2])*f|0];
+  }
+
+  function hsl(h,s,l){
+    const c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h/60)%2-1)), m=l-c/2;
+    const t=h<60?[c,x,0]:h<120?[x,c,0]:h<180?[0,c,x]:h<240?[0,x,c]:h<300?[x,0,c]:[c,0,x];
+    return [(t[0]+m)*255|0,(t[1]+m)*255|0,(t[2]+m)*255|0];
+  }
+
+  /* ══ THE READER ══════════════════════════════════════════════════════════ */
+  let access=null, connected=false, status='';
+  // One pending connect attempt per page, and nothing persisted:
+  // a failed connect must not be inherited by the next session.
+  let pending=false, waitTimer=0;
+  const bound=new Set(), lastHit=new Map(), live=new Map();
+  const surfaces={keys:false,pads:false,knobs:false};
+  const perChan={};
+
+  // ONE RANGE PER CHANNEL. The pads and the keys of one controller are separate
+  // instruments on separate channels, and sharing a range crushes the pads:
+  // eight of them on notes 36-43 inside a keyboard's 36-84 span all land on the
+  // bottom column and play the same note — which is exactly the "pads seem
+  // different" that was heard. A channel gets its own span and its own spread.
+  const ranges={};
+  const rangeOf = ch => ranges[ch] || (ranges[ch]={recent:[],lo:48,hi:72,loT:48,hiT:72});
+  function noteX(note, ch){
+    const R=rangeOf(ch);
+    R.recent.push(note); if(R.recent.length>64) R.recent.shift();
+    const u=[...new Set(R.recent)];
+    R.loT=Math.min(...u); R.hiT=Math.max(...u);
+    if(u.length<3 || R.hiT-R.loT<2){ const m=(R.loT+R.hiT)/2; R.loT=m-5.5; R.hiT=m+5.5; }
+    // Settled HERE, not at the next frame: the colour and the pitch of a note
+    // are decided the moment it arrives.
+    if(R.recent.length<24){ R.lo=R.loT; R.hi=R.hiT; }
+    return xOf(note,ch);
+  }
+  function xOf(note, ch){
+    const R=rangeOf(ch);
+    return Math.max(0, Math.min(1, (note-R.lo)/Math.max(1,R.hi-R.lo)));
+  }
+  // A MIDI note picks a DEGREE of the scale, not a pitch, so a wrong note is not
+  // possible. The framework's notes ARE degrees, so a degree is a column and the
+  // whole Sound tab applies with no framework change.
+  function columnFor(note, ch){
+    const n=Math.max(1,NOTES.length);
+    if(SETTINGS.snap==='off'){
+      let best=0,d=99;
+      for(let i=0;i<n;i++){ const dd=Math.min((NOTES[i].pc-note%12+12)%12,(note%12-NOTES[i].pc+12)%12);
+        if(dd<d){ d=dd; best=i; } }
+      return best;
+    }
+    return Math.max(0, Math.min(n-1, Math.round(xOf(note,ch)*(n-1))));
+  }
+  // Colour is worked out when a mark is DRAWN. An auto-range only knows what it
+  // has seen, so a run played upwards makes every note the new maximum and all
+  // land on the top column; deriving colour late lets it settle as the range
+  // does. Pitch is NOT re-derived — a sounding note must not change key.
+  function colourOf(note, ch, hue){
+    return paletteRGB(xOf(note,ch), hue) ||
+           bandRGB255(Math.max(0,Math.min(NOTES.length-1,columnFor(note,ch))));
+  }
+
+  // A pending requestMIDIAccess looks IDENTICAL whether the permission prompt is
+  // sitting there unanswered or Windows' MIDI service is wedged — navigator
+  // .permissions says 'prompt' for both. So the wording escalates with time and
+  // never concludes; a deadline that declared failure would be wrong every time
+  // a therapist read the prompt slowly. See PHASE-9C-MIDI-CONNECT-WAIT.md.
+  const ASKING='Asking for permission — choose Allow on the prompt at the top of the window.';
+  const STUCK='Still waiting. If no prompt appeared, the instrument or Windows may be stuck: '+
+              'unplug the instrument and plug it in again. If that does not help, restart the PC.';
+  function stillWaiting(){ if(!pending) return; status=STUCK; refresh(); }
+  function settled(){ pending=false; clearTimeout(waitTimer); waitTimer=0; }
+  function connect(){
+    getAudio();
+    if(!navigator.requestMIDIAccess){
+      status='This browser has no Web MIDI. Use Edge or Chrome.'; refresh(); return;
+    }
+    // Pressing Connect again means the first press appeared to do nothing —
+    // exactly when the advice is worth reading. No second request; show it now.
+    if(pending){ stillWaiting(); return; }
+    pending=true; status=ASKING; refresh();
+    waitTimer=setTimeout(stillWaiting, 10000);
+    navigator.requestMIDIAccess({sysex:false}).then(a=>{
+      settled(); access=a; connected=true; a.onstatechange=bind; bind();
+    }).catch(err=>{
+      settled();
+      // Never assert a cause we do not know: only these two mean someone refused.
+      const n=(err&&err.name)||'';
+      status = (n==='NotAllowedError'||n==='SecurityError')
+        ? 'Permission refused. Press Connect and choose Allow.'
+        : 'Could not open MIDI ('+(n||'unknown')+'). Unplug the instrument and plug it '+
+          'in again, or restart the PC.';
+      refresh();
+    });
+  }
+  function bind(e){
+    if(e && e.port && e.port.state==='disconnected') silence();
+    const ins=[...access.inputs.values()];
+    ins.forEach(i => { if(!bound.has(i.id)){ bound.add(i.id);
+      const dev=(i.name||'MIDI').replace(PORTWORD,'').trim()||'MIDI';
+      i.onmidimessage = ev => onMidi(ev, i.id, dev); } });
+    if(!ins.length){ for(const k in ranges) delete ranges[k]; knobs.clear();
+      for(const k in noteSource) delete noteSource[k]; }
+    status=''; refresh();
+  }
+
+  // ONE PORT PER INSTRUMENT CARRIES THE NOTES.
+  //
+  // The MPK mini IV presents four ports, and all of them are bound because
+  // there is no telling in advance which one has the keys. But when two of them
+  // deliver the same keypress the app hears two presses — and if they arrive on
+  // DIFFERENT channels the two get different auto-ranges, so they land on
+  // different columns and play two different pitches at once. That is the
+  // "piano with a synth underneath": not two timbres, two notes.
+  //
+  // So the first port of a DEVICE to send a note becomes that device's voice,
+  // and its siblings are ignored while it is active. Per device, not globally —
+  // a therapist's keyboard and a student's pad are two instruments and both must
+  // play. If the chosen port goes quiet for three seconds the claim lapses, so
+  // an instrument that switches its output still works.
+  const noteSource={}, sourceSeen={};
+  function onMidi(ev, portId, dev){
+    const d=ev.data, st=d[0];
+    if(st>=0xF8) return;
+    const kind=st&0xF0, ch=st&0x0F, n=d[1], v=d[2], id=ch+'/'+n;
+    if(kind===0x90 && v>0){
+      const now=performance.now();
+      if(dev){
+        const owner=noteSource[dev];
+        if(owner && owner!==portId && now-(sourceSeen[dev]||0) < 3000) return;
+        noteSource[dev]=portId; sourceSeen[dev]=now;
+      }
+      // second net: the same note twice in a blink is one press however it came
+      if(now-(lastHit.get(id)||-1e9) < 15) return;
+      lastHit.set(id,now); hintOf(ch,n); startHit(id,n,v,ch);
+    } else if(kind===0x80 || (kind===0x90 && v===0)){ endHit(id); }
+    else if(kind===0xB0){
+      if(n===120||n===123){ silence(); return; }
+      if(n===64){ sustain=v>=64; if(!sustain) releaseSustained(); return; }
+      surfaces.knobs=true; knob(n,v); refresh();
+    }
+  }
+  function hintOf(ch,n){                                  // advisory only
+    const p=perChan[ch]=perChan[ch]||{notes:new Set(),hits:0};
+    p.notes.add(n); p.hits++;
+    const u=[...p.notes].sort((a,b)=>a-b), adj=u.some((x,i)=>i&&x-u[i-1]===1);
+    if(ch===9 || (p.hits>6 && u.length<=16 && !adj && u.every(x=>x>=35&&x<=81))) surfaces.pads=true;
+    else surfaces.keys=true;
+  }
+
+  /* ── Notes ──────────────────────────────────────────────────────────────── */
+  let sustain=false; const sustained=[];
+  function startHit(id,note,vel,ch,at){
+    endHit(id,true);
+    const x01=noteX(note,ch);                             // the range first
+    const col=columnFor(note,ch), force=Math.max(0.05, vel/127);
+    // yAxis is 'loud', so y IS the velocity: a sustained framework voice that
+    // answers to how hard the key was pressed.
+    const ev={ id, note, ch, col, x:x01, force, hue:Math.random(), fx:at&&at.x, fy:at&&at.y,
+               t0:performance.now(), held:true,
+               voice:startVoice((col+0.5)/Math.max(1,NOTES.length), force) };
+    live.set(id, ev);
+    style().hit(ev);
+    pokeSim();
+  }
+  function endHit(id, silent){
+    const ev=live.get(id); if(!ev) return;
+    live.delete(id);
+    ev.held=false; ev.heldFor=(performance.now()-ev.t0)/1000;
+    if(sustain && !silent){ sustained.push(ev); return; }
+    if(ev.voice) stopVoice(ev.voice);
+    if(!silent && style().release) style().release(ev);
+  }
+  function releaseSustained(){
+    while(sustained.length){ const ev=sustained.pop();
+      if(ev.voice) stopVoice(ev.voice); if(style().release) style().release(ev); }
+  }
+  function silence(){ [...live.keys()].forEach(id=>endHit(id,true)); releaseSustained(); live.clear(); }
+  setInterval(()=>{ const now=performance.now();
+    for(const [id,ev] of [...live]) if(now-ev.t0>30000) endHit(id); }, 5000);
+
+  /* ── Knobs, learned in the order they are turned ────────────────────────── */
+  const KNOB=[{key:'bright',label:'Brightness'},{key:'size',label:'Size'},
+              {key:'persist',label:'Persistence'}];
+  const knobs=new Map(); let learned='';
+  function knob(cc,v){
+    if(!knobs.has(cc)){
+      if(knobs.size>=KNOB.length) return;
+      knobs.set(cc,knobs.size); learned=KNOB[knobs.get(cc)].label;
+      setTimeout(()=>{ learned=''; refresh(); }, 2600);
+    }
+    SETTINGS[KNOB[knobs.get(cc)].key]=v/127; saveSettings();
+    if(currentQuickMode==='visuals') buildVisualsPanel();
+  }
+
+  /* ══ STYLE PARAMETERS ════════════════════════════════════════════════════
+     Per style, so the Visuals pane only ever offers what THIS style can
+     honour — stored the way Voice Visuals stores its per-mode tweaks.      */
+  function pv(key){
+    const o=SETTINGS.sp && SETTINGS.sp[SETTINGS.style], v=o?o[key]:null;
+    if(v!=null) return +v;
+    const d=(style().params||[]).find(p=>p[0]===key);
+    return d?d[4]:1;
+  }
+  function setPv(key,val){
+    SETTINGS.sp=SETTINGS.sp||{};
+    SETTINGS.sp[SETTINGS.style]=Object.assign({},SETTINGS.sp[SETTINGS.style],{[key]:val});
+    saveSettings();
+  }
+  const BR = () => 0.30+0.95*(+SETTINGS.bright);
+  const SZ = () => 0.45+1.5*(+SETTINGS.size);
+  // On or off, not a slider - see midi.js for why. This app predates midi.js and
+  // carries its own copy of the mechanism, so it needs its own edit; that is the
+  // near-miss CLAUDE.md records from Phase 9c.
+  const PERSIST = () => ((+SETTINGS.persist||0) > 0 ? 1 : 0);
+  // > 0, NOT >= 0.5, and the difference is a real fault the user found in the
+  // room: "if the persistence is turned on when you first load the page it seems
+  // not to work until you turn it off and back on again."
+  //
+  // Persistence was a SLIDER until this phase, so every therapist already using
+  // these apps has a FRACTIONAL value saved - 0.3, say. The switch that replaced
+  // the slider draws itself from `SETTINGS.persist` as a TRUTHINESS, so 0.3 shows
+  // ON; a >= 0.5 threshold gave the drawing code 0. The switch said on, nothing
+  // was kept, and toggling it off and on wrote a real `true` that finally worked.
+  // Measured across all five apps and eight stored values: 0.2, 0.3 and 0.45 each
+  // disagreed, 0.5 and above agreed. See probes/phase-15/agree.js.
+  //
+  // So the rule is now the SAME rule the switch uses. Any value a therapist had
+  // saved at all means they wanted the picture kept, and now they get all of it.
+  const painting = () => persistOf()>0.01;
+  // A mark on the painting layer: stamped, never faded, so it cannot band the
+  // way an alpha trail-fade does.
+  // PERSISTENCE IS A SNAPSHOT OF THE LIVE LAYER, not a token mark.
+  //
+  // Each style used to stamp one representative blob at the note's position,
+  // which is why an explosion left a circle behind and a constellation left a
+  // circle behind: the picture recorded where a thing happened rather than what
+  // it looked like. Compositing the live layer itself keeps the actual embers,
+  // the actual rings, the actual joins — and it works for every style, including
+  // ones not written yet, with no per-style code at all.
+  //
+  // The live layer is TRANSPARENT where nothing was drawn, which is the part
+  // that makes this safe: a stamp only touches pixels the style painted, so
+  // older marks elsewhere are never washed out. SOURCE-OVER, not `lighter` — an
+  // additive layer that is never cleared climbs to white and stays there.
+  function persistOf(){
+    return Math.max(PERSIST(), style().minPersist||0);
+  }
+  // Deposited PER SECOND, not per frame. A fixed alpha every frame means an
+  // ember that lives a second and a half is laid down ninety times, and the
+  // picture goes to a flat wash — eighteen notes of Fireworks filled the screen
+  // with solid orange. Scaling by dt also makes the build-up independent of the
+  // frame rate, which matters because quality:auto moves it.
+  function stampFrame(dt){
+    const p=persistOf();
+    if(!kctx || !liveC || p<=0.01) return;
+    kctx.save();
+    // DEPOSIT HARD - the same correction as midi.js, and the same reason. A weak
+    // deposit makes every pixel a long-run AVERAGE of what passed over it, and
+    // the average of many hues is grey however slowly you take it. The user
+    // asked whether the fault was elsewhere; it was here, in this app's own copy
+    // of the mechanism, and it would have shown on any long session that kept
+    // playing over the same part of the screen.
+    kctx.globalAlpha=1-Math.exp(-dt*45);
+    kctx.globalCompositeOperation='source-over';
+    kctx.drawImage(liveC,0,0);
+    kctx.restore();
+  }
+
+  /* ══ THE STYLES ══════════════════════════════════════════════════════════ */
+  const bits=[];
+  const push=o=>{ bits.push(o); if(bits.length>2600) bits.splice(0,bits.length-2600); };
+  const rgba=(c,a)=>'rgba('+c[0]+','+c[1]+','+c[2]+','+Math.max(0,Math.min(1,a)).toFixed(3)+')';
+  // Velocity drives height hard: a soft press should look soft and a hard one
+  // should reach for the ceiling.
+  // HOW HARD -> HOW HIGH. `pow(f,0.75)` RAISED quiet notes (0.1 came out at
+  // 0.18) and the floor was 0.10, so the bottom quarter of the screen could not
+  // be reached by playing softly at all. An exponent above 1 sends quiet notes
+  // down where they belong and keeps a hard one at the top.
+  const heightOf = f => 0.03+0.94*Math.pow(f,1.35);
+  // Where a mark belongs. A MIDI note has no place of its own, so it takes x
+  // from the played range (late, so it settles) and y from how hard it was hit.
+  // A TOUCH does have a place — the one under the finger — and it must be used,
+  // or the light appears somewhere the student did not point at.
+  const PX = ev => ev.fx!=null ? ev.fx : xOf(ev.note,ev.ch);
+  const PY = ev => ev.fy!=null ? ev.fy : heightOf(ev.force);
+
+  const STYLES={
+
+  aurora:{ label:'🌈 Aurora',
+    params:[['width','Column width',0.3,3,1.15],['head','Glow',0.2,3,1.15],['fade','Linger',0.3,7,2.4]],
+    hit(ev){ push({k:'col',ev,life:0}); },
+    frame(dt){
+      for(const b of bits){ if(b.k!=='col') continue;
+        if(!b.ev.held) b.life+=dt;
+        const f=Math.max(0,1-b.life/pv('fade')); if(f<=0){ b.dead=true; continue; }
+        const ev=b.ev, x=PX(ev)*W, hgt=H*PY(ev);
+        const w=Math.max(12, W*0.022*pv('width')*SZ()*(0.45+ev.force));
+        const c=colourOf(ev.note,ev.ch,ev.hue), a=f*BR()*(0.35+0.65*ev.force);
+        const g=ctx.createLinearGradient(0,H,0,H-hgt);
+        g.addColorStop(0,rgba(c,0)); g.addColorStop(0.7,rgba(c,a*0.7)); g.addColorStop(1,rgba(c,a));
+        ctx.fillStyle=g; ctx.fillRect(x-w/2,H-hgt,w,hgt);
+        const r=w*(1.6+2.4*ev.force)*pv('head');
+        const rg=ctx.createRadialGradient(x,H-hgt,0,x,H-hgt,r);
+        rg.addColorStop(0,rgba(c,Math.min(1,a*1.6))); rg.addColorStop(0.35,rgba(c,a*0.55));
+        rg.addColorStop(1,rgba(c,0));
+        ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(x,H-hgt,r,0,Math.PI*2); ctx.fill();
+      }
+    }},
+
+  fireworks:{ label:'🎆 Fireworks',
+    params:[['burst','Burst size',0.3,3,1.5],['spark','Sparks',0.3,3,1.6],['gravity','Fall speed',0,2.5,1]],
+    hit(ev){
+      const n=Math.round((36+140*ev.force)*pv('spark')), y=PY(ev);
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2, sp=(0.3+Math.random()*1.2)*(0.4+ev.force)*pv('burst');
+        push({k:'em',x:PX(ev),y,vx:Math.cos(a)*sp*0.55,vy:Math.sin(a)*sp,
+              note:ev.note,ch:ev.ch,hue:ev.hue,life:0,max:1.2+Math.random()*1.7,sz:0.7+Math.random()*1.8});
+      }
+      const c=colourOf(ev.note,ev.ch,ev.hue);
+    },
+    frame(dt){
+      for(const ev of live.values()){                     // a held note keeps a fountain
+        ev.sp=(ev.sp||0)+dt*(24+70*ev.force)*pv('spark');
+        while(ev.sp>1){ ev.sp-=1;
+          // THE SAME PLACE AS THE BURST. It was PY(ev)*0.5 - half the height -
+          // so a held note fountained from a second point below wherever the
+          // burst had gone off, which read as two explosions.
+          push({k:'em',x:PX(ev),y:PY(ev),vx:(Math.random()-0.5)*0.32,
+                vy:0.45+Math.random()*0.8*ev.force,note:ev.note,ch:ev.ch,hue:ev.hue,life:0,max:1.4,sz:0.7+Math.random()}); }
+      }
+      for(const b of bits){ if(b.k!=='em') continue;
+        b.life+=dt; if(b.life>b.max){ b.dead=true; continue; }
+        b.vy-=1.35*pv('gravity')*dt; b.x+=b.vx*dt*0.32; b.y+=b.vy*dt*0.45;
+        const f=1-b.life/b.max, s=Math.max(2.5, W*0.0065*b.sz*SZ()*(0.35+f));
+        ctx.fillStyle=rgba(colourOf(b.note,b.ch,b.hue), f*f*BR());
+        ctx.fillRect(b.x*W-s/2,(1-b.y)*H-s/2,s,s);
+      }
+    }},
+
+  ripples:{ label:'💧 Ripples',
+    params:[['speed','Spread',0.3,3,1.2],['thick','Thickness',0.3,4,1.6],['rings','Rings per hit',1,4,2]],
+    hit(ev){
+      const n=Math.max(1,Math.round(pv('rings'))), y=1-PY(ev);
+      for(let i=0;i<n;i++) push({k:'ring',x:PX(ev),y,note:ev.note,ch:ev.ch,hue:ev.hue,
+        r:0,delay:i*0.14,force:ev.force,life:0,max:2.8});
+      const c=colourOf(ev.note,ev.ch,ev.hue);
+    },
+    frame(dt){
+      for(const b of bits){ if(b.k!=='ring') continue;
+        if(b.delay>0){ b.delay-=dt; continue; }
+        b.life+=dt; if(b.life>b.max){ b.dead=true; continue; }
+        b.r+=dt*Math.min(W,H)*0.45*pv('speed')*(0.5+b.force);
+        const f=1-b.life/b.max;
+        ctx.strokeStyle=rgba(colourOf(b.note,b.ch,b.hue), f*f*BR()*(0.4+0.6*b.force));
+        ctx.lineWidth=Math.max(2.5, H*0.014*pv('thick')*SZ()*f);
+        ctx.beginPath(); ctx.arc(b.x*W,b.y*H,b.r,0,Math.PI*2); ctx.stroke();
+      }
+    }},
+
+  bloom:{ label:'🫧 Bloom',
+    params:[['size','Size',0.3,3,1.4],['breath','Breathing',0,3,1],['fade','Linger',0.3,7,2.2]],
+    hit(ev){ push({k:'bl',ev,life:0,seed:Math.random()*6.3}); },
+    frame(dt){
+      for(const b of bits){ if(b.k!=='bl') continue;
+        if(!b.ev.held) b.life+=dt;
+        const f=Math.max(0,1-b.life/pv('fade')); if(f<=0){ b.dead=true; continue; }
+        const ev=b.ev, x=PX(ev)*W, y=(1-PY(ev))*H;
+        const br=1+0.2*pv('breath')*Math.sin(performance.now()/700+b.seed);
+        const r=Math.min(W,H)*0.12*pv('size')*SZ()*(0.4+1.4*ev.force)*br;
+        const c=colourOf(ev.note,ev.ch,ev.hue), a=f*BR()*(0.3+0.65*ev.force);
+        const g=ctx.createRadialGradient(x,y,0,x,y,r);
+        g.addColorStop(0,rgba(c,a)); g.addColorStop(0.4,rgba(c,a*0.5)); g.addColorStop(1,rgba(c,0));
+        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+      }
+    }},
+
+  constellation:{ label:'✨ Constellation',
+    params:[['star','Star size',0.3,3,1.4],['join','Join distance',0,1.5,0.7],['fade','Linger',0.5,9,4]],
+    hit(ev){
+      const y=1-PY(ev);
+      push({k:'st',x:PX(ev),y,note:ev.note,ch:ev.ch,hue:ev.hue,force:ev.force,
+            life:0,t:performance.now()});
+      const c=colourOf(ev.note,ev.ch,ev.hue);
+    },
+    frame(dt){
+      const stars=bits.filter(b=>b.k==='st'), fade=pv('fade'), jd=pv('join');
+      for(const b of stars){ b.life+=dt; if(b.life>fade) b.dead=true; }
+      if(jd>0) for(let i=0;i<stars.length;i++) for(let j=i+1;j<stars.length;j++){
+        const a=stars[i], b=stars[j];
+        if(Math.abs(a.t-b.t)>900) continue;               // played close together
+        const d=Math.hypot(a.x-b.x,a.y-b.y); if(d>jd) continue;
+        const f=Math.max(0,1-Math.max(a.life,b.life)/fade);
+        ctx.strokeStyle=rgba(colourOf(a.note,a.ch,a.hue), f*BR()*0.5*(1-d/jd));
+        ctx.lineWidth=Math.max(1.5,H*0.0035*SZ());
+        ctx.beginPath(); ctx.moveTo(a.x*W,a.y*H); ctx.lineTo(b.x*W,b.y*H); ctx.stroke();
+      }
+      for(const b of stars){
+        const f=Math.max(0,1-b.life/fade), c=colourOf(b.note,b.ch,b.hue);
+        const r=Math.max(3, W*0.012*pv('star')*SZ()*(0.4+b.force));
+        const g=ctx.createRadialGradient(b.x*W,b.y*H,0,b.x*W,b.y*H,r*3);
+        g.addColorStop(0,rgba(c,f*BR())); g.addColorStop(0.25,rgba(c,f*BR()*0.45)); g.addColorStop(1,rgba(c,0));
+        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(b.x*W,b.y*H,r*3,0,Math.PI*2); ctx.fill();
+      }
+    }},
+
+  // Paint, not light: this is the one style that must NOT be drawn additively.
+  // Overlapping blobs on `lighter` climb to white within a dozen notes, which
+  // is the opposite of what a picture wants.
+  splash:{ label:'🎨 Splash', blend:'source-over', minPersist:0.45,
+    params:[['blob','Blob size',0.3,3,1.5],['spatter','Spatter',0,3,1.3],['fade','Linger',0.5,9,4]],
+    hit(ev){
+      const c=colourOf(ev.note,ev.ch,ev.hue), x=PX(ev);
+      // a gentler band than the other styles: a painting should use the whole
+      // canvas rather than crowd into the top third
+      const y=ev.fy!=null ? 1-ev.fy : 0.12+0.76*(1-heightOf(ev.force));
+      push({k:'sp',x,y,note:ev.note,ch:ev.ch,hue:ev.hue,force:ev.force,life:0});
+      const n=Math.round(12*pv('spatter')*(0.4+ev.force));
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2, d=Math.random()*0.11*(0.5+ev.force);
+        push({k:'sp',x:x+Math.cos(a)*d,y:y+Math.sin(a)*d*1.4,note:ev.note,ch:ev.ch,hue:ev.hue,
+              force:ev.force*(0.15+Math.random()*0.35),life:0});
+      }
+      // Splash always paints, whatever the Persistence slider says: a painting
+      // that vanishes is not a painting — minPersist is the floor.
+    },
+    frame(dt){
+      const fade=pv('fade');
+      for(const b of bits){ if(b.k!=='sp') continue;
+        b.life+=dt; const f=Math.max(0,1-b.life/fade); if(f<=0){ b.dead=true; continue; }
+        const r=Math.min(W,H)*0.04*pv('blob')*SZ()*(0.35+b.force)*(1+0.35*(1-f));
+        ctx.fillStyle=rgba(colourOf(b.note,b.ch,b.hue), f*BR()*0.55);
+        ctx.beginPath(); ctx.arc(b.x*W,b.y*H,r,0,Math.PI*2); ctx.fill();
+      }
+    }},
+
+  static:{ label:'🌫️ Static swell',
+    params:[['spread','Spread',0.3,3,1.3],['grain','Grain',0.4,3,1.5],['puff','Puff on a tap',0,3,1.4]],
+    hit(ev){
+      const n=Math.round(70*pv('puff')*(0.3+ev.force)), y=1-PY(ev);
+      for(let i=0;i<n;i++){
+        const rr=Math.pow(Math.random(),0.62), th=Math.random()*Math.PI*2;
+        push({k:'pf',x:PX(ev)+Math.cos(th)*rr*0.18*pv('spread'),
+              y:y+Math.sin(th)*rr*0.22*pv('spread'),note:ev.note,ch:ev.ch,hue:ev.hue,life:0,max:1.5});
+      }
+    },
+    frame(dt){
+      for(const b of bits){ if(b.k!=='pf') continue;
+        b.life+=dt; if(b.life>b.max){ b.dead=true; continue; }
+        const f=1-b.life/b.max, s=Math.max(2, 3*pv('grain')*SZ()*(0.4+f));
+        ctx.fillStyle=rgba(colourOf(b.note,b.ch,b.hue), f*BR()*0.95);
+        ctx.fillRect(b.x*W|0,b.y*H|0,s,s);
+      }
+      const held=[...live.values()]; if(!held.length) return;
+      const q=(typeof activeQuality==='function')?activeQuality():'high';
+      const per=Math.round((q==='high'?340:q==='med'?190:90)*pv('grain'));
+      for(const ev of held){
+        const cx=PX(ev)*W, cy=(1-PY(ev))*H;
+        const R=Math.min(W,H)*0.24*pv('spread')*SZ()*(0.4+ev.force);
+        ctx.fillStyle=rgba(colourOf(ev.note,ev.ch,ev.hue), Math.min(0.95,BR()*0.6));
+        for(let i=0;i<per;i++){
+          const rr=R*Math.pow(Math.random(),0.62), th=Math.random()*Math.PI*2;
+          const x=cx+Math.cos(th)*rr, y=cy+Math.sin(th)*rr;
+          if(x<0||y<0||x>=W||y>=H) continue;
+          const s=Math.max(1.5, 2.6*pv('grain')*SZ()*(Math.random()<0.3?1.6:0.6));
+          ctx.fillRect(x|0,y|0,s,s);
+        }
+      }
+    }},
+  };
+  const style = () => STYLES[SETTINGS.style] || STYLES.aurora;
+
+  /* ══ THE PANE ════════════════════════════════════════════════════════════ */
+  function refresh(){ if(currentQuickMode==='app') buildAppPanel(); }
+  const PORTWORD=/\s+(MIDI|DAW|Plugin|Software|Out|In|Port)\b.*$/i;
+  const devices = () => access ? [...access.inputs.values()] : [];
+  const deviceNames = () =>
+    [...new Set(devices().map(i => ((i.name||'MIDI').replace(PORTWORD,'').trim())||'MIDI'))];
+
+  // A slider bound to the CURRENT STYLE rather than to a settings key.
+  function styleSlider(key,label,min,max,def){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=(max-min)/40; inp.value=pv(key);
+    const show=v=>Math.round(v/def*100)+'%';
+    val.textContent=show(inp.value);
+    inp.addEventListener('input',()=>{ const v=parseFloat(inp.value); setPv(key,v); val.textContent=show(v); });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
+  }
+  const note = t => { const d=document.createElement('div'); d.className='mlnote'; d.textContent=t; return d; };
+
+  return {
+    appLabel:'🎹 MIDI',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    onCell(){},
+    themes:{ dark:{label:'🎵 Notes', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                             [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    defaults:{
+      theme:'dark', style:'aurora', snap:'scale', palette:'notes',
+      bright:0.7, size:0.55, persist:0,
+      mode:'notes', paint:true, zoneLook:'off', showLabels:false, colorMode:'note',
+      yAxis:'loud', noteCount:8, scale:'penta',
+    },
+    schema:[],
+
+    railButtons:[
+      { id:'mlsil', icon:()=>'🔇', label:'Silence', title:()=>'Stop every sounding note',
+        onClick(){ silence(); } },
+      { id:'mlclr', icon:()=>'🧽', label:'Wipe', title:()=>'Clear the picture',
+        show:()=>painting(),
+        onClick(){ if(kctx) kctx.clearRect(0,0,keep.width,keep.height); } },
+    ],
+
+    buildApp(el){
+      const ins=devices();
+      // The button offered "Reconnect" for ever once pressed, with the
+      // instrument sitting there working. It appears only when there is
+      // something to fix.
+      if(!connected || !ins.length){
+        const b=document.createElement('button');
+        b.className='btn'; b.style.width='100%'; b.style.height='var(--target)';
+        b.textContent = connected ? '🔌 Look again' : '🔌 Connect to MIDI';
+        b.addEventListener('click', e=>{ e.stopPropagation(); connect(); });
+        el.appendChild(b);
+      }
+      if(!connected) el.appendChild(note(status || 'Not connected. The prompt appears every time, the same as the microphone does.'));
+      else if(!ins.length) el.appendChild(note(status || 'No MIDI inputs. Plug something in — it is noticed without reloading.'));
+      else {
+        const s=Object.keys(surfaces).filter(k=>surfaces[k])
+          .map(k=>({keys:'🎹 keys',pads:'🥁 pads',knobs:'🎛️ knobs'})[k]);
+        const d=document.createElement('div'); d.className='mlnote';
+        d.innerHTML='<b>✓ '+deviceNames().join(', ')+'</b>'+
+          (ins.length>deviceNames().length?' <span style="opacity:.6">('+ins.length+' ports)</span>':'')+
+          (s.length?' — '+s.join(', '):' — play something');
+        el.appendChild(d);
+      }
+      if(learned){ const k=document.createElement('div'); k.className='mlnote';
+        k.innerHTML='<b>Knob learned → '+learned+'</b>'; el.appendChild(k); }
+
+      const labels={}; for(const k in STYLES) labels[k]={label:STYLES[k].label};
+      el.appendChild(makeChips('Style','style',labels,()=>{
+        if(currentQuickMode==='visuals') buildVisualsPanel(); refreshRailButtons(); }));
+      el.appendChild(makeChips('Notes played','snap',
+        { scale:{label:'Pulled into the scale'}, off:{label:'As played'} },null));
+      el.appendChild(note('Nothing to set up. Each surface finds its own range, so pads and keys both fill the screen.'));
+    },
+
+    // Register / Scale / Starting note / how many notes — and NOT the Y-axis
+    // row. This app puts the VELOCITY on y (yAxis:'loud'), so offering that
+    // control would let a therapist silently break the velocity response.
+    buildInstrument(el){
+      appendTuning(el, ()=>{ refreshMusic(); }, {label:'Which notes'});
+      el.appendChild(makeSlider({key:'noteCount',label:'How many notes',min:3,max:12,step:1,dp:0,
+        onChange:refreshMusic}));
+      el.appendChild(note('The notes an instrument is pulled onto. Up/down is how hard you played.'));
+    },
+
+    // what a hit would be painted with — probes/phase-15/mix.js
+    _colour(note,ch,hue){ return colourOf(note,ch,hue); },
+    _persist(){ return PERSIST(); },
+    buildVisuals(el){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Colour';
+      el.appendChild(h);
+      const pal={}; for(const k in PALETTES) pal[k]={label:PALETTES[k].label};
+      el.appendChild(makeChips('Palette','palette',pal,null));
+
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Light';
+      el.appendChild(h2);
+      el.appendChild(makeSlider({key:'bright',label:'Brightness',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeSlider({key:'size',label:'Size',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeToggle('Persistence','persist'));
+      el.appendChild(note('Persistence builds a picture; 🧽 Wipe clears it.'));
+
+      const h3=document.createElement('div'); h3.className='sectn';
+      h3.textContent=style().label; el.appendChild(h3);
+      for(const p of (style().params||[])) el.appendChild(styleSlider(p[0],p[1],p[2],p[3],p[4]));
+      el.appendChild(note('These belong to this style alone — every style has its own three.'));
+    },
+
+    init(cv){
+      screen=cv.getContext('2d');
+      if(!document.getElementById('mlCss')){
+        const st=document.createElement('style'); st.id='mlCss';
+        st.textContent='.mlnote{font-size:var(--font-s);color:var(--ink-quiet);line-height:1.45;'+
+          'margin:calc(-2px * var(--ui-scale)) 0 var(--gap)}';
+        document.head.appendChild(st);
+      }
+      this.reset();
+    },
+
+    resize(){ this.reset(); },
+
+    // A touch plays it too, so it is never a dead screen with no instrument.
+    splat(x,y,dx,dy,color,opts){
+      if(!opts || opts.velScale!==0) return;
+      // The note comes from where along the screen it was touched; the MARK is
+      // placed at the touch itself. Deriving the mark's height from velocity
+      // the way a MIDI note does put the light somewhere the finger was not.
+      const R=rangeOf(0), n=Math.round(R.lo + x*(R.hi-R.lo));
+      const id='touch/'+Math.round(x*1000)+'/'+Math.round(y*1000);
+      startHit(id,n,96,0,{x:x,y:y});
+      setTimeout(()=>endHit(id), 320);
+    },
+
+    frame(dt){
+      if(!screen) return;
+      W=canvas.width; H=canvas.height;
+      if(!keep || keep.width!==W || keep.height!==H){
+        const old=keep;
+        keep=document.createElement('canvas'); keep.width=W; keep.height=H;
+        kctx=keep.getContext('2d');
+        if(old) try{ kctx.drawImage(old,0,0,W,H); }catch(e){}
+        liveC=document.createElement('canvas'); liveC.width=W; liveC.height=H;
+        ctx=liveC.getContext('2d');            // what every style draws on
+      }
+      // The live layer starts TRANSPARENT. That is what makes a persistence
+      // snapshot safe: it only ever touches pixels a style actually painted, so
+      // marks made earlier somewhere else are never washed out.
+      ctx.clearRect(0,0,W,H);
+
+      for(const ch in ranges){
+        const R=ranges[ch];
+        if(R.recent.length<24){ R.lo=R.loT; R.hi=R.hiT; }
+        else { const e=(v,t,tau)=>v+(t-v)*(1-Math.exp(-dt/tau));
+          R.lo=e(R.lo,R.loT,R.loT<R.lo?0.12:1.1); R.hi=e(R.hi,R.hiT,R.hiT>R.hi?0.12:1.1); }
+      }
+
+      ctx.globalCompositeOperation=style().blend||'lighter';
+      style().frame(dt,W,H);
+      ctx.globalCompositeOperation='source-over';
+
+      stampFrame(dt);                          // the picture records what was drawn
+
+      screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      screen.fillRect(0,0,W,H);
+      if(painting()) screen.drawImage(keep,0,0);
+      screen.drawImage(liveC,0,0);
+
+      for(let i=bits.length-1;i>=0;i--) if(bits[i].dead) bits.splice(i,1);
+      if(live.size || bits.length) pokeSim();
+    },
+
+    reset(){
+      bits.length=0;
+      if(kctx) kctx.clearRect(0,0,keep.width,keep.height);
+      if(ctx) ctx.clearRect(0,0,liveC.width,liveC.height);
+      if(screen){
+        screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        screen.fillRect(0,0,canvas.width,canvas.height);
+      }
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

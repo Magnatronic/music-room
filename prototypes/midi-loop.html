@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Loop Garden — it keeps playing after you stop</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#000}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(9px * var(--ui-scale)) calc(14px * var(--ui-scale));flex-wrap:wrap;
+       background:linear-gradient(#000e,#0000);z-index:3}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);flex:1 1 auto;min-width:0}
+  #go{height:calc(44px * var(--ui-scale));white-space:nowrap}
+  #hint{position:fixed;left:0;right:0;bottom:0;text-align:center;z-index:3;
+        padding:calc(10px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000e);color:var(--ink-quiet);font-size:var(--font-s);line-height:1.5}
+  #hint b{color:var(--ink)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cVoice"></div>
+  <div class="chips" id="cLen"></div>
+  <div class="chips" id="cMem"></div>
+  <button class="btn" id="clr" style="height:calc(44px * var(--ui-scale))">🧹 Empty</button>
+  <div id="who"></div>
+</div>
+<div id="hint"><b>Play a few notes and then stop.</b> Everything you played keeps
+going round, so the room stays alive without anybody holding it up — and each note
+fades on its own, so the piece is always changing.</div>
+
+<script src="midi-core.js"></script>
+<script>
+'use strict';
+/* ── Loop Garden ──────────────────────────────────────────────────────────────
+   The idea worth stealing from Bloom is not the look, it is that **the piece
+   keeps playing when you stop**. In a sensory room that matters twice over: a
+   student's contribution outlives the moment they made it, which is a kind of
+   permanence very little else in their day offers; and the room does not fall
+   silent the instant a hand comes off, which is when regulation usually breaks.
+
+   A note played is placed on a wheel of time at the moment it arrives, and comes
+   round again every revolution. It fades a little on each pass, so the piece is
+   always dissolving as well as building and nothing needs clearing up. Nobody
+   has to keep playing for it to sound like music.
+
+   ANY KEY, NEVER THAT KEY: where a note sits on the wheel is decided by WHEN it
+   was played, never by which key produced it.                                  */
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const LEN={ '8':{label:'8 seconds'}, '12':{label:'12 seconds'}, '20':{label:'20 seconds'} };
+const MEM={ '6':{label:'Fades fast'}, '16':{label:'Fades slowly'}, '999':{label:'Never fades'} };
+let len=12, mem=16;
+
+// Each seed is one note on the wheel: where it sits is WHEN it was played.
+const seeds=[];
+let phase=0, lastPass=0;
+
+MIDI.init({
+  canvas:cv,
+  connectBtn:document.getElementById('go'),
+  statusEl:document.getElementById('who'),
+  onHit(e){
+    seeds.push({ at:phase, note:MIDI.snap(e.note), vel:e.vel, rgb:e.rgb,
+                 life:1, ring:0.30+0.62*e.x, born:performance.now() });
+    if(seeds.length>90) seeds.shift();
+    MIDI.play(e.note,{gain:0.10+0.12*e.vel});
+  },
+});
+document.getElementById('clr').addEventListener('click',()=>{ seeds.length=0; });
+
+MIDI.chips('#cScale', MIDI.SCALES, ()=>MIDI.scale, k=>MIDI.setScale(k));
+MIDI.chips('#cVoice', MIDI.VOICES, ()=>MIDI.voice, k=>MIDI.setVoice(k));
+MIDI.chips('#cLen',   LEN, ()=>String(len), k=>{ len=+k; });
+MIDI.chips('#cMem',   MEM, ()=>String(mem), k=>{ mem=+k; });
+
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  const W=cv.width=cv.clientWidth, H=cv.height=cv.clientHeight;
+  const cx=W/2, cy=H/2, R=Math.min(W,H)*0.42;
+
+  const prev=phase;
+  phase=(phase+dt/len)%1;
+  const wrapped=phase<prev;
+
+  // Cleared and redrawn, never faded toward the background — a fade does not
+  // converge on an accelerated canvas and leaves a ghost of everything ever
+  // drawn. See APPS.md on Soundscape.
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+
+  // the wheel
+  ctx.strokeStyle='rgba(255,255,255,0.10)'; ctx.lineWidth=1;
+  for(const r of [0.30,0.46,0.62,0.78,0.92]){
+    ctx.beginPath(); ctx.arc(cx,cy,R*r,0,Math.PI*2); ctx.stroke();
+  }
+  // the hand that sweeps it
+  const a0=-Math.PI/2 + phase*Math.PI*2;
+  const g=ctx.createLinearGradient(cx,cy,cx+Math.cos(a0)*R,cy+Math.sin(a0)*R);
+  g.addColorStop(0,'rgba(255,255,255,0.03)'); g.addColorStop(1,'rgba(255,255,255,0.35)');
+  ctx.strokeStyle=g; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(a0)*R,cy+Math.sin(a0)*R); ctx.stroke();
+
+  ctx.globalCompositeOperation='lighter';
+  for(let i=seeds.length-1;i>=0;i--){
+    const s=seeds[i];
+    // has the hand just passed this seed?
+    const passed = wrapped ? (s.at>prev || s.at<=phase) : (s.at>prev && s.at<=phase);
+    if(passed){
+      MIDI.play(s.note,{gain:(0.05+0.10*s.vel)*s.life, raw:true});
+      s.flash=1;
+      s.life -= 1/Math.max(1,mem);        // a little quieter every time round
+      if(s.life<=0.06){ seeds.splice(i,1); continue; }
+    }
+    s.flash=Math.max(0,(s.flash||0)-dt*2.6);
+
+    const a=-Math.PI/2 + s.at*Math.PI*2, rr=R*s.ring;
+    const x=cx+Math.cos(a)*rr, y=cy+Math.sin(a)*rr;
+    const base=(3+9*s.vel)*(0.7+0.5*s.life);
+    const rad=base*(1+2.4*s.flash);
+    const al=(0.20+0.55*s.life)*(0.35+0.65*s.flash+0.35);
+    const rg=ctx.createRadialGradient(x,y,0,x,y,rad*2.6);
+    const c=s.rgb.join(',');
+    rg.addColorStop(0,'rgba('+c+','+Math.min(1,al).toFixed(3)+')');
+    rg.addColorStop(0.35,'rgba('+c+','+(al*0.35).toFixed(3)+')');
+    rg.addColorStop(1,'rgba('+c+',0)');
+    ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(x,y,rad*2.6,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba('+c+','+Math.min(1,al*1.3).toFixed(3)+')';
+    ctx.beginPath(); ctx.arc(x,y,rad*0.5,0,Math.PI*2); ctx.fill();
+  }
+  ctx.globalCompositeOperation='source-over';
+
+  if(!seeds.length){
+    ctx.fillStyle='rgba(255,255,255,0.30)';
+    ctx.font=Math.round(Math.min(W,H)*0.035)+'px system-ui,sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('play something', cx, cy);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

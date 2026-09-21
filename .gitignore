@@ -1,0 +1,17 @@
+touch-main/
+
+# Probe scaffolding, ignored at the ROOT rather than per-directory.
+# A probes/<phase>/.gitignore only exists on the branch that created it, so
+# switching branches deletes the ignore file and leaves node_modules on disk —
+# and the next `git add -A` commits a copy of playwright-core. That happened
+# twice (Phase 13, then again in Phase 14) before it was fixed here.
+probes/*/node_modules/
+probes/*/package.json
+probes/*/package-lock.json
+probes/*/wav/
+probes/*/raw/
+framework_old.js
+# Probes build a comparison copy of an app against main and remove it again.
+# A run interrupted part-way must not leave one behind for the load gate to trip
+# over - that happened once and reported a 1-of-28 failure that was a stray file.
+*_OLD.html

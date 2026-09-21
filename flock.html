@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Flock – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Boids (steering swarm) — CPU simulation, Canvas2D rendering.
+
+   Six themes (Sky, Garden, Violet, Embers, Aurora, Prism) are colour ONLY.
+   Three Style presets (Murmuration, Fireflies, Embers) carry the physics and
+   pick the renderer. Plasma and Aurora were styles too until 2026-08-26; they
+   read poorly on a projector and went, taking renderConstellation/renderBlobs
+   with them. frame() migrates a saved renderStyle that still names either.
+   The Aurora THEME is untouched — only the style of that name is gone.
+
+   Touch: a tap is a one-shot attractor via splat(); a finger HELD on the glass
+   is read from the live pointers in collectHolds(), because the framework only
+   splats on movement. Staying still earns up to HOLD_GAIN× the pull.
+*/
+const Anim = (() => {
+  /* ── Private state ── */
+  let ctx = null, W = 1, H = 1;
+  let glowCanvas = null, glowCtx = null;   // offscreen canvas for single-pass blur
+  let agents = [];
+  let activeCount = 0;
+  let _attractors = [];   // rebuilt every frame from the live pointers, plus splat()'s one-shots
+  let _holds = new Map(); // pointer id -> {x,y,held,color} : how long a finger has stayed put
+  let _lastTheme = '';
+
+  /* ── Physics radii (px at 1080p; spatial-hash cell matches COH_RADIUS) ── */
+  const BASE_SPEED    = 150;   // px/s at theme.speed=1, SETTINGS.speed=1
+  const SEP_RADIUS    = 28;
+  const ALIGN_RADIUS  = 68;
+  const COH_RADIUS    = 90;
+  const TOUCH_RADIUS  = 220;   // px: touch influence range
+  const HOLD_FULL     = 1.6;   // s of stillness to reach the full held-press bonus
+  const HOLD_GAIN     = 2.2;   // multiplier on pull once a finger has been still that long
+  const HOLD_STILL    = 0.006; // normalised movement under this per frame still counts as "held"
+  const CLAIM_RADIUS  = 260;   // px: colour-claim range
+  const CELL          = 90;    // spatial-hash cell size (matches COH_RADIUS)
+  const TAU           = Math.PI * 2;
+
+  /* ── Themes (colour-only — physics/render driven by Style presets via SETTINGS) ── */
+  const THEME_DATA = {
+    sky:          {
+      label:'🩵 Sky',
+      colors:[[0.4,0.6,1],[0.5,0.75,1],[0.3,0.5,0.9],[0.8,0.9,1],[0.45,0.65,1]],
+      hueMin:0.50, hueMax:0.78, drift:0, sat:0.80, lit:0.62,
+    },
+    garden:       {
+      label:'🌿 Garden',
+      colors:[[1,0.7,0.1],[0.35,0.95,0.25],[1,0.5,0.05],[0.45,1,0.4],[1,0.8,0.2]],
+      hueMin:0.06, hueMax:0.32, drift:0, sat:0.95, lit:0.65,
+    },
+    violet:       {
+      label:'💜 Violet',
+      colors:[[1,0.05,0.8],[0,1,0.9],[0.8,0.05,1],[0.05,0.8,1],[1,0.25,0.9]],
+      hueMin:0.70, hueMax:1.00, drift:0, sat:1.0, lit:0.62,
+    },
+    embers:       {
+      label:'🔥 Embers',
+      colors:[[1,0.25,0],[1,0.5,0.08],[1,0.12,0],[0.92,0.4,0],[1,0.65,0.05]],
+      hueMin:0.0, hueMax:0.11, drift:-55, sat:1.0, lit:0.58,
+    },
+    aurora:       {
+      label:'🌌 Aurora',
+      colors:[[0.1,1,0.5],[0.65,0.1,1],[0.05,0.9,0.65],[0.8,0.25,1],[0.1,0.85,0.45]],
+      hueMin:0.20, hueMax:0.82, drift:0, sat:0.85, lit:0.55,
+    },
+    prism: {
+      label:'🌈 Prism',
+      colors:[[1,0,0.2],[1,0.6,0],[0.2,1,0.2],[0,0.8,1],[0.7,0.2,1]],
+      hueMin:0, hueMax:1.0, drift:0, sat:1.0, lit:0.62,
+    },
+  };
+
+  /* ── Spatial hash ── */
+  const hashMap = new Map();
+
+  function hashKey(cx, cy){ return cx * 30000 + cy; }
+
+  function buildHash(){
+    hashMap.clear();
+    for(let i = 0; i < activeCount; i++){
+      const a = agents[i];
+      const k = hashKey(Math.floor(a.x / CELL), Math.floor(a.y / CELL));
+      if(!hashMap.has(k)) hashMap.set(k, []);
+      hashMap.get(k).push(i);
+    }
+  }
+
+  function queryRange(x, y, r){
+    const out = [];
+    const x0 = Math.floor((x - r) / CELL), x1 = Math.floor((x + r) / CELL);
+    const y0 = Math.floor((y - r) / CELL), y1 = Math.floor((y + r) / CELL);
+    for(let cx = x0; cx <= x1; cx++)
+      for(let cy = y0; cy <= y1; cy++){
+        const cell = hashMap.get(hashKey(cx, cy));
+        if(cell) for(const idx of cell) out.push(idx);
+      }
+    return out;
+  }
+
+  /* ── Colour helpers ── */
+  function hslStr(h, s, l, a){
+    // Fast HSL→CSS string. h,s,l in 0..1; a in 0..1.
+    const q = l < 0.5 ? l*(1+s) : l+s-l*s, p = 2*l - q;
+    function c2(t){ t=((t%1)+1)%1; if(t<1/6) return p+(q-p)*6*t; if(t<0.5) return q; if(t<2/3) return p+(q-p)*(2/3-t)*6; return p; }
+    const r=c2(h+1/3)*255+0.5|0, g=c2(h)*255+0.5|0, b=c2(h-1/3)*255+0.5|0;
+    return a>=1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a.toFixed(2)})`;
+  }
+
+  function rgbToHue(c){
+    const r=c[0], g=c[1], b=c[2], mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
+    if(d<0.001) return 0;
+    if(mx===r) return (((g-b)/d)%6+6)/6;
+    if(mx===g) return ((b-r)/d+2)/6;
+    return ((r-g)/d+4)/6;
+  }
+
+  function lerpHue(a, b, t){
+    let d = b-a; if(d>0.5) d-=1; if(d<-0.5) d+=1;
+    return ((a+d*t)%1+1)%1;
+  }
+
+  // Per-agent sat/lit offsets applied here — caps lit at 0.80 to prevent whitening on cluster
+  function agentColor(a, th, alpha, litBoost=0){
+    const s=Math.max(0.3, Math.min(1,   th.sat+(a.satOff||0)));
+    const l=Math.max(0.2, Math.min(0.80, th.lit+(a.litOff||0)+litBoost));
+    return hslStr(a.displayHue, s, l, alpha);
+  }
+
+  /* ── Agent management ── */
+  function spawnAgent(){
+    const th = THEME_DATA[currentTheme] || THEME_DATA.sky;
+    const hue = th.hueMin + Math.random()*(th.hueMax - th.hueMin);
+    return {
+      x: Math.random()*W, y: Math.random()*H,
+      vx: (Math.random()-0.5)*60, vy: (Math.random()-0.5)*60,
+      displayHue: hue, themeHue: hue,
+      pulsePhase: Math.random()*TAU,
+      jitterVx: (Math.random()-0.5)*30,  // embers horizontal bias (px/s²)
+      satOff: (Math.random()-0.5)*0.16,  // individual saturation variety
+      litOff: (Math.random()-0.5)*0.12,  // individual lightness variety
+    };
+  }
+
+  function spawnAll(count){
+    agents = [];
+    for(let i=0; i<count; i++) agents.push(spawnAgent());
+    activeCount = count;
+  }
+
+  function resizePool(target){
+    while(agents.length < target) agents.push(spawnAgent());
+    activeCount = Math.min(target, agents.length);
+  }
+
+  /* ── Held-press attractors ──
+     The framework splats on press and then only on movement (framework.js:1561),
+     so a finger resting on the glass stops contributing after one frame. Read the
+     live pointers instead: every finger that is down is an attractor for as long
+     as it is down, and one that stays put earns up to HOLD_GAIN× the pull over
+     HOLD_FULL seconds. Moving the finger resets the bonus, so a swipe still
+     behaves the way it always has. */
+  function collectHolds(dt){
+    // With Paint trails off the framework splats nothing, and touch does nothing
+    // here today. Match that rather than quietly giving the setting a new meaning.
+    if(typeof paintMode==='function' && paintMode()==='off'){ _holds.clear(); return; }
+    const live=(typeof pointers!=='undefined' && pointers) ? pointers : [];
+    const seen=new Set();
+    for(const p of live){
+      if(!p || !p.down) continue;
+      seen.add(p.id);
+      let h=_holds.get(p.id);
+      if(!h){ h={x:p.x, y:p.y, held:0}; _holds.set(p.id,h); }
+      const moved=Math.hypot(p.x-h.x, p.y-h.y);
+      h.held = moved>HOLD_STILL ? 0 : h.held+dt;
+      h.x=p.x; h.y=p.y;
+      const t=Math.min(1, h.held/HOLD_FULL);
+      _attractors.push({ x:p.x*W, y:(1-p.y)*H, color:p.color, gain:1+(HOLD_GAIN-1)*t });
+    }
+    // a lifted finger forgets its hold, so the next press starts gentle again
+    for(const id of [..._holds.keys()]) if(!seen.has(id)) _holds.delete(id);
+  }
+
+  /* ── Physics update ── */
+  function updateAgents(dt, th){
+    const maxSpeed = BASE_SPEED * (SETTINGS.speed || 1);
+    const sepW   = SETTINGS.separation != null ? SETTINGS.separation : 1;
+    const alignW = SETTINGS.alignment  != null ? SETTINGS.alignment  : 1;
+    const cohW   = SETTINGS.cohesion   != null ? SETTINGS.cohesion   : 1;
+    const pull   = SETTINGS.pull   != null ? SETTINGS.pull   : 1;
+    const repel  = SETTINGS.repel;
+
+    buildHash();
+
+    for(let i=0; i<activeCount; i++){
+      const a = agents[i];
+      let ax=0, ay=0;
+
+      // ── Neighbour forces ──
+      const near = queryRange(a.x, a.y, COH_RADIUS);
+      let sxS=0, syS=0, sn=0;
+      let avxS=0, avyS=0, an=0;
+      let cxS=0, cyS=0, cn=0;
+
+      for(const j of near){
+        if(j===i) continue;
+        const b = agents[j];
+        const dx=a.x-b.x, dy=a.y-b.y;
+        const d2=dx*dx+dy*dy; if(d2<1) continue;
+        const d=Math.sqrt(d2);
+        if(d<SEP_RADIUS){
+          const w=(SEP_RADIUS-d)/SEP_RADIUS;
+          sxS+=(dx/d)*w; syS+=(dy/d)*w; sn++;
+        }
+        if(d<ALIGN_RADIUS){ avxS+=b.vx; avyS+=b.vy; an++; }
+        if(d<COH_RADIUS)  { cxS+=b.x;   cyS+=b.y;   cn++; }
+      }
+
+      // Steering: (desired_velocity − current_velocity) × weight applied as acceleration
+      if(sn>0){
+        const sl=Math.hypot(sxS,syS)||1;
+        ax+=(sxS/sl*maxSpeed - a.vx)*sepW*4.2;
+        ay+=(syS/sl*maxSpeed - a.vy)*sepW*4.2;
+      }
+      if(an>0){
+        const avl=Math.hypot(avxS/an,avyS/an)||1;
+        ax+=(avxS/an/avl*maxSpeed - a.vx)*alignW*1.8;
+        ay+=(avyS/an/avl*maxSpeed - a.vy)*alignW*1.8;
+      }
+      if(cn>0){
+        const tCx=cxS/cn-a.x, tCy=cyS/cn-a.y;
+        const cl=Math.hypot(tCx,tCy)||1;
+        ax+=(tCx/cl*maxSpeed - a.vx)*cohW*0.85;
+        ay+=(tCy/cl*maxSpeed - a.vy)*cohW*0.85;
+      }
+
+      // ── Wander ──
+      ax+=(Math.random()-0.5)*maxSpeed*0.85;
+      ay+=(Math.random()-0.5)*maxSpeed*0.85;
+
+      // ── Embers: upward drift + horizontal sway ──
+      if(th.drift!==0){
+        ay+=th.drift;
+        ax+=a.jitterVx*0.5;
+        if(Math.random()<0.018) a.jitterVx=(Math.random()-0.5)*35;
+      }
+
+      // ── Touch attract / repel ──
+      // att.gain carries the held-press bonus: a finger that stays put pulls harder
+      // the longer it stays, which is what a student who cannot swipe can actually do.
+      for(const att of _attractors){
+        const dx=att.x-a.x, dy=att.y-a.y;
+        const d2=dx*dx+dy*dy;
+        if(d2>=TOUCH_RADIUS*TOUCH_RADIUS||d2<1) continue;
+        const d=Math.sqrt(d2);
+        const falloff=1-d/TOUCH_RADIUS;
+        const dir=repel?-1:1;
+        const p=pull*(att.gain||1);
+        ax+=(dx/d*maxSpeed - a.vx*dir)*p*3.2*falloff*dir;
+        ay+=(dy/d*maxSpeed - a.vy*dir)*p*3.2*falloff*dir;
+      }
+
+      // ── Integrate ──
+      a.vx+=ax*dt; a.vy+=ay*dt;
+      const spd=Math.hypot(a.vx,a.vy);
+      if(spd>maxSpeed){ const s=maxSpeed/spd; a.vx*=s; a.vy*=s; }
+      a.x+=a.vx*dt; a.y+=a.vy*dt;
+
+      // ── Torus wrap ──
+      if(a.x<0) a.x+=W; else if(a.x>=W) a.x-=W;
+      if(a.y<0) a.y+=H; else if(a.y>=H) a.y-=H;
+    }
+  }
+
+  /* ── Colour-claim ── */
+  function updateColours(dt){
+    const th=THEME_DATA[currentTheme]||THEME_DATA.sky;
+    const repel=SETTINGS.repel;
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      let claimed=false;
+      if(!repel){
+        for(const att of _attractors){
+          const d2=(a.x-att.x)**2+(a.y-att.y)**2;
+          if(d2<CLAIM_RADIUS*CLAIM_RADIUS){
+            a.displayHue=lerpHue(a.displayHue, rgbToHue(att.color), Math.min(1,dt*2.8));
+            claimed=true; break;
+          }
+        }
+      }
+      // Slow hue wander — keeps the flock visually alive within the theme's palette range
+      a.themeHue+=(Math.random()-0.5)*dt*0.06;
+      a.themeHue=Math.max(th.hueMin, Math.min(th.hueMax, a.themeHue));
+      if(!claimed) a.displayHue=lerpHue(a.displayHue, a.themeHue, Math.min(1,dt*0.9));
+    }
+  }
+
+  /* ── Fade canvas each frame ──
+     Read the slider as a DURATION, not as an alpha. Ink decays by (1-alpha) per
+     frame, so how long a trail lasts goes as 1/alpha — and the old linear
+     `1-trailLen/62` therefore put more of the slider's effect into its last five
+     units than into its first fifty. Measured: Trail length 40 cleared in 0.2 s,
+     50 in 0.35 s, and 60 in 1.4 s, which is long enough to hold a faint copy of
+     the whole flock path on screen at once. With a high Glow size the live agents
+     are small and that faint copy is what you actually see — reported 2026-08-27
+     as ghosting, and it is not residue: the canvas does reach pure black, and a
+     stamped mark always clears.
+
+     A geometric map on the time constant keeps the old feel everywhere below the
+     top (0.05/0.08/0.13/0.22/0.36 s at 10/20/30/40/50, within a frame of what it
+     was) and shortens only the end that was smearing: 60 becomes ~0.6 s.
+
+     Driving it from dt also makes the trail the same length at 30 fps as at 60.
+     It was not: fewer fade steps per second meant `quality:auto` dropping a busy
+     room PC to 30 fps silently doubled the smear in wall-clock terms. */
+  const TRAIL_TAU_MIN = 0.0054;   // s time-constant at the short end of the slider
+  const TRAIL_TAU_MAX = 0.11;     // s time-constant at Trail length 60
+  function fadeCanvas(dt){
+    const trailLen=SETTINGS.trailLen!=null?SETTINGS.trailLen:20;
+    const r=bgRGB[0]*255|0, g=bgRGB[1]*255|0, b=bgRGB[2]*255|0;
+    ctx.globalCompositeOperation='source-over';
+    if(trailLen<=0){                       // no trail at all: an opaque repaint
+      ctx.fillStyle=`rgb(${r},${g},${b})`;
+      ctx.fillRect(0,0,W,H);
+      return;
+    }
+    const tau=TRAIL_TAU_MIN*Math.pow(TRAIL_TAU_MAX/TRAIL_TAU_MIN, Math.min(1,trailLen/60));
+    const alpha=Math.min(1, 1-Math.exp(-dt/tau));
+    ctx.fillStyle=`rgba(${r},${g},${b},${alpha})`;
+    ctx.fillRect(0,0,W,H);
+
+    // The exponential fade alone NEVER ARRIVES. Compositing is 8-bit, and an
+    // accelerated canvas rounds: once a channel is low enough that
+    // old*alpha < 0.5, `old*(1-alpha)` rounds straight back to old and stops
+    // there forever. At the longest trail that floor is 3, so everywhere the
+    // flock has been settles at rgb(3,3,3) against an untouched rgb(0,0,0) —
+    // measured, 376,302 pixels at exactly that value after 12 s. It is why the
+    // user described "a slightly different black" that stops mattering once the
+    // whole screen has been painted: at that point both halves finally agree.
+    //
+    // This is also why it hid from three earlier rounds of testing. Calling
+    // getImageData drops the canvas off the GPU, and the software path FLOORS
+    // rather than rounds, so every probe that read pixels while the fade ran
+    // measured a canvas that no longer had the bug.
+    //
+    // color-burn against near-white subtracts about one level across the whole
+    // range — nothing against the exponential where ink is bright, decisive in
+    // the last few levels where it had stalled. It heads for 0 rather than for
+    // the background, so lighten clamps it back up when the background is not
+    // black. Verified on a full-size accelerated canvas: painted and untouched
+    // both land on exactly the background, at every trail length.
+    ctx.globalCompositeOperation='color-burn';
+    ctx.fillStyle='rgb(254,254,254)';
+    ctx.fillRect(0,0,W,H);
+    if(r||g||b){                       // a black background is already the floor
+      ctx.globalCompositeOperation='lighten';
+      ctx.fillStyle=`rgb(${r},${g},${b})`;
+      ctx.fillRect(0,0,W,H);
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  /* ── Render styles ── */
+
+  function renderStreaks(th){
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    ctx.shadowBlur=0;
+    ctx.lineWidth=1.3;
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      if(Math.hypot(a.vx,a.vy)<1) continue;
+      const k=gs*0.05+0.01;
+      ctx.strokeStyle=agentColor(a, th, 0.82);
+      ctx.beginPath();
+      ctx.moveTo(a.x-a.vx*k, a.y-a.vy*k);
+      ctx.lineTo(a.x, a.y);
+      ctx.stroke();
+    }
+  }
+
+  function renderGlow(dt, th){
+    if(!glowCtx) return;
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    const coreR=Math.max(1, gs*0.45);
+    const blurAmt=Math.max(2, gs*1.2)|0;   // reduced: single-pass blurs all particles together so less blur keeps them distinct
+    glowCtx.clearRect(0,0,W,H);
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      a.pulsePhase=(a.pulsePhase+dt*2.4)%TAU;
+      const pulse=0.5+0.5*Math.sin(a.pulsePhase);
+      const r=coreR*(0.5+0.5*pulse);
+      glowCtx.fillStyle=agentColor(a, th, 0.65+0.35*pulse);
+      glowCtx.beginPath(); glowCtx.arc(a.x,a.y,r,0,TAU); glowCtx.fill();
+    }
+    ctx.globalCompositeOperation='screen';  // screen avoids blowing out to white when agents cluster
+    ctx.filter=`blur(${blurAmt}px)`;
+    ctx.drawImage(glowCanvas,0,0);
+    ctx.filter='none';
+    ctx.globalCompositeOperation='source-over';  // crisp cores use normal blend so they don't compound
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      const pulse=0.5+0.5*Math.sin(a.pulsePhase);
+      ctx.fillStyle=agentColor(a, th, 0.65+0.2*pulse, 0.1);
+      ctx.beginPath(); ctx.arc(a.x,a.y,Math.max(0.8,coreR*0.4),0,TAU); ctx.fill();
+    }
+  }
+
+  function renderSparks(th){
+    const gs=SETTINGS.glowSize!=null?SETTINGS.glowSize:4;
+    ctx.shadowBlur=0;
+    const hr=Math.max(1.2, gs*0.2);
+    for(let i=0; i<activeCount; i++){
+      const a=agents[i];
+      if(Math.hypot(a.vx,a.vy)<1) continue;
+      const k=gs*0.045+0.015;
+      // Faint tail
+      ctx.lineWidth=0.9;
+      ctx.strokeStyle=agentColor(a, th, 0.32);
+      ctx.beginPath(); ctx.moveTo(a.x-a.vx*k, a.y-a.vy*k); ctx.lineTo(a.x,a.y); ctx.stroke();
+      // Bright head
+      ctx.fillStyle=agentColor(a, th, 0.92, 0.12);
+      ctx.beginPath(); ctx.arc(a.x,a.y,hr,0,TAU); ctx.fill();
+    }
+  }
+
+  /* ── Public Anim interface ── */
+  return {
+    sectionLabel: 'Flock',
+    lockMode:'flow',   // an interactive animation, not an instrument — no Keys grid
+
+    themes: THEME_DATA,
+
+    defaults: {
+      mode:'flow',   // sensory-first: free Flow by default, Keys grid via the rail toggle
+      theme:'sky', renderStyle:'streaks',
+      count:500, speed:1.8,
+      cohesion:1.44, separation:1.04, alignment:2.08,
+      pull:6.0, trailLen:20, glowSize:4, repel:false,
+    },
+
+    styles: {
+      murmuration: { label:'Murmuration', renderStyle:'streaks',       speed:1.8,  cohesion:1.44, separation:1.04, alignment:2.08, trailLen:20, glowSize:4 },
+      fireflies:   { label:'Fireflies',   renderStyle:'glow',          speed:0.55, cohesion:0.32, separation:0.64, alignment:0.52, trailLen:40, glowSize:7 },
+      embers:      { label:'Embers',      renderStyle:'sparks',         speed:0.95, cohesion:0.24, separation:0.40, alignment:0.56, trailLen:8,  glowSize:3 },
+    },
+
+    schema: [
+      {key:'count',      label:'Agents',       min:100, max:1500, step:50,   dp:0},
+      {key:'speed',      label:'Speed',        min:0.2, max:3.0,  step:0.1,  dp:1},
+      {key:'cohesion',   label:'Cohesion',     min:0,   max:2,    step:0.05, dp:2},
+      {key:'separation', label:'Separation',   min:0,   max:2,    step:0.05, dp:2},
+      {key:'alignment',  label:'Alignment',    min:0,   max:2,    step:0.05, dp:2},
+      {key:'pull',       label:'Touch pull',   min:2,   max:20,   step:0.5,  dp:1},
+      {key:'trailLen',   label:'Trail length', min:0,   max:60,   step:1,    dp:0},
+      {key:'glowSize',   label:'Glow size',    min:1,   max:12,   step:0.5,  dp:1},
+      {key:'repel',      label:'Repel',        type:'toggle'},
+    ],
+
+    init(cv){
+      ctx=cv.getContext('2d',{alpha:false});
+      W=cv.width; H=cv.height;
+      glowCanvas=document.createElement('canvas');
+      glowCanvas.width=W; glowCanvas.height=H;
+      glowCtx=glowCanvas.getContext('2d',{alpha:true});
+      const q=activeQuality();
+      const base=SETTINGS.count||500;
+      const n={high:base, med:Math.round(base*0.6), low:Math.round(base*0.35)}[q]||base;
+      spawnAll(n);
+    },
+
+    resize(w,h){
+      const sx=w/(W||w), sy=h/(H||h);
+      W=w; H=h;
+      if(glowCanvas){ glowCanvas.width=w; glowCanvas.height=h; }
+      for(let i=0; i<agents.length; i++){ agents[i].x*=sx; agents[i].y*=sy; }
+    },
+
+    // A tap still lands as a one-shot attractor; a HELD finger is read from the
+    // live pointers in frame() instead, because the framework only splats on
+    // movement and a still finger would otherwise pull for exactly one frame.
+    splat(x,y,dx,dy,color){
+      _attractors.push({x:x*W, y:(1-y)*H, color, gain:1});
+    },
+
+    frame(dt){
+      if(!ctx||W<2||H<2) return;
+
+      // The Plasma and Aurora STYLES went on 2026-08-26 (the Aurora theme stayed).
+      // A preset or a localStorage blob saved before then still names their
+      // renderers, and an unknown style draws nothing at all — a black screen,
+      // which is a fail state. Map them onto the nearest survivor instead.
+      if(SETTINGS.renderStyle==='constellation') SETTINGS.renderStyle='streaks';
+      else if(SETTINGS.renderStyle==='blobs')    SETTINGS.renderStyle='glow';
+
+      // A frozen mid-flight swarm reads as broken — flock is deliberately
+      // always-on (the framework's idle sleep suits touch-driven paint apps).
+      pokeSim();
+
+      // Sync agent count to current setting + quality ceiling
+      const desired=SETTINGS.count||500;
+      const q=activeQuality();
+      const ceiling={high:desired, med:Math.round(desired*0.6), low:Math.round(desired*0.35)}[q]||desired;
+      if(activeCount!==ceiling) resizePool(ceiling);
+
+      const th=THEME_DATA[currentTheme]||THEME_DATA.sky;
+
+      // When theme changes, retarget all agent hues so updateColours lerps them to the new palette
+      if(currentTheme!==_lastTheme){
+        _lastTheme=currentTheme;
+        for(let i=0; i<agents.length; i++)
+          agents[i].themeHue=th.hueMin+Math.random()*(th.hueMax-th.hueMin);
+      }
+
+      collectHolds(dt);
+      updateAgents(dt,th);
+      updateColours(dt);
+      fadeCanvas(dt);
+      ctx.shadowBlur=0;
+
+      const style=SETTINGS.renderStyle||'streaks';
+      if     (style==='streaks')       renderStreaks(th);
+      else if(style==='glow')          renderGlow(dt,th);
+      else if(style==='sparks')        renderSparks(th);
+
+      _attractors=[];
+    },
+
+    reset(){
+      const base=SETTINGS.count||500;
+      _attractors=[]; _holds.clear();
+      spawnAll(base);
+      if(ctx){
+        ctx.globalCompositeOperation='source-over';
+        ctx.fillStyle=`rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
+        ctx.fillRect(0,0,W,H);
+      }
+    },
+
+    setQuality(level){
+      const base=SETTINGS.count||500;
+      const target={high:base, med:Math.round(base*0.6), low:Math.round(base*0.35)}[level]||base;
+      resizePool(target);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

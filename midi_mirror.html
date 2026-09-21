@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Mirror – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="midi.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Mirror — you play, it answers.
+   Design: PHASE-9-MIDI.md. Shares midi.js with the other MIDI apps.
+
+   THE IDEA: turn-taking is a named goal, and Echo Bird already covers "play back
+   what you heard" — which is a MEMORY task, and a test: there is a right answer
+   and a student can fail it.
+
+   This is the other thing therapists actually do, which is improvised call and
+   response. It never asks the student to repeat anything. It listens to whatever
+   came, waits until they stop, and answers with a phrase that keeps their RHYTHM
+   but moves the notes — replying rather than repeating. There is no right answer,
+   so there is nothing to fail, and the only thing being taught is the shape of a
+   turn: you go, I go, you go.
+
+   ANY KEY, NEVER THAT KEY: the reply is built from scale degrees relative to what
+   was played, so it never needs to know where anything is on the instrument, and
+   every note of it lands in the therapist's chosen scale by construction.
+
+   THEIRS RISE, OURS FALL, from a line across the middle — a turn you can see as
+   well as hear. A touch marks the screen where it is touched and then drifts the
+   same way, so cause and effect stay together.
+
+   Cleared and redrawn every frame, never faded toward the background. See
+   APPS.md on Soundscape.
+*/
+const Anim = (function(){
+
+  const BLEND=MIDIIN.BLEND;
+  let screen=null, W=0, H=0;
+  const paint=MIDIIN.makePaint();
+
+  const REPLY = {
+    up:     {label:'A little higher'},
+    invert: {label:'Upside down'},
+    tail:   {label:'Carries on (+1 of its own)'},
+    back:   {label:'Backwards'},
+    shadow: {label:'A quiet shadow'},
+  };
+  // WHICH WAY THE LINE RUNS. Everything below is written as "along the line"
+  // and "away from the line", so the two cases are one piece of geometry rather
+  // than two copies of the app.
+  const AXIS = { horiz:{label:'— Across'}, vert:{label:'❘ Down'} };
+
+  const WAIT = { '0.8':{label:'Answers quickly'}, '1.4':{label:'Waits a moment'},
+                 '2.4':{label:'Waits a while'}, '4':{label:'Waits a long time'} };
+
+  const LOOK = {
+    drift: {label:'🌊 Drift', params:[
+      ['size','Size',0.3,2.5,1], ['glow','Glow',0.2,3,1], ['speed','How fast they leave',0.3,2.5,1]]},
+    bars:  {label:'▮ Bars',   params:[
+      ['wide','Width',0.3,2.5,1], ['tall','Height',0.3,2.5,1], ['glow','Glow',0.2,3,1]]},
+    rings: {label:'◎ Rings',  params:[
+      ['size','Size',0.3,2.5,1], ['thick','Thickness',0.3,3,1], ['speed','How fast they leave',0.3,2.5,1]]},
+    wave:  {label:'〰️ Wave',  params:[
+      ['thick','Thickness',0.3,3,1], ['size','Note size',0.3,2.5,1], ['speed','How fast they leave',0.3,2.5,1]]},
+  };
+
+  const waitFor = () => +SETTINGS.waitFor || 1.4;
+  const look    = () => LOOK[SETTINGS.look] || LOOK.drift;
+  const BR      = () => 0.35+0.9*(+SETTINGS.bright);
+  const SZ      = () => 0.45+1.5*(+SETTINGS.size);
+
+  function pv(key){
+    const o=SETTINGS.sp && SETTINGS.sp[SETTINGS.look], v=o?o[key]:null;
+    if(v!=null) return +v;
+    const d=(look().params||[]).find(p=>p[0]===key);
+    return d?d[4]:1;
+  }
+  function setPv(key,val){
+    SETTINGS.sp=SETTINGS.sp||{};
+    SETTINGS.sp[SETTINGS.look]=Object.assign({},SETTINGS.sp[SETTINGS.look],{[key]:val});
+    saveSettings();
+  }
+
+  let phrase=[], lastPlayed=0, mode='listen';
+  const marks=[];
+  const timers=[];
+
+  // `off` is the small step a mark takes off the line so it does not start on
+  // it. A mark that a FINGER placed already has a place of its own, and stepping
+  // that one off would put it where the finger was not.
+  function addMark(col, hue, vel, mine, x, y0, off){
+    marks.push({ col, hue, vel, mine, x, y0, off:off==null?0.02:off, life:0 });
+    if(marks.length>140) marks.shift();
+  }
+
+  /* ── Listening ─────────────────────────────────────────────────────────*/
+  function heard(ev){
+    if(mode==='answering') return;                 // it is still talking; let it finish
+    const now=performance.now();
+    phrase.push({ col:ev.col, vel:ev.force, gap:phrase.length? now-lastPlayed : 0,
+                  x:MIDIIN.PX(ev), y:(ev.fy!=null ? 1-ev.fy : 0.5), hue:ev.hue });
+    if(phrase.length>16) phrase.shift();
+    lastPlayed=now; mode='listen';
+    MIDIIN.pluck(ev.col, MIDIIN.level(ev.force));
+    // its own place if a finger gave it one, otherwise across from the range
+    addMark(ev.col, ev.hue, ev.force, true, MIDIIN.PX(ev),
+            ev.fy!=null ? 1-ev.fy : 0.5, ev.fy!=null ? 0 : 0.02);
+  }
+
+  /* ── The reply keeps the RHYTHM and moves the notes ────────────────────
+     Same shape, different words. Everything is a scale degree, so nothing here
+     can land outside the key however it is transformed.                    */
+  function buildReply(src){
+    const style=SETTINGS.reply, first=src[0].col, n=Math.max(1,NOTES.length);
+    let out=[];
+    for(let i=0;i<src.length;i++){
+      const s=src[i];
+      let col;
+      if(style==='up')          col = s.col + 2;
+      else if(style==='invert') col = first - (s.col - first);
+      else if(style==='shadow') col = s.col - 2;
+      else if(style==='back')   col = s.col;
+      else                      col = s.col + (i===src.length-1 ? 3 : 1);
+      // The ANSWER'S PITCH is transformed; its PLACE and COLOUR are the source's,
+      // so the picture is a true mirror of what was played while the music is a
+      // reply rather than an echo. The reply used to land at the transposed
+      // note's column, at y=0.5 always, in a Math.random() hue - three ways of
+      // being unrelated to the thing it was answering, which is most of why
+      // nobody could tell what it was doing. See PHASE-9D-MIDI-POLISH.md 5.1/5.2.
+      out.push({ col:Math.max(0,Math.min(n-1,col)),
+                 vel:Math.min(1, style==='shadow' ? s.vel*0.6 : s.vel*0.9+0.1),
+                 gap:s.gap, x:s.x, y:s.y, hue:s.hue, srcCol:s.col });
+    }
+    if(style==='back'){
+      // the same notes, walked back the way they came, keeping the rhythm
+      const gaps=out.map(o=>o.gap);
+      out=out.slice().reverse().map((o,i)=>({ col:o.col, vel:o.vel, gap:gaps[i],
+                                              x:o.x, y:o.y, hue:o.hue, srcCol:o.srcCol }));
+    }
+    if(style==='tail'){                            // ...and adds a note of its own
+      const last=out[out.length-1];
+      // ITS OWN EXTRA NOTE, and the one mark in the app that is deliberately
+      // NOT a mirror of anything - which is why it reads as "an extra ring"
+      // once everything else lines up exactly. It now stands clearly past the
+      // end of the phrase rather than just beside it, and the chip says so.
+      // Only 'Carries on' does this; the other four answer note for note.
+      out.push({ col:Math.max(0,Math.min(n-1,last.col+2)), vel:0.75,
+                 gap:Math.max(180, last.gap||260),
+                 x:Math.max(0.03,Math.min(0.97,(last.x||0.5)+0.13)),
+                 y:Math.max(0.06,Math.min(0.94,(last.y||0.5)-0.10)),
+                 hue:last.hue, srcCol:last.srcCol });
+    }
+    return out;
+  }
+
+  function answer(){
+    const src=phrase.slice(); phrase=[];
+    if(!src.length){ mode='listen'; return; }
+    mode='answering';
+    const reply=buildReply(src);
+    let t=0;
+    reply.forEach((r,i)=>{
+      t += i===0 ? 120 : Math.min(900, Math.max(110, r.gap||260));
+      timers.push(setTimeout(()=>{
+        MIDIIN.pluck(r.col, MIDIIN.level(r.vel, 0.85));
+        // The mark is coloured by the note that was PLAYED, not by the note the
+        // answer transposes it to - otherwise a true mirror of place comes back
+        // in a different colour, which is the thing that was asked to stop.
+        // What it SOUNDS is still r.col; only the picture mirrors.
+        addMark(r.srcCol!=null?r.srcCol:r.col, r.hue, r.vel, false,
+                r.x!=null?r.x:MIDIIN.colX(r.col), 1-(r.y!=null?r.y:0.5));
+        pokeSim();
+        if(i===reply.length-1) timers.push(setTimeout(()=>{ mode='listen'; }, 320));
+      }, t));
+    });
+  }
+  function hush(){
+    while(timers.length) clearTimeout(timers.pop());
+    phrase=[]; mode='listen';
+  }
+
+  return {
+    appLabel:'💬 Turns',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    onCell(){},
+    themes:{ dark:{label:'🎵 Notes', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                             [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    defaults:Object.assign({}, MIDIIN.DEFAULTS, {
+      theme:'dark', axis:'horiz', look:'drift', reply:'up', waitFor:1.4,
+      bright:0.7, size:0.55, showTurn:true,
+    }),
+    schema:[],
+
+    railButtons:[
+      { id:'mrsil', icon:()=>'🔇', label:'Silence', title:()=>'Stop it answering and clear the turn',
+        onClick(){ hush(); MIDIIN.silence(); } },
+      { id:'mrwipe', icon:()=>'🧽', label:'Wipe', title:()=>'Clear the picture',
+        show:()=>MIDIIN.PERSIST()>0.01,
+        onClick(){ paint.clear(); } },
+    ],
+
+    buildApp(el){
+      MIDIIN.buildConnect(el);
+      const labels={}; for(const k in LOOK) labels[k]={label:LOOK[k].label};
+      el.appendChild(makeChips('Look','look',labels,()=>{
+        if(currentQuickMode==='visuals') buildVisualsPanel(); }));
+      el.appendChild(makeChips('Which way the line runs','axis',AXIS,null));
+      el.appendChild(makeChips('How it answers','reply',REPLY,null));
+      el.appendChild(makeChips('Before it answers','waitFor',WAIT,null));
+      MIDIIN.snapChips(el);
+      el.appendChild(MIDIIN.note('Play a few notes and stop; it answers with a phrase that keeps your rhythm, laid '
+        + 'out as a mirror of yours. “Carries on” adds one mark of its own — every other '
+        + 'way of answering is note for note.'));
+    },
+
+    buildInstrument(el){ MIDIIN.buildNotesPane(el); },
+
+    buildVisuals(el){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Colour';
+      el.appendChild(h); MIDIIN.paletteChips(el);
+
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Light';
+      el.appendChild(h2);
+      el.appendChild(makeSlider({key:'bright',label:'Brightness',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      MIDIIN.lingerSlider(el);
+      MIDIIN.persistSlider(el, ()=>refreshRailButtons());
+      el.appendChild(MIDIIN.note('Persistence builds a picture of the whole conversation. 🧽 Wipe clears it.'));
+      el.appendChild(makeSlider({key:'size',label:'Size',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeToggle('Say whose turn it is','showTurn',null));
+      el.appendChild(MIDIIN.note('Turn the words off for a student who finds text distracting — the two halves '
+        + 'still say whose turn it is.'));
+
+      const h3=document.createElement('div'); h3.className='sectn';
+      h3.textContent=look().label; el.appendChild(h3);
+      for(const p of look().params) el.appendChild(styleSlider(p[0],p[1],p[2],p[3],p[4]));
+      el.appendChild(MIDIIN.note('These belong to this look alone — every look has its own three.'));
+    },
+
+    init(cv){
+      screen=cv.getContext('2d');
+      MIDIIN.setKnobs([{key:'bright',label:'Brightness'},{key:'size',label:'Size'}]);
+      MIDIIN.attach({ onHit:heard });
+      this.reset();
+    },
+
+    resize(){ this.reset(); },
+
+    // A touch takes a turn too, so it is never a dead screen with no instrument.
+    splat(x,y,dx,dy,color,opts){ MIDIIN.splatTouch(x,y,opts,240); },
+
+    frame(dt){
+      if(!screen) return;
+      W=canvas.width; H=canvas.height;
+      MIDIIN.ease(dt);
+
+      if(mode==='listen' && phrase.length && (performance.now()-lastPlayed)/1000>waitFor()) answer();
+
+      screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      screen.fillRect(0,0,W,H);
+
+      const S=Math.min(W,H), mode2=SETTINGS.look;
+      const VERT=SETTINGS.axis==='vert';
+      const ACROSS=VERT?W:H;                 // the axis marks travel ALONG when leaving
+      const mid=ACROSS/2;
+
+      // the line, and a wash on whichever half is speaking
+      const theirs = mode!=='answering' && phrase.length>0;
+      const ours   = mode==='answering';
+      if(theirs||ours){
+        const c = '170,195,255';                       // the same on both sides
+        const g = VERT ? screen.createLinearGradient(ours?mid:0, 0, ours?W:mid, 0)
+                       : screen.createLinearGradient(0, ours?mid:0, 0, ours?H:mid);
+        g.addColorStop(ours?1:0,'rgba('+c+',0.00)');
+        g.addColorStop(ours?0:1,'rgba('+c+',0.10)');
+        screen.fillStyle=g;
+        if(VERT) screen.fillRect(ours?mid:0, 0, mid, H);
+        else     screen.fillRect(0, ours?mid:0, W, mid);
+      }
+      screen.strokeStyle='rgba(255,255,255,0.10)'; screen.lineWidth=Math.max(1,S*0.0012);
+      screen.beginPath();
+      if(VERT){ screen.moveTo(mid,0); screen.lineTo(mid,H); }
+      else    { screen.moveTo(0,mid); screen.lineTo(W,mid); }
+      screen.stroke();
+
+      const real=screen;
+      screen=paint.begin(W,H);
+      screen.globalCompositeOperation=BLEND;
+      for(let i=marks.length-1;i>=0;i--){
+        const m=marks[i]; m.life+=dt;
+        const sp=(mode2==='bars'?1:pv('speed'));
+        const f=Math.max(0,1-m.life/(4.6*MIDIIN.LINGER()/sp));
+        if(f<=0){ marks.splice(i,1); continue; }
+
+        const c=MIDIIN.colourOfCol(m.col, m.hue).join(',');
+        const dir=m.mine?-1:1;
+        // `m.x` is where it sits ALONG the line and `m.y0` how far from it, so
+        // turning the mirror on its side is a swap rather than a second layout.
+        const away=(m.y0*ACROSS) + dir*(ACROSS*m.off + m.life*ACROSS*0.075*sp);
+        const x=VERT ? away : m.x*W;
+        const y=VERT ? m.x*H : away;
+        const r=S*(0.010+0.030*m.vel)*SZ()*(0.55+0.45*f);
+        const a=Math.min(1,f*(m.mine?0.80:0.66)*BR());
+
+        if(mode2==='bars'){
+          const w=Math.max(6,S*0.020*pv('wide')*SZ());
+          const hgt=ACROSS*0.10*pv('tall')*(0.3+0.9*m.vel)*f;
+          // the bar stands away from the line, whichever way the line runs
+          const g = VERT ? screen.createLinearGradient(0,y-w/2,0,y+w/2)
+                         : screen.createLinearGradient(x-w/2,0,x+w/2,0);
+          g.addColorStop(0,'rgba('+c+',0)');
+          g.addColorStop(0.5,'rgba('+c+','+a.toFixed(3)+')');
+          g.addColorStop(1,'rgba('+c+',0)');
+          screen.fillStyle=g;
+          if(VERT) screen.fillRect(m.mine? x-hgt : x, y-w/2, hgt, w);
+          else     screen.fillRect(x-w/2, m.mine? y-hgt : y, w, hgt);
+          const gx=VERT ? (m.mine? x-hgt/2 : x+hgt/2) : x;
+          const gy=VERT ? y : (m.mine? y-hgt/2 : y+hgt/2);
+          const rg=screen.createRadialGradient(gx,gy,0,gx,gy,w*(1.3+pv('glow')));
+          rg.addColorStop(0,'rgba('+c+','+(a*0.5).toFixed(3)+')');
+          rg.addColorStop(1,'rgba('+c+',0)');
+          screen.fillStyle=rg; screen.beginPath();
+          screen.arc(gx,gy,w*(1.3+pv('glow')),0,Math.PI*2); screen.fill();
+        } else if(mode2==='rings'){
+          const rr=r*(1.2+3.4*(1-f))*pv('size');
+          screen.lineWidth=Math.max(1,r*0.30*pv('thick'));
+          screen.strokeStyle='rgba('+c+','+a.toFixed(3)+')';
+          screen.beginPath(); screen.arc(x,y,rr,0,Math.PI*2); screen.stroke();
+          screen.strokeStyle='rgba('+c+','+(a*0.4).toFixed(3)+')';
+          screen.beginPath(); screen.arc(x,y,rr*0.55,0,Math.PI*2); screen.stroke();
+        } else if(mode2==='wave'){
+          // ONE CONNECTED LINE PER SIDE, curved through the marks in the order
+          // they were played. A phrase IS a sequence, so a line through it is
+          // the phrase - and it is what makes the mirroring legible, because
+          // the answer's line is the shape of yours turned over. The old Trace
+          // joined each mark to its neighbour with a separate straight segment,
+          // which drew the same points without ever reading as one line.
+          const nx=marks[i-1];
+          if(nx && nx.mine===m.mine){
+            const nAway=(nx.y0*ACROSS)+ (nx.mine?-1:1)*(ACROSS*nx.off + nx.life*ACROSS*0.075*sp);
+            const nX=VERT ? nAway : nx.x*W;
+            const nY=VERT ? nx.x*H : nAway;
+            screen.strokeStyle='rgba('+c+','+(a*0.65).toFixed(3)+')';
+            screen.lineWidth=Math.max(1.2,r*0.34*pv('thick'));
+            screen.lineCap='round'; screen.lineJoin='round';
+            screen.beginPath();
+            screen.moveTo(x,y);
+            if(VERT){ const my=(y+nY)/2; screen.bezierCurveTo(x,my, nX,my, nX,nY); }
+            else    { const mx=(x+nX)/2; screen.bezierCurveTo(mx,y, mx,nY, nX,nY); }
+            screen.stroke();
+          }
+          const rr=r*pv('size')*0.8;
+          screen.fillStyle='rgba('+c+','+Math.min(1,a*1.1).toFixed(3)+')';
+          screen.beginPath(); screen.arc(x,y,rr,0,Math.PI*2); screen.fill();
+        } else {
+          const rr=r*pv('size'), out=rr*(1.6+pv('glow'));
+          const g=screen.createRadialGradient(x,y,0,x,y,out);
+          g.addColorStop(0,'rgba('+c+','+a.toFixed(3)+')');
+          g.addColorStop(0.34,'rgba('+c+','+(a*0.4).toFixed(3)+')');
+          g.addColorStop(1,'rgba('+c+',0)');
+          screen.fillStyle=g; screen.beginPath(); screen.arc(x,y,out,0,Math.PI*2); screen.fill();
+        }
+        // NO RING ON THE REPLY. It was there to say "this one is the answer",
+        // from before the answer mirrored anything - and now that the layout IS
+        // a mirror, a ring on one side and not the other is the one thing
+        // breaking the symmetry, which shows up most in a kept picture. Which
+        // side of the line it is on says whose it is.
+      }
+      screen.globalCompositeOperation='source-over';
+      screen=real;
+      paint.stamp(dt);
+      paint.show(screen);
+
+      if(SETTINGS.showTurn && (theirs||ours)){
+        screen.font='600 '+Math.round(S*0.034)+'px system-ui,sans-serif';
+        screen.textAlign='center'; screen.textBaseline='middle';
+        screen.fillStyle = ours ? 'rgba(255,190,120,0.75)' : 'rgba(143,180,255,0.75)';
+        screen.fillText(ours?'🎵 listen':'🎤 your turn', W/2, ours? H*0.93 : H*0.07);
+      }
+      if(marks.length || phrase.length || mode==='answering') pokeSim();
+    },
+
+    reset(){
+      hush(); marks.length=0;
+      if(screen){
+        screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        screen.fillRect(0,0,canvas.width,canvas.height);
+      }
+    },
+  };
+
+  function styleSlider(key,label,min,max,def){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=(max-min)/40; inp.value=pv(key);
+    const show=v=>Math.round(v/def*100)+'%';
+    val.textContent=show(inp.value);
+    inp.addEventListener('input',()=>{ const v=parseFloat(inp.value); setPv(key,v); val.textContent=show(v); });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
+  }
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

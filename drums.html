@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Drum Pads – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Pad editor dialog — same look as the Sampler's editor */
+#dpOv{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.55);
+  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+#dpDlg{width:min(440px,94vw);max-height:88vh;overflow-y:auto;
+  background:rgba(17,19,27,0.97);border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  border-radius:20px;padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,0.5);
+  color:rgba(255,255,255,0.9);font-family:sans-serif;font-size:var(--font-m)}
+#dpDlg .dlghead{display:flex;justify-content:space-between;align-items:center;margin:-16px -18px 12px;padding:12px 18px;background:color-mix(in srgb,var(--accent) 20%,transparent);border-bottom:2px solid color-mix(in srgb,var(--accent) 65%,transparent)}
+#dpDlg .dlghead .ttl{font-size:var(--font-m);font-weight:600}
+/* Recording status pill — like the framework's edit pill, but red-rimmed */
+#dpRecPill{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:55;
+  background:rgba(0,0,0,0.78);border:1px solid rgba(255,80,80,0.7);color:rgba(255,255,255,0.95);
+  font:14px sans-serif;padding:10px 18px;border-radius:14px;max-width:86%;text-align:center;pointer-events:none}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Drum Pads — big colourful percussion zones. Tap a pad to play its drum; drag
+   across pads for rolls. All drums are synthesised (no samples), routed through
+   the framework's master chain (volume, effects, auto-mixer, limiter).
+
+   Editing follows the Sampler pattern: the therapist toggles the rail ✏️ button
+   into EDIT mode (the rail is hidden by the session lock, so students can't
+   change pads), then taps a pad to open its editor dialog: choose which drum it
+   plays and shape that pad's pitch / length / tone. Shaping is stored PER PAD
+   (inside SETTINGS.padSounds, so presets capture a whole custom kit) — two pads
+   can be the same drum at different pitches.
+
+   Layout: 2–8 pads in one row (best for left-to-right switch/eye-gaze scanning)
+   or a 2-row grid for even counts (bigger targets for imprecise motor control).
+   Pad 1 is top-left, reading order — same convention as the Sampler.
+
+   Beat recorder (rail ⏺): EVENT recording, not audio — pad hits are captured
+   with timestamps and replayed through the synth, so the beat follows any later
+   reshaping, needs no mic permission, and the pads flash in time. ⏺ arms; the
+   first hit starts the clock (no dead air); ⏺ again sets the loop length and it
+   plays back immediately. ▶/⏸ toggles the loop; recording again replaces it.
+   Session-only, like the backing track.
+
+   Menu: 🥁 Drums (pad count/layout + backing track) · 🎛️ Sound (effects/volume,
+   no Voice — drums are the voice) · ✨ Visuals (press effect etc) · ⭐ Presets.
+   Backing track: the therapist loads their own MP3 from disk — nothing bundled,
+   still fully offline. Session-only (file permissions can't persist).
+*/
+const Anim = (() => {
+
+  // Default pad order chosen so few pads = the most useful kit (2 = kick + snare);
+  // the therapist can reassign any drum to any pad in its editor.
+  const KIT=[
+    {key:'kick',   label:'🥁', name:'Kick',    color:[226,28,28]},
+    {key:'snare',  label:'🪘', name:'Snare',   color:[245,209,23]},
+    {key:'hat',    label:'🎩', name:'Hi-hat',  color:[28,169,169]},
+    {key:'clap',   label:'👏', name:'Clap',    color:[245,125,23]},
+    {key:'shaker', label:'🪇', name:'Shaker',  color:[59,181,74]},
+    {key:'tom',    label:'🛢️', name:'Tom',     color:[125,79,181]},
+    {key:'cowbell',label:'🔔', name:'Cowbell', color:[224,90,156]},
+    {key:'crash',  label:'💥', name:'Crash',   color:[200,200,210]},
+  ];
+  const BY_KEY={}; KIT.forEach(d=>BY_KEY[d.key]=d);
+  const DEFAULT_PADS=KIT.map(d=>({drum:d.key,pitch:1,len:1,tone:1}));
+
+  let ctx=null, btAudio=null, btName='';
+  let editMode=false, dlgPad=-1, dlgEl=null;
+
+  // ── per-pad kit: SETTINGS.padSounds is an array of {drum,pitch,len,tone} ──
+  // Older saved settings stored an array of drum-key strings with shared
+  // per-drum macros in tw_<key>_* — normalise those into per-pad objects.
+  function normPad(p,i){
+    if(typeof p==='string') p={drum:p,
+      pitch:SETTINGS['tw_'+p+'_pitch'], len:SETTINGS['tw_'+p+'_len'], tone:SETTINGS['tw_'+p+'_tone']};
+    if(!p||!BY_KEY[p.drum]) p=DEFAULT_PADS[i%KIT.length];
+    return {drum:p.drum, pitch:+p.pitch||1, len:+p.len||1, tone:+p.tone||1};
+  }
+  function padList(){                            // all 8 slots, normalised
+    const arr=Array.isArray(SETTINGS.padSounds)?SETTINGS.padSounds:[];
+    const out=[];
+    for(let i=0;i<KIT.length;i++) out.push(normPad(arr[i]===undefined?DEFAULT_PADS[i]:arr[i],i));
+    return out;
+  }
+  function padCount(){ const L=curLayout(); return L.cols*L.rows; }
+  function pads(){ return padList().slice(0,padCount()); }
+  function setPad(i,pad){
+    const full=padList(); full[i]=pad; SETTINGS.padSounds=full; saveSettings();
+  }
+
+  // ── layout: one chip per valid arrangement (same UI as the Sampler) ──
+  // Single rows suit switch/eye-gaze left-to-right scanning; grids give bigger
+  // targets for imprecise motor control (the surface is a touchscreen projector).
+  const LAYOUTS={
+    r2:{label:'2',cols:2,rows:1}, r3:{label:'3',cols:3,rows:1}, r4:{label:'4',cols:4,rows:1},
+    r5:{label:'5',cols:5,rows:1}, r6:{label:'6',cols:6,rows:1}, r7:{label:'7',cols:7,rows:1},
+    r8:{label:'8',cols:8,rows:1},
+    g4:{label:'2×2',cols:2,rows:2}, g6:{label:'3×2',cols:3,rows:2}, g8:{label:'4×2',cols:4,rows:2}};
+  const ROW_LAYOUTS={}, GRID_LAYOUTS={};
+  for(const k in LAYOUTS) (LAYOUTS[k].rows>1?GRID_LAYOUTS:ROW_LAYOUTS)[k]=LAYOUTS[k];
+  function curLayout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS.r4; }
+  function applyLayout(){
+    if(!LAYOUTS[SETTINGS.padLayout]){
+      // migrate older settings: padTotal/padRows (short-lived interim format),
+      // else noteCount — the original pad-count key, which now means COLUMNS
+      // as everywhere in the framework.
+      const n=Math.max(2,Math.min(8,Math.round(SETTINGS.padTotal||SETTINGS.noteCount)||4));
+      SETTINGS.padLayout=(String(SETTINGS.padRows)==='2'&&LAYOUTS['g'+n])?'g'+n:'r'+n;
+    }
+    const L=curLayout();
+    SETTINGS.noteCount=L.cols; SETTINGS.octaveRows=String(L.rows);
+    SETTINGS.yAxis=L.rows>1?'octaves':'none';
+    saveSettings(); refreshMusic();
+    if(dlgPad>=padCount()) closeEditor();
+  }
+  // Pad 1 is top-left (reading order): buildBands appends the top row first but
+  // indexes it as row rows-1. Same mapping as the Sampler.
+  function padOf(col,row){ return (gridRowCount()-1-row)*NOTES.length+col; }
+  // The framework tints/labels bands per COLUMN; with two rows each cell needs
+  // its own drum colour + icon, so re-style every cell after any buildBands
+  // (frame() re-runs this when the cells are fresh — see the _styled marker).
+  function restyle(){
+    const rows=gridRowCount(), cols=NOTES.length, list=pads();
+    bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
+      const cr=d.dataset.cell.split('-'), p=list[(rows-1-cr[1])*cols+ +cr[0]];
+      d._styled=true;
+      if(!p) return;
+      d.style.setProperty('--c',BY_KEY[p.drum].color.join(','));
+      const l=d.querySelector('.lbl');
+      if(l) l.textContent=BY_KEY[p.drum].label;
+    });
+  }
+
+  // ── synthesised drums, routed into the framework master chain ──
+  let noiseBuf=null;
+  function noiseSrc(ac){
+    if(!noiseBuf){
+      noiseBuf=ac.createBuffer(1,ac.sampleRate*1.2,ac.sampleRate);
+      const d=noiseBuf.getChannelData(0);
+      for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    }
+    const s=ac.createBufferSource(); s.buffer=noiseBuf; return s;
+  }
+  // Every hit counts as a sounding voice so the framework auto-mixer sees it.
+  function hit(build){
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    const t=ac.currentTime+0.012;                 // scheduling headroom
+    const out=ac.createGain(); out.gain.value=1; out.connect(masterGain);
+    soundingVoices++; updatePolyGain();
+    const endAt=build(ac,t,out);                  // returns when the sound is over
+    setTimeout(()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+      try{out.disconnect();}catch(e){} }, Math.max(100,(endAt-ac.currentTime)*1000+150));
+  }
+  function env(ac,t,peak,decay){ const g=ac.createGain();
+    g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(peak,t+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0008,t+decay); return g; }
+  const DRUMS={
+    kick(ac,t,out,m){
+      const o=ac.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(150*m.pitch,t); o.frequency.exponentialRampToValueAtTime(50*m.pitch,t+0.12*m.len);
+      const g=env(ac,t,1.1,0.5*m.len); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.65*m.len);
+      return t+0.65*m.len;
+    },
+    snare(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800*m.pitch*m.tone; bp.Q.value=0.9;
+      const g=env(ac,t,0.8,0.24*m.len); n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.32*m.len);
+      const o=ac.createOscillator(); o.type='triangle'; o.frequency.value=190*m.pitch;
+      const g2=env(ac,t,0.5,0.14*m.len); o.connect(g2); g2.connect(out); o.start(t); o.stop(t+0.2*m.len);
+      return t+0.32*m.len;
+    },
+    hat(ac,t,out,m){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=7500*m.pitch*m.tone;
+      const g=env(ac,t,0.45,0.09*m.len); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+0.16*m.len);
+      return t+0.16*m.len;
+    },
+    clap(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500*m.pitch*m.tone; bp.Q.value=1.8;
+      const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
+      for(let i=0;i<3;i++){ const tt=t+i*0.02;                  // three quick bursts
+        g.gain.setValueAtTime(0.7,tt); g.gain.exponentialRampToValueAtTime(0.12,tt+0.018); }
+      g.gain.exponentialRampToValueAtTime(0.0008,t+0.28*m.len);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.36*m.len);
+      return t+0.36*m.len;
+    },
+    shaker(ac,t,out,m){
+      const n=noiseSrc(ac), bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=5500*m.pitch*m.tone; bp.Q.value=1.4;
+      const g=ac.createGain(); g.gain.setValueAtTime(0.0001,t);
+      g.gain.linearRampToValueAtTime(0.4,t+0.03); g.gain.exponentialRampToValueAtTime(0.0008,t+0.18*m.len);
+      n.connect(bp); bp.connect(g); g.connect(out); n.start(t); n.stop(t+0.25*m.len);
+      return t+0.25*m.len;
+    },
+    tom(ac,t,out,m){
+      const o=ac.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(210*m.pitch,t); o.frequency.exponentialRampToValueAtTime(95*m.pitch,t+0.2*m.len);
+      const g=env(ac,t,0.9,0.45*m.len); o.connect(g); g.connect(out); o.start(t); o.stop(t+0.6*m.len);
+      return t+0.6*m.len;
+    },
+    cowbell(ac,t,out,m){
+      const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=800*m.pitch*m.tone; bp.Q.value=3;
+      const g=env(ac,t,0.5,0.4*m.len); bp.connect(g); g.connect(out);
+      for(const f of [540,845]){ const o=ac.createOscillator(); o.type='square';
+        o.frequency.value=f*m.pitch; o.connect(bp); o.start(t); o.stop(t+0.55*m.len); }
+      return t+0.55*m.len;
+    },
+    crash(ac,t,out,m){
+      const n=noiseSrc(ac), hp=ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=5000*m.pitch*m.tone;
+      const g=env(ac,t,0.6,1.6*m.len); n.connect(hp); hp.connect(g); g.connect(out); n.start(t); n.stop(t+2.0*m.len);
+      return t+2.0*m.len;
+    },
+  };
+  function playShaped(pad){ if(DRUMS[pad.drum]) hit((ac,t,out)=>DRUMS[pad.drum](ac,t,out,pad)); }
+
+  let lastPreview=0;
+  function preview(pad){                       // throttled so slider drags don't machine-gun
+    const now=performance.now();
+    if(now-lastPreview<160) return;
+    lastPreview=now; getAudio(); playShaped(pad);
+  }
+
+  // ── multi-layer beat looper ────────────────────────────────────────────────
+  // A song is a base loop plus overdub layers, each replayed through the synth
+  // (events, not audio, so the beat follows any later reshaping). song =
+  //   { base:<ms>, layers:[ {evs:[{i,o}], len} ] }
+  // where o is a hit's offset within its layer (0..len) and len is a whole
+  // multiple of base. All layers restart together every masterLen (the LCM of
+  // their lengths), anchored at originAt, so a 2-bar clap part stays phase-
+  // locked to the 1-bar kick — that's how "claps on alternate loops" works.
+  const REC_MAX=60000, MAX_BARS=8, MAX_LAYERS=8, MAX_EVENTS=600;
+  let recState='idle';                 // idle | armed | rec
+  let recStart=0, recEvents=[];
+  let song=null, originAt=0;           // originAt = the song's downbeat (t0)
+  let playOn=false, schedTimers=[], cycleTimer=null, cycleAt=0, plays=0;
+
+  function gcd(a,b){ a=Math.round(a); b=Math.round(b); while(b){ const t=b; b=a%b; a=t; } return a||1; }
+  function masterLen(){
+    if(!song||!song.layers.length) return song?song.base:0;
+    let m=1; song.layers.forEach(L=>{ const k=Math.max(1,Math.round(L.len/song.base)); m=m/gcd(m,k)*k; });
+    return m*song.base;
+  }
+
+  // Every layer records the same way: arm, then the first hit starts the clock
+  // at wherever the playhead is. For an overdub that phase (recStart-originAt)
+  // is baked into the hit offsets, so the layer sits exactly where you played
+  // it in the loop — no forced count-in swallowing early hits.
+  function recHit(idx){                 // called from onCell in play mode
+    if(recState==='armed'){
+      recState='rec'; recStart=performance.now();
+      if(!song) originAt=recStart;      // the very first layer defines the song's downbeat
+      recEvents=[{i:idx,t:0}]; recUI(); return; }
+    if(recState==='rec'&&recEvents.length<MAX_EVENTS)
+      recEvents.push({i:idx,t:performance.now()-recStart});
+  }
+  function toggleRecord(){
+    if(recState==='rec'){ finishRec(); return; }
+    if(recState==='armed'){ recState='idle'; recUI(); return; }   // cancel arm
+    if(song&&!playOn) startPlay();       // hear the loop while you arm the overdub
+    recState='armed'; recUI();
+  }
+  function finishRec(){
+    const evs=recEvents, stopAt=performance.now()-recStart;
+    recState='idle'; recEvents=[];
+    if(!evs.length){ recUI(); return; }
+    if(!song){                                      // finalise the FIRST layer → sets base
+      const len=loopLen(evs,stopAt);
+      song={ base:len, layers:[{ evs:evs.map(e=>({i:e.i,o:wrap(e.t,len)})), len }] };
+      startPlay();
+    } else if(song.layers.length<MAX_LAYERS){       // overdub → snap to whole bars
+      const base=song.base, len=Math.max(1,Math.min(MAX_BARS,Math.round(stopAt/base)))*base;
+      const p=recStart-originAt;                    // layer's phase from the song downbeat
+      song.layers.push({ evs:evs.map(e=>({i:e.i,o:wrap(p+e.t,len)})), len });
+      if(playOn) reschedule(); else startPlay();
+    }
+    recUI();
+  }
+  function wrap(t,len){ return ((t%len)+len)%len; }
+  // First layer only: the stop press lands late, leaving dead space that breaks
+  // the pulse on wrap. Round the trailing gap to whole beats of the player's own
+  // pulse (median hit interval). Deliberate end-rests survive; stop lag doesn't.
+  function loopLen(evs,stopAt){
+    const last=evs[evs.length-1].t;
+    if(evs.length<2) return Math.max(stopAt,last+250);
+    const iois=[];
+    for(let i=1;i<evs.length;i++) iois.push(evs[i].t-evs[i-1].t);
+    iois.sort((a,b)=>a-b);
+    const pulse=iois[(iois.length-1)>>1];
+    if(pulse<40) return Math.max(stopAt,last+250);   // degenerate: one dense roll
+    return last+Math.max(1,Math.round((stopAt-last)/pulse))*pulse;
+  }
+  function removeLastLayer(){
+    if(!song||!song.layers.length) return;
+    song.layers.pop();
+    if(!song.layers.length){ song=null; originAt=0; stopPlay(); }
+    else if(playOn) reschedule();
+    refreshRailButtons();
+  }
+  function cancelRec(){                  // abort any arm/recording; a playing song survives
+    if(recState==='idle') return;
+    recState='idle'; recEvents=[]; recUI();
+  }
+  function recUI(){
+    let p=document.getElementById('dpRecPill');
+    const n=song?song.layers.length+1:1;
+    const msg = recState==='armed'  ? (song?'⏺ Ready — tap a pad to start layer '+n:'⏺ Ready — your first hit starts the recording')
+      : recState==='rec'     ? (song?'🔴 Recording layer '+n+'… tap ⏺ to finish'
+                                     :'🔴 Recording… tap ⏺ again to finish') : '';
+    if(msg){ if(!p){ p=document.createElement('div'); p.id='dpRecPill'; stageEl.appendChild(p); } p.textContent=msg; }
+    else if(p) p.remove();
+    refreshRailButtons();
+  }
+  // Scheduler: lay out one master cycle of timers at a time, re-anchored on
+  // cycleAt (+= masterLen) so drift never accumulates. Each layer repeats
+  // masterLen/len times within the cycle. We arm the next cycle LOOKAHEAD ms
+  // early so the downbeat (offset 0) is still in the future when its timer is
+  // set — otherwise a slightly-late setTimeout drops beat 1 on every wrap.
+  const LOOKAHEAD=110;
+  function startPlay(){
+    if(!song) return;
+    stopScheduler(); playOn=true;
+    const M=masterLen();
+    cycleAt=originAt+Math.floor((performance.now()-originAt)/M)*M;   // current cycle start (may be past)
+    scheduleCycle(); refreshRailButtons();
+  }
+  function reschedule(){ if(playOn) startPlay(); }
+  function scheduleCycle(){
+    if(!playOn||!song) return;
+    pokeSim();                          // keep the render loop (playhead) awake while playing
+    const now=performance.now(), M=masterLen();
+    song.layers.forEach(L=>{
+      const reps=Math.max(1,Math.round(M/L.len));
+      for(let q=0;q<reps;q++) L.evs.forEach(e=>{
+        const at=cycleAt+e.o+q*L.len;
+        // -60 tolerance: under a stall, a barely-late hit still fires (delay 0)
+        // rather than going silent; look-ahead keeps this from double-firing.
+        if(at>=now-60) schedTimers.push(setTimeout(()=>{ if(playOn) playBack(e.i); }, Math.max(0,at-now)));
+      });
+    });
+    cycleAt+=M;
+    cycleTimer=setTimeout(scheduleCycle, Math.max(0, cycleAt-performance.now()-LOOKAHEAD));
+  }
+  function stopScheduler(){ schedTimers.forEach(clearTimeout); schedTimers=[]; clearTimeout(cycleTimer); }
+  function stopPlay(){ playOn=false; stopScheduler(); refreshRailButtons(); }
+  function playBack(i){
+    plays++; pokeSim();                 // pokeSim: dense/long loops stay awake between cycle ticks too
+    const p=pads()[i]; if(!p) return;   // layout shrank since recording — skip
+    playShaped(p);
+    // While overdubbing, playback hits stay dark so only the live taps light up.
+    if(SETTINGS.loopFlash!==false && recState!=='rec'){
+      const cols=NOTES.length, col=i%cols, row=gridRowCount()-1-Math.floor(i/cols);
+      flashCell(col,row); fxCell(col,row);
+    }
+  }
+  // Layer timeline: a centred overlay strip (above the pads, below the menu)
+  // with one lane per layer. Each lane shows that layer's hits across the whole
+  // master loop — dots in each hit's PAD colour, and the drum icons at the left
+  // say which layer is which — so a 2-bar clap layer visibly differs from a
+  // 1-bar kick. Own canvas so the pad tiles don't paint over it. Only shown
+  // while playing/recording (it vanishes when paused; a frozen playhead reads
+  // as broken).
+  function rr(g,x,y,w,h,r){ g.beginPath();
+    if(g.roundRect) g.roundRect(x,y,w,h,r); else g.rect(x,y,w,h); }
+  let stripEl=null;
+  function drawStrip(){
+    const on=SETTINGS.layerView!==false && song && song.layers.length && (playOn||recState==='rec');
+    if(!on){ if(stripEl) stripEl.style.display='none'; return; }
+    if(!stripEl){
+      stripEl=document.createElement('canvas'); stripEl.id='dpStrip';
+      stripEl.style.cssText='position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);'+
+        'z-index:8;pointer-events:none;border-radius:14px';
+      stageEl.appendChild(stripEl);
+    }
+    stripEl.style.display='';
+    const laneH=40, padY=8, labelW=58, n=song.layers.length;
+    // The strip lives in the stage, so it sizes to the play surface - not to
+    // the window, which is wider than the stage whenever the strip is open.
+    const cssW=Math.min(stageEl.clientWidth-24,880), cssH=n*laneH+padY*2;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    stripEl.style.width=cssW+'px'; stripEl.style.height=cssH+'px';
+    const W=Math.round(cssW*dpr), H=Math.round(cssH*dpr);   // grow when layer count (height) changes, not just width
+    if(stripEl.width!==W||stripEl.height!==H){ stripEl.width=W; stripEl.height=H; }
+    const g=stripEl.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    g.clearRect(0,0,cssW,cssH);
+    g.fillStyle='rgba(10,12,18,0.92)'; rr(g,0,0,cssW,cssH,14); g.fill();   // opaque: pad tiles behind must not bleed through
+    const M=masterLen(), trackX=labelW, trackW=cssW-labelW-12, bars=Math.max(1,Math.round(M/song.base));
+    g.textBaseline='middle';
+    song.layers.forEach((L,i)=>{
+      const y=padY+i*laneH, cy=y+laneH/2;
+      g.fillStyle='rgba(255,255,255,0.05)'; rr(g,trackX,y+4,trackW,laneH-8,8); g.fill();
+      g.strokeStyle='rgba(255,255,255,0.12)'; g.lineWidth=1;                 // bar dividers
+      for(let b=1;b<bars;b++){ const x=trackX+b/bars*trackW; g.beginPath(); g.moveTo(x,y+5); g.lineTo(x,y+laneH-5); g.stroke(); }
+      const icons=[...new Set(L.evs.map(e=>{ const p=pads()[e.i]; return p?BY_KEY[p.drum].label:''; }))].filter(Boolean).slice(0,3).join('');
+      g.fillStyle='rgba(255,255,255,0.85)'; g.font='15px sans-serif'; g.fillText(icons||('L'+(i+1)),8,cy);
+      const reps=Math.max(1,Math.round(M/L.len));                            // hits across the master loop
+      for(let q=0;q<reps;q++) L.evs.forEach(e=>{
+        const pad=pads()[e.i], pc=pad?BY_KEY[pad.drum].color:[200,200,200];   // dot = the pad's colour
+        const x=trackX+((q*L.len+e.o)/M)*trackW;
+        g.fillStyle='rgb('+pc.join(',')+')';
+        g.beginPath(); g.arc(x,cy,5,0,7); g.fill();
+      });
+    });
+    const ph=trackX+(wrap(performance.now()-originAt,M)/M)*trackW;           // playhead across all lanes
+    g.strokeStyle='rgba(255,255,255,0.9)'; g.lineWidth=2;
+    g.beginPath(); g.moveTo(ph,padY); g.lineTo(ph,cssH-padY); g.stroke();
+  }
+
+  // ── edit mode (therapist: rail ✏️ → tap a pad → editor dialog) ──
+  function setEditMode(v){
+    if(v===editMode) return;
+    editMode=v;
+    if(v) cancelRec();                 // editing taps must not land in a recording
+    if(!v) closeEditor();
+    showEditIndicator(v);              // pulsing pads + persistent pill (framework)
+    refreshRailButtons();
+  }
+
+  // ── editor dialog ──
+  function openEditor(idx){
+    dlgPad=idx;
+    if(!dlgEl){
+      // Stays on the body, NOT the stage: a modal that covered only the play
+      // surface would leave the rail live behind it, inviting a tap that does
+      // something else. It covers everything, rail included.
+      dlgEl=document.createElement('div'); dlgEl.id='dpOv'; dlgEl.className='modal';
+      dlgEl.addEventListener('pointerdown',e=>{ if(e.target===dlgEl) closeEditor(); });
+      const card=document.createElement('div'); card.id='dpDlg';
+      dlgEl.appendChild(card); document.body.appendChild(dlgEl);
+    }
+    buildDlgBody();
+  }
+  function closeEditor(){
+    if(dlgEl){ dlgEl.remove(); dlgEl=null; }
+    dlgPad=-1;
+  }
+  function chip(txt,active,fn){
+    const c=document.createElement('div'); c.className='chip'+(active?' active':'');
+    c.textContent=txt;
+    c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); fn(c); });
+    return c;
+  }
+  // Slider over the pad object (kit data lives inside a SETTINGS array, so the
+  // framework's makeSlider — which needs a flat SETTINGS key — doesn't apply).
+  function kslider(el,label,get,set,min,max,step){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val'; val.textContent=(+get()).toFixed(2);
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
+    inp.addEventListener('input',()=>{ set(parseFloat(inp.value)); val.textContent=(+get()).toFixed(2); });
+    row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+  }
+  function buildDlgBody(){
+    const card=dlgEl&&dlgEl.querySelector('#dpDlg'); if(!card) return;
+    card.innerHTML='';
+    const idx=dlgPad, pad=pads()[idx]; if(!pad) return;
+    const meta=BY_KEY[pad.drum];
+
+    const head=document.createElement('div'); head.className='dlghead';
+    const ttl=document.createElement('div'); ttl.className='ttl';
+    ttl.textContent=meta.label+' Pad '+(idx+1)+' — '+meta.name;
+    const x=document.createElement('button'); x.className='btn'; x.textContent='✕';
+    x.title='Close'; x.addEventListener('click',e=>{ e.stopPropagation(); closeEditor(); });
+    head.appendChild(ttl); head.appendChild(x); card.appendChild(head);
+
+    const h=document.createElement('div'); h.className='sectn'; h.textContent='Drum (tap to change & hear)'; card.appendChild(h);
+    const row=document.createElement('div'); row.className='chips';
+    KIT.forEach(d=>row.appendChild(chip(d.label+' '+d.name,d.key===pad.drum,()=>{
+      pad.drum=d.key; setPad(idx,pad);
+      playShaped(pad); restyle(); buildDlgBody();   // restyle: new icon/colour on the pad
+    })));
+    card.appendChild(row);
+
+    const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Shape this pad'; card.appendChild(h2);
+    const hear=()=>preview(pad);
+    kslider(card,'Pitch (deep ↔ high)',      ()=>pad.pitch,v=>{ pad.pitch=v; setPad(idx,pad); hear(); },0.5,2,0.05);
+    kslider(card,'Length (tight ↔ ringing)', ()=>pad.len,  v=>{ pad.len=v;   setPad(idx,pad); hear(); },0.4,2.5,0.05);
+    kslider(card,'Tone (soft ↔ sharp)',      ()=>pad.tone, v=>{ pad.tone=v;  setPad(idx,pad); hear(); },0.5,2,0.05);
+
+    const rst=document.createElement('div'); rst.className='chips';
+    rst.appendChild(chip('▶ Play',false,()=>playShaped(pad)));
+    rst.appendChild(chip('↺ Reset this pad',false,()=>{
+      pad.pitch=1; pad.len=1; pad.tone=1; setPad(idx,pad);
+      playShaped(pad); buildDlgBody(); }));
+    card.appendChild(rst);
+  }
+
+  // ── backing track: therapist's own file, session-only ──
+  function pickTrack(rebuild){
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='audio/*';
+    inp.addEventListener('change',()=>{
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      if(btAudio){ btAudio.pause(); URL.revokeObjectURL(btAudio.src); }
+      btAudio=new Audio(URL.createObjectURL(f));
+      btAudio.loop=true; btAudio.volume=SETTINGS.btVolume;
+      btName=f.name; rebuild();
+    });
+    inp.click();
+  }
+
+  // padSounds (with per-pad shaping) rides along in SETTINGS, so Reset restores
+  // the default kit and presets capture a whole custom one. padLayout '' is the
+  // "migrate from older settings" sentinel — applyLayout resolves it.
+  const DEFAULTS={ theme:'kit', padLayout:'', noteCount:4, btVolume:0.7, pressFx:'none',
+    padSounds:DEFAULT_PADS, loopFlash:true, layerView:true,
+    mode:'notes', paint:false, yAxis:'none', octaveRows:'1', zoneLook:'tint', colorMode:'note', showLabels:true };
+
+  return {
+    appLabel:'🥁 Pads',
+    sectionLabel:'Drums',
+    lockMode:'notes',
+    noVoices:true,                     // drums ARE the sound; skip the pitched voices
+    hideRail:['clear','instrument'],
+    themes:{ kit:{label:'🥁 Kit', colors:[[1,0.2,0.2],[1,0.85,0.1],[0.1,0.7,0.7],[1,0.5,0.1],[0.3,0.75,0.3]]} },
+    defaults:DEFAULTS,
+    schema:[],
+    bandColor(i){ const p=pads()[i]; return p?BY_KEY[p.drum].color:[200,200,200]; },
+    bandLabel(i){ const p=pads()[i]; return p?BY_KEY[p.drum].label:''; },
+    _dbg(){ return {recState, playOn, plays, base:song&&song.base, master:song?masterLen():0,
+      layers:song?song.layers.map(L=>({n:L.evs.length,len:L.len,o:L.evs.map(e=>Math.round(e.o))})):[]}; },
+    railButtons:[
+      { id:'dpedit', label:'Edit', icon:()=>'✏️',
+        title:()=>editMode?'Editing is ON — tap to go back to playing':'Edit pads: choose drums, shape sounds',
+        active:()=>editMode,
+        onClick(){ setEditMode(!editMode); } },
+      { id:'dprec', label:'Record', icon:()=>recState==='rec'?'⏹':'⏺',
+        title:()=>recState==='rec'?'Recording — tap to finish'
+          :recState==='armed'?(song?'Ready — tap a pad to start the new layer · tap to cancel':'Armed — first hit starts recording · tap to cancel')
+          :song?'Add another layer (starts on your first hit)':'Record a beat (your first hit starts it)',
+        active:()=>recState!=='idle',
+        onClick(){ if(!editMode) toggleRecord(); } },
+      { id:'dpplay', label:'Play', icon:()=>playOn?'⏸':'▶',
+        title:()=>playOn?'Pause the beat':'Play the beat',
+        show:()=>!!song, active:()=>playOn,
+        onClick(){ if(playOn) stopPlay(); else startPlay(); } },
+      { id:'dpundo', label:'Undo', icon:()=>'↩︎',
+        title:()=>'Remove the last layer',
+        show:()=>!!(song&&song.layers.length),
+        onClick(){ if(!editMode) removeLastLayer(); } },
+    ],
+    // 🥁 Drums tab — pad count, layout, backing track
+    // The app's own tab. Everything here is what THIS app is; none of it is
+    // Register/Scale/Starting note, which is all the Notes tab holds now.
+    // See PHASE-4E-APP-TAB.md.
+    buildApp(el){
+      // Both chip groups drive the same setting; rebuild the pane on change so
+      // the highlight moves between groups.
+      const relayout=()=>{ applyLayout(); buildAppPanel(); };
+      el.appendChild(makeChips('Pads in one row','padLayout',ROW_LAYOUTS,relayout));
+      el.appendChild(makeChips('Pads in a grid','padLayout',GRID_LAYOUTS,relayout));
+      const hint=document.createElement('div');
+      hint.className='hint'; hint.style.lineHeight='1.5';
+      hint.textContent='To choose a pad’s drum or shape its sound: tap the ✏️ button on the left rail, then tap the pad.';
+      el.appendChild(hint);
+    },
+    // 🎛️ Sound tab — effects/volume (no Voice: drums are the voice)
+    buildSound(el){
+      const h=document.createElement('div'); h.className='ctlh'; h.textContent='Backing track (from this computer)'; el.appendChild(h);
+      const row=document.createElement('div'); row.className='chips';
+      const pick=document.createElement('div'); pick.className='chip';
+      pick.textContent = btName ? ('🎵 '+(btName.length>26?btName.slice(0,24)+'…':btName)) : '📂 Choose a music file…';
+      pick.addEventListener('click',e=>{ e.stopPropagation(); pickTrack(buildSoundPanel); });
+      row.appendChild(pick);
+      if(btAudio){
+        const play=document.createElement('div'); play.className='chip'+(btAudio.paused?'':' active');
+        play.textContent = btAudio.paused ? '▶ Play' : '⏸ Pause';
+        play.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+          if(btAudio.paused) btAudio.play(); else btAudio.pause();
+          buildSoundPanel(); });
+        row.appendChild(play);
+      }
+      el.appendChild(row);
+      if(btAudio) el.appendChild(makeSlider({key:'btVolume',label:'Backing volume',min:0,max:1,step:0.01,dp:2,
+        onChange:()=>{ if(btAudio) btAudio.volume=SETTINGS.btVolume; }}));
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Drum icons on pads','showLabels',buildBands));
+      el.appendChild(makeToggle('Show hits during playback','loopFlash'));
+      el.appendChild(makeToggle('Layer timeline','layerView'));
+      appendBgControl(el);
+      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
+    },
+    onCell(col,row){
+      const idx=padOf(col,row);
+      if(editMode){ openEditor(idx); return; }
+      recHit(idx);
+      const p=pads()[idx]; if(p) playShaped(p);
+      fxCell(col,row);
+    },
+    init(cv){ ctx=cv.getContext('2d'); applyLayout(); this.reset(); },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      if(editMode&&SETTINGS.locked) setEditMode(false);   // lock always wins
+      if(SETTINGS.locked&&recState!=='idle') cancelRec();  // …but a playing song survives the lock
+      // auto-stop a runaway take: MAX_BARS of the base loop (or REC_MAX for the first layer)
+      const cap=song?MAX_BARS*song.base:REC_MAX;
+      if(recState==='rec'&&performance.now()-recStart>cap) finishRec();
+      // re-style fresh cells whenever the framework rebuilt the band grid
+      const first=bandsEl.firstChild;
+      if(first&&!first._styled) restyle();
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      drawStrip();
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

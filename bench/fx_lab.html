@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FX Lab – Music Room</title>
+<style>
+/* Dev tool: preview and tune the "pad hit" animations used across the suite
+   (framework.css fxCell). Not linked from the index. Pick an effect, drag the
+   sliders, click pads (or Auto). "Copy CSS" emits framework.css-ready rules. */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:#0b0d12;color:rgba(255,255,255,0.9);font:14px/1.45 system-ui,sans-serif;
+  display:flex;flex-direction:column}
+header{padding:14px 20px;border-bottom:1px solid rgba(255,255,255,0.08)}
+header h1{font-size:16px;font-weight:600}
+header p{color:rgba(255,255,255,0.45);font-size:13px}
+main{flex:1;display:flex;min-height:0}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;padding:24px;min-width:0}
+#pads{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(2,1fr);
+  gap:12px;width:min(720px,100%);aspect-ratio:3/2}
+.pad{position:relative;overflow:hidden;background:rgba(var(--c),var(--pa,0.6));cursor:pointer;
+  border-radius:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.09);
+  display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none}
+.pad .lbl{font-size:42px;opacity:0.9;pointer-events:none}
+.fx{position:absolute;pointer-events:none}
+aside{width:320px;flex-shrink:0;overflow-y:auto;padding:18px;
+  border-left:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02)}
+.sectn{font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
+  color:rgba(255,255,255,0.4);margin:18px 0 8px}
+aside .sectn:first-child{margin-top:0}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{padding:7px 13px;border-radius:16px;background:rgba(0,0,0,0.45);
+  border:1px solid rgba(255,255,255,0.22);color:rgba(255,255,255,0.85);
+  font-size:13px;cursor:pointer}
+.chip:hover{background:rgba(0,0,0,0.65)}
+.chip.active{background:rgba(0,0,0,0.65);border-color:#fff;color:#fff}
+.row{margin-bottom:12px}
+.rowhead{display:flex;justify-content:space-between;align-items:center}
+.rowhead label{color:rgba(255,255,255,0.7);font-size:13px}
+.rowhead .val{color:rgba(255,255,255,0.5);font-size:13px;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;margin-top:8px;
+  background:rgba(255,255,255,0.18);border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;
+  border-radius:50%;background:#fff;cursor:pointer}
+.desc{color:rgba(255,255,255,0.45);font-size:12px;margin-bottom:14px}
+.toggle{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.toggle label{color:rgba(255,255,255,0.7);font-size:13px}
+.switch{position:relative;width:44px;height:24px;background:rgba(255,255,255,0.15);
+  border-radius:12px;cursor:pointer;transition:background 0.2s}
+.switch.on{background:rgba(120,180,255,0.7)}
+.switch::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;
+  border-radius:50%;background:#fff;transition:transform 0.2s}
+.switch.on::after{transform:translateX(20px)}
+button.copy{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);
+  background:rgba(0,0,0,0.45);color:#fff;font-size:13px;cursor:pointer;margin-bottom:10px}
+button.copy:hover{background:rgba(0,0,0,0.7)}
+pre{background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.12);border-radius:10px;
+  padding:12px;font:11px/1.5 Consolas,monospace;color:rgba(255,255,255,0.7);
+  white-space:pre-wrap;word-break:break-word;overflow-x:auto}
+@media (max-width:760px){ main{flex-direction:column} aside{width:100%;border-left:none;
+  border-top:1px solid rgba(255,255,255,0.08)} }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎇 FX Lab — pad hit animations</h1>
+  <p>Click a pad (or turn on Auto) to preview. Tune with the sliders, then Copy CSS to port the winner into framework.css.</p>
+</header>
+<main>
+  <div id="stage"><div id="pads"></div></div>
+  <aside id="panel"></aside>
+</main>
+<style id="dyn"></style>
+<script>
+'use strict';
+// Same pad themes as sampler.html — keep in sync so the lab previews the real look.
+const PADTHEMES={
+  bright:{label:'🌈 Bright', pads:[[226,28,28],[245,125,23],[245,209,23],[59,181,74],[28,169,169],[63,120,224],[125,79,181],[224,90,156],[200,200,210]]},
+  ocean: {label:'🌊 Ocean',  pads:[[0,119,182],[2,195,209],[72,202,228],[0,150,199],[86,227,190],[3,140,244],[38,166,154],[100,181,246],[144,224,239]]},
+  sunset:{label:'🌅 Sunset', pads:[[255,94,58],[255,149,5],[255,203,71],[229,80,120],[255,111,145],[201,75,75],[255,171,111],[255,127,80],[240,98,146]]},
+  forest:{label:'🌿 Forest', pads:[[87,166,74],[134,197,84],[46,139,87],[181,214,104],[96,150,96],[154,205,50],[107,142,35],[85,160,120],[189,224,150]]},
+  calm:  {label:'☁️ Calm',   pads:[[120,132,150],[150,160,175],[103,115,133],[168,178,193],[133,144,162],[113,126,145],[153,165,181],[98,109,126],[178,188,203]]},
+};
+let padTheme='bright', padFill=0.6;
+const PADICONS=['🥁','🎤','🔔','👏','🎸','🎹'];
+
+/* Each effect: params it uses (with defaults) + css(p) generating the rules.
+   'overlay' effects append a .fx div (like framework fxCell); 'self' effects
+   animate the pad element itself (like bloom). Existing four match
+   framework.css at their default values. */
+const EFFECTS={
+  bloom:{label:'🌟 Bloom (shipped)',kind:'self',
+    params:{dur:[375,'Duration (ms)',150,1200],bright:[1.4,'Brightness',1.1,3.5],scale:[1.03,'Scale',1,1.2]},
+    css:p=>`.pad.hit-bloom{animation:fxBloom ${p.dur}ms ease-out}
+@keyframes fxBloom{0%{filter:brightness(${p.bright});transform:scale(${p.scale})}100%{filter:brightness(1);transform:scale(1)}}`},
+  glow:{label:'✨ Glow (shipped)',kind:'overlay',
+    params:{dur:[150,'Duration (ms)',100,1200],op:[1,'Opacity',0.1,1],spread:[48,'Glow size (px)',10,120]},
+    css:p=>`.fx-glow{inset:0;box-shadow:inset 0 0 ${p.spread}px rgba(var(--c),${p.op});animation:fxGlow ${p.dur}ms ease-out forwards}
+@keyframes fxGlow{0%{opacity:1}100%{opacity:0}}`},
+  pop:{label:'🎈 Pop (shipped)',kind:'self',
+    params:{dur:[150,'Duration (ms)',100,900],scale:[1.06,'Overshoot',1.01,1.15],bright:[1,'Brightness',1,2.5]},
+    css:p=>`.pad.hit-pop{animation:fxPop ${p.dur}ms cubic-bezier(0.2,1.5,0.4,1)}
+@keyframes fxPop{0%{transform:scale(1);filter:brightness(${p.bright})}45%{transform:scale(${p.scale})}100%{transform:scale(1);filter:brightness(1)}}`},
+
+  smoke:{label:'💨 Smoke (retired)',kind:'overlay',
+    params:{dur:[800,'Duration (ms)',200,1600],op:[0.95,'Opacity',0.1,1],blur:[14,'End blur (px)',0,30],rise:[20,'Rise (%)',0,60]},
+    css:p=>`.fx-smoke{inset:0;background:radial-gradient(circle at 50% 62%,rgba(var(--c),0.85),rgba(var(--c),0) 72%);animation:fxSmoke ${p.dur}ms ease-out forwards}
+@keyframes fxSmoke{0%{opacity:${p.op};transform:none;filter:blur(2px)}100%{opacity:0;transform:translateY(-${p.rise}%) scale(1.3);filter:blur(${p.blur}px)}}`},
+  pixel:{label:'🟦 Pixelate (retired)',kind:'overlay',
+    params:{dur:[700,'Duration (ms)',200,1600],op:[0.95,'Opacity',0.1,1],cell:[46,'End tile (px)',20,90]},
+    css:p=>`.fx-pixel{inset:0;background:repeating-conic-gradient(rgba(var(--c),0.9) 0% 25%,transparent 0% 50%);background-size:16px 16px;animation:fxPixel ${p.dur}ms steps(5,end) forwards}
+@keyframes fxPixel{0%{opacity:${p.op};background-size:14px 14px}100%{opacity:0;background-size:${p.cell}px ${p.cell}px}}`},
+  ripple:{label:'💧 Ripple (retired)',kind:'overlay',
+    params:{dur:[600,'Duration (ms)',200,1600],op:[0.95,'Opacity',0.1,1],scale:[4,'End scale',1.5,6],border:[3,'Line width (px)',1,10]},
+    css:p=>`.fx-ripple{left:50%;top:50%;width:34%;aspect-ratio:1;border:${p.border}px solid rgba(var(--c),${p.op});border-radius:50%;transform:translate(-50%,-50%) scale(0.2);animation:fxRipple ${p.dur}ms ease-out forwards}
+@keyframes fxRipple{0%{transform:translate(-50%,-50%) scale(0.2);opacity:${p.op}}100%{transform:translate(-50%,-50%) scale(${p.scale});opacity:0}}`},
+  ring:{label:'⬜ Soft frame (idea)',kind:'overlay',
+    params:{dur:[500,'Duration (ms)',150,1200],op:[0.8,'Opacity',0.1,1],inset:[5,'Inset (%)',0,20],border:[3,'Line width (px)',1,10]},
+    css:p=>`.fx-ring{inset:${p.inset}%;border:${p.border}px solid rgba(var(--c),${p.op});border-radius:12px;animation:fxRing ${p.dur}ms ease-out forwards}
+@keyframes fxRing{0%{opacity:1;transform:scale(0.96)}100%{opacity:0;transform:scale(1.02)}}`},
+  press:{label:'👇 Press (retired)',kind:'self',
+    params:{dur:[280,'Duration (ms)',100,800],depth:[0.965,'Press depth',0.9,0.995],dim:[0.85,'Dim to',0.6,1]},
+    css:p=>`.pad.hit-press{animation:fxPress ${p.dur}ms cubic-bezier(0.2,0.8,0.3,1)}
+@keyframes fxPress{0%{transform:scale(${p.depth});filter:brightness(${p.dim})}100%{transform:scale(1);filter:brightness(1)}}`},
+  sheen:{label:'🌤 Sheen (idea)',kind:'overlay',
+    params:{dur:[550,'Duration (ms)',200,1200],op:[0.35,'Opacity',0.05,0.8],width:[24,'Band width (%)',8,50]},
+    css:p=>`.fx-sheen{inset:0;overflow:hidden;background:linear-gradient(115deg,transparent calc(50% - ${p.width/2}%),rgba(255,255,255,${p.op}) 50%,transparent calc(50% + ${p.width/2}%));background-size:220% 100%;background-position:120% 0;animation:fxSheen ${p.dur}ms ease-out forwards}
+@keyframes fxSheen{0%{background-position:120% 0}100%{background-position:-20% 0}}`},
+  fillup:{label:'🌊 Fill (idea)',kind:'overlay',
+    params:{dur:[520,'Duration (ms)',200,1200],op:[0.4,'Opacity',0.1,0.9]},
+    css:p=>`.fx-fillup{inset:0;background:linear-gradient(to top,rgba(var(--c),${p.op}),rgba(var(--c),${(p.op*0.25).toFixed(3)}));transform-origin:bottom;animation:fxFillUp ${p.dur}ms ease-out forwards}
+@keyframes fxFillUp{0%{transform:scaleY(0.15);opacity:1}55%{transform:scaleY(1);opacity:0.9}100%{transform:scaleY(1);opacity:0}}`},
+};
+
+let effect='bloom';
+const values={};   // per-effect param values, seeded from defaults
+for(const k in EFFECTS){ values[k]={}; for(const q in EFFECTS[k].params) values[k][q]=EFFECTS[k].params[q][0]; }
+
+const dyn=document.getElementById('dyn');
+function applyCss(){ dyn.textContent=EFFECTS[effect].css(values[effect]); updateOut(); }
+
+// ── pads ──
+const padsEl=document.getElementById('pads');
+PADICONS.forEach(icon=>{
+  const d=document.createElement('div'); d.className='pad';
+  const l=document.createElement('div'); l.className='lbl'; l.textContent=icon;
+  d.appendChild(l);
+  d.addEventListener('pointerdown',()=>trigger(d));
+  padsEl.appendChild(d);
+});
+function applyPadLook(){
+  const cols=PADTHEMES[padTheme].pads;
+  Array.from(padsEl.children).forEach((d,i)=>d.style.setProperty('--c',cols[i%cols.length].join(',')));
+  padsEl.style.setProperty('--pa',padFill);
+}
+applyPadLook();
+function trigger(d){
+  const e=EFFECTS[effect];
+  if(e.kind==='self'){
+    const cls='hit-'+effect;
+    d.classList.remove(cls); void d.offsetWidth;
+    d.classList.add(cls);
+    clearTimeout(d._t); d._t=setTimeout(()=>d.classList.remove(cls),values[effect].dur+100);
+    return;
+  }
+  if(d.querySelectorAll('.fx').length>2) return;
+  const o=document.createElement('div'); o.className='fx fx-'+effect;
+  o.style.setProperty('--c',d.style.getPropertyValue('--c'));
+  d.appendChild(o);
+  o.addEventListener('animationend',()=>o.remove());
+  setTimeout(()=>{ if(o.parentNode) o.remove(); },2200);
+}
+
+// ── panel ──
+const panel=document.getElementById('panel');
+let auto=false, autoIv=null;
+function buildPanel(){
+  panel.innerHTML='';
+  const s1=document.createElement('div'); s1.className='sectn'; s1.textContent='Effect'; panel.appendChild(s1);
+  const ch=document.createElement('div'); ch.className='chips';
+  for(const k in EFFECTS){
+    const c=document.createElement('div'); c.className='chip'+(k===effect?' active':'');
+    c.textContent=EFFECTS[k].label;
+    c.addEventListener('click',()=>{ effect=k; applyCss(); buildPanel();
+      trigger(padsEl.children[1]); });
+    ch.appendChild(c);
+  }
+  panel.appendChild(ch);
+  const d=document.createElement('div'); d.className='desc';
+  d.style.marginTop='10px';
+  d.textContent=EFFECTS[effect].kind==='self'
+    ? 'Animates the pad itself (no overlay element).'
+    : 'Spawns a one-shot overlay inside the pad, like framework fxCell().';
+  panel.appendChild(d);
+
+  const s2=document.createElement('div'); s2.className='sectn'; s2.textContent='Tuning'; panel.appendChild(s2);
+  const prm=EFFECTS[effect].params;
+  for(const q in prm){
+    const [def,label,min,max]=prm[q];
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    const show=v=>val.textContent=(max-min)>20?Math.round(v):(+v).toFixed((max-min)>2?1:2);
+    show(values[effect][q]);
+    head.appendChild(lab); head.appendChild(val); row.appendChild(head);
+    const inp=document.createElement('input'); inp.type='range';
+    inp.min=min; inp.max=max; inp.step=(max-min)>20?1:(max-min)/200;
+    inp.value=values[effect][q];
+    inp.addEventListener('input',()=>{
+      values[effect][q]=parseFloat(inp.value); show(inp.value);
+      applyCss(); trigger(padsEl.children[1]);
+    });
+    row.appendChild(inp); panel.appendChild(row);
+  }
+  const rst=document.createElement('div'); rst.className='chips'; rst.style.marginBottom='6px';
+  const rc=document.createElement('div'); rc.className='chip'; rc.textContent='↺ Reset this effect';
+  rc.addEventListener('click',()=>{ for(const q in prm) values[effect][q]=prm[q][0];
+    applyCss(); buildPanel(); trigger(padsEl.children[1]); });
+  rst.appendChild(rc); panel.appendChild(rst);
+
+  const sp=document.createElement('div'); sp.className='sectn'; sp.textContent='Pad look (as in Sampler)'; panel.appendChild(sp);
+  const tch=document.createElement('div'); tch.className='chips';
+  for(const k in PADTHEMES){
+    const c=document.createElement('div'); c.className='chip'+(k===padTheme?' active':'');
+    c.textContent=PADTHEMES[k].label;
+    c.addEventListener('click',()=>{ padTheme=k; applyPadLook(); buildPanel(); });
+    tch.appendChild(c);
+  }
+  panel.appendChild(tch);
+  const frow=document.createElement('div'); frow.className='row'; frow.style.marginTop='10px';
+  const fhead=document.createElement('div'); fhead.className='rowhead';
+  const flab=document.createElement('label'); flab.textContent='Pad colour strength';
+  const fval=document.createElement('span'); fval.className='val'; fval.textContent=padFill.toFixed(2);
+  fhead.appendChild(flab); fhead.appendChild(fval); frow.appendChild(fhead);
+  const finp=document.createElement('input'); finp.type='range';
+  finp.min=0.2; finp.max=0.9; finp.step=0.05; finp.value=padFill;
+  finp.addEventListener('input',()=>{ padFill=parseFloat(finp.value);
+    fval.textContent=padFill.toFixed(2); applyPadLook(); });
+  frow.appendChild(finp); panel.appendChild(frow);
+
+  const s3=document.createElement('div'); s3.className='sectn'; s3.textContent='Preview'; panel.appendChild(s3);
+  const tg=document.createElement('div'); tg.className='toggle';
+  const tl=document.createElement('label'); tl.textContent='Auto — hit a random pad';
+  const sw=document.createElement('div'); sw.className='switch'+(auto?' on':'');
+  sw.addEventListener('click',()=>{ auto=!auto; sw.classList.toggle('on',auto);
+    clearInterval(autoIv);
+    if(auto) autoIv=setInterval(()=>trigger(padsEl.children[Math.random()*6|0]),620);
+  });
+  tg.appendChild(tl); tg.appendChild(sw); panel.appendChild(tg);
+
+  const s4=document.createElement('div'); s4.className='sectn'; s4.textContent='CSS for framework.css'; panel.appendChild(s4);
+  const cp=document.createElement('button'); cp.className='copy'; cp.textContent='📋 Copy CSS';
+  cp.addEventListener('click',()=>{
+    navigator.clipboard.writeText(dyn.textContent.replace(/\.pad\./g,'.band.'))
+      .then(()=>{ cp.textContent='✅ Copied'; setTimeout(()=>cp.textContent='📋 Copy CSS',1200); });
+  });
+  panel.appendChild(cp);
+  const out=document.createElement('pre'); out.id='cssOut'; panel.appendChild(out);
+  updateOut();
+}
+function updateOut(){
+  const o=document.getElementById('cssOut');
+  if(o) o.textContent=dyn.textContent.replace(/\.pad\./g,'.band.');
+}
+applyCss(); buildPanel();
+</script>
+</body>
+</html>

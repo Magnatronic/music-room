@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Music Room — Sensory Music Therapy Apps</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  color:#fff;background:#0a070c;
+  background-image:radial-gradient(circle at 15% 10%,rgba(226,28,28,0.14),transparent 45%),
+                   radial-gradient(circle at 85% 25%,rgba(28,169,169,0.16),transparent 45%),
+                   radial-gradient(circle at 50% 100%,rgba(125,79,181,0.18),transparent 50%);
+  padding:28px 24px 48px;
+}
+/* 1320 with a 220px floor lands on FIVE columns of ~233px at 1280 wide and
+   up, which is what the two five-app sections need - at 1100 they came out
+   four across and left one tile orphaned on a row of its own. Narrower than
+   1280 it drops to four columns rather than shrinking the tiles. */
+.grid{max-width:1320px;margin:0 auto;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.sect{max-width:1320px;margin:0 auto 6px}
+.sect+.grid{margin-bottom:30px}
+.sect h2{font-size:clamp(19px,2.6vw,24px);font-weight:600;letter-spacing:-0.01em}
+.card{position:relative;display:block;text-decoration:none;color:inherit;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.30);
+  border-radius:16px;padding:18px;min-height:132px;
+  transition:transform 0.2s ease,border-color 0.2s ease,background 0.2s ease;overflow:hidden}
+.card.live:hover{transform:translateY(-3px);border-color:rgba(255,255,255,0.45);background:rgba(255,255,255,0.09)}
+.card .emoji{font-size:30px;line-height:1}
+.card h2{font-size:18px;margin:10px 0 4px;font-weight:600}
+.card p{font-size:14px;color:rgba(255,255,255,0.78);line-height:1.4}
+.card .glow{position:absolute;inset:0;opacity:0;transition:opacity 0.3s;pointer-events:none}
+.card.live:hover .glow{opacity:1}
+.card.soon{opacity:0.5;cursor:default}
+</style>
+</head>
+<body>
+<main id="main"></main>
+
+<script>
+// THE LAUNCHER NEEDS ITS OWN COPY. It does not load framework.js, so the
+// long-press context menu fix there does not reach the first screen a therapist
+// touches - which is the likeliest place the report came from. Two files, not
+// one; this is the same shape as midi_light.html carrying its own MIDI reader.
+// PHASE-16-LONG-PRESS-MENU.md.
+document.addEventListener('contextmenu',e=>{
+  const el = e.target && e.target.closest && e.target.closest('input,textarea,[contenteditable]');
+  if(el && (el.tagName==='TEXTAREA' || el.isContentEditable ||
+     (el.tagName==='INPUT' && /^(text|search|url|email|number|password|tel)$/.test(el.type)))) return;
+  e.preventDefault();
+},{capture:true});
+
+// The launcher honours the same Control size the apps use. It has no framework
+// (it is a standalone page), so it reads the shared key directly and zooms —
+// the cards are laid out in fixed px, and zoom scales the whole layout rather
+// than needing every size rewritten. Clamped to the same 0.8-1.5 the apps use.
+(function(){
+  try{
+    var v=parseFloat(localStorage.getItem('ui-scale'));
+    if(!isFinite(v)) return;
+    v=Math.max(0.8,Math.min(1.5,v));
+    if(v!==1) document.documentElement.style.zoom=v;
+  }catch(e){}
+})();
+
+// Each app: file (null = not built yet), emoji, title, blurb, accent colour.
+// Sections tell therapists WHEN to reach for each app: active music-making,
+// structured activities, or regulation / wind-down. Most-used first per section.
+// The section strap-lines were removed - the headings carry it, and the page
+// is a launcher a therapist scans, not something anyone reads twice.
+// Beat Builder, Conductor and Fluid Paint are not listed: not developed enough
+// to put in front of a student. The files are still in the repo.
+const SECTIONS = [
+  { title:'Instruments', items:[
+    {file:'fluid_sensory.html', emoji:'🎹', title:'Fluid Keys',      blurb:'Paint with sound on a playable canvas.', accent:'#7ad7ff'},
+    {file:'strummer.html', emoji:'🎸', title:'Chord Strummer',  blurb:'Sweep the strings — every strum stays in key.', accent:'#e05a9c'},
+    {file:'drums.html', emoji:'🥁', title:'Drum Pads',       blurb:'Big percussion zones and a backing track.', accent:'#e2641c'},
+    {file:'sweep_chimes.html', emoji:'🎐', title:'Sweep Chimes',  blurb:'Hanging chime bars that swing and ring.', accent:'#8fd3ff'},
+    {file:'sampler.html', emoji:'📼', title:'Sampler Pads',    blurb:'Record any sound, then play it like an instrument.', accent:'#c0a0ff'},
+  ]},
+  { title:'Songs & Games', items:[
+    {file:'song_grid.html', emoji:'🎵', title:'Song Grid', blurb:'Lit cells guide a student through real songs.', accent:'#f5d117'},
+    {file:'big_switch.html', emoji:'🔘', title:'Big Switch Songs',blurb:'The whole screen is one giant button.', accent:'#3bb54a'},
+    {file:'echo_bird.html', emoji:'🦜', title:'Echo Bird',     blurb:'The bird plays a tune, then waits for your reply.', accent:'#7dffb0'},
+    {file:'bubbles.html', emoji:'🫧', title:'Music Bubbles',  blurb:'Pop drifting note bubbles. Never a fail.', accent:'#9ee7ff'},
+    {file:'sound_match.html', emoji:'🃏', title:'Sound Match',   blurb:'Turn two cards over and find the notes that match.', accent:'#c9a0ff'},
+  ]},
+  // Named for WHEN a therapist reaches for it, like the others — not for the
+  // technology. "MIDI" means nothing to someone who does not already know the
+  // word; the precondition is that something has to be plugged in, so that is
+  // what the heading says. The word MIDI is in the blurb for anyone looking.
+  { title:'Plug in an instrument', items:[
+    {file:'midi_light.html', emoji:'🎹', title:'MIDI Light',   blurb:'Plug in a keyboard or pads — every note becomes light.', accent:'#7dffb0'},
+    {file:'midi_chords.html', emoji:'🎶', title:'Big Chords',    blurb:'One key, one finger — a whole chord, always in tune.', accent:'#ffd166'},
+    {file:'midi_loop.html', emoji:'🌱', title:'Loop Garden',  blurb:'Play a few notes and stop — they keep coming round.', accent:'#8dff9b'},
+    {file:'midi_creatures.html', emoji:'✨', title:'Drift',        blurb:'Every note sets something adrift that keeps singing.', accent:'#78d8ff'},
+    {file:'midi_mirror.html', emoji:'💬', title:'Mirror',       blurb:'You play, it waits, then it answers back.', accent:'#c2a5ff'},
+  ]},
+  { title:'Sensory & Calm', items:[
+    {file:'soundscape.html', emoji:'🌧️', title:'Soundscape',      blurb:'Rain, waves and soft chords on big sliders.', accent:'#1ca9a9'},
+    {file:'voice_visuals.html', emoji:'🎤', title:'Voice Visuals',   blurb:'Your voice becomes light and colour.', accent:'#8affd0'},
+    {file:'flock.html', emoji:'🕊️', title:'Flock',           blurb:'A glowing swarm gathers around your fingers.', accent:'#7fa8ff'},
+    {file:'slime.html', emoji:'🍄', title:'Slime Mould',     blurb:'Tiny explorers weave living networks of light.', accent:'#9dff57'},
+    {file:'life.html', emoji:'🧬', title:'Game of Life',    blurb:'Paint living cells — new ones sing as they are born.', accent:'#57ffb0'},
+  ]},
+];
+const main = document.getElementById('main');
+for (const sec of SECTIONS) {
+  const head = document.createElement('div'); head.className = 'sect';
+  head.innerHTML = `<h2>${sec.title}</h2>`;
+  main.appendChild(head);
+  const grid = document.createElement('div'); grid.className = 'grid';
+  for (const it of sec.items) {
+    const live = !!it.file;
+    const el = document.createElement(live ? 'a' : 'div');
+    el.className = 'card ' + (live ? 'live' : 'soon');
+    if (live) el.href = it.file;
+    el.innerHTML = `
+      <div class="glow" style="background:radial-gradient(circle at 50% 0%, ${it.accent}33, transparent 70%)"></div>
+      <div class="emoji">${it.emoji}</div>
+      <h2>${it.title}</h2>
+      <p>${it.blurb}</p>`;
+    grid.appendChild(el);
+  }
+  main.appendChild(grid);
+}
+</script>
+</body>
+</html>

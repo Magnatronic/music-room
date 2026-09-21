@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Sound bench — Music Room</title>
+<!--
+  A tuning bench for the audio engine, not a student app. Like fx_lab.html it is
+  never a tile on the launcher.
+
+  ── How it reaches the engine ───────────────────────────────────────────────
+  This page came across from the Sensium project, where the engine is a separate
+  sound.js with a note-based API (Sound.hold(note)). Here the engine lives INSIDE
+  framework.js and is driven by a finger on a surface — startVoice(x, y). So the
+  page loads framework.js, hides the shell it injects, never calls boot(), and
+  the adapter below turns a note index into the centre of that note's band.
+
+  Nothing in framework.js is changed or wrapped: hold/strike/release land on
+  startVoice / retuneVoice / stopVoice, the same functions all 17 apps call. The
+  voice table being edited IS framework.js's VOICES.
+
+  ── What this bench does NOT test ───────────────────────────────────────────
+  Input. Going from a note index straight to an x coordinate skips toLocal() and
+  toSim(), and two of this project's real bugs lived in exactly that step. A
+  clean run here says the sound is clean, not that a finger reaches it.
+
+  ── The Stress row ──────────────────────────────────────────────────────────
+  Each button reproduces one failure mode the engine's WHY comments were written
+  to prevent. If any of them clicks, pops or warbles, something has regressed
+  against a documented fix — it is not a new bug to work around.
+-->
+<link rel="stylesheet" href="../framework.css">
+<style>
+  /* framework.js injects #shell (rail, settings strip, stage, canvas) at script
+     load, before anything can stop it. The bench wants the engine, not the
+     furniture, and boot() is never called so none of it is ever populated. */
+  #shell, #unlockZone, #lockHint { display: none !important; }
+
+  /* framework.css opens with html,body{height:100%;overflow:hidden} - correct for
+     an activity that must never scroll under a student's hand, wrong for a bench
+     that is a long page of controls. Without this the bench is CLIPPED at the
+     fold, not scrolled: everything past it is unreachable. */
+  html, body { height: auto; min-height: 100%; overflow: visible; width: auto; }
+
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 10px; background: #12141a; color: #e8ecf5;
+         font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+         -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+
+  /* Two columns so the bench fits one screen: the voice editor is the tall block
+     and gets a column of its own. One column below 1100px. */
+  /* Asymmetric on purpose: the LEFT column (the controls you reach for) is what
+     sets the page height, so it gets the extra width and wraps less. The editor
+     can afford to be narrower because it is capped and scrolls inside itself. */
+  .cols { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
+          gap: 0 12px; align-items: start; }
+  @media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+  /* The voice editor is the one block with no upper bound - it grows with the
+     partial count. Capping it and letting it scroll inside itself means the
+     PAGE height is set by the bench controls, which are finite, so the things
+     you reach for constantly never move below the fold. */
+  #fsEditor { max-height: calc(100vh - 96px); overflow-y: auto; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .lead { color: #97a2b8; font-size: 13px; margin-bottom: 10px; }
+  fieldset { border: 1px solid #2b3040; border-radius: 10px; margin: 0 0 7px; padding: 8px 10px 9px; }
+  legend { color: #97a2b8; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 0 4px; }
+  .row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+  button { font: inherit; color: #e8ecf5; background: #222736; border: 1px solid #333b4f;
+           border-radius: 8px; padding: 7px 11px; cursor: pointer; }
+  button:hover { background: #2b3245; }
+  button.on { background: #3a5bd9; border-color: #4a6bea; }
+  label { font-size: 13px; color: #b9c2d4; display: flex; align-items: center; gap: 8px; }
+  input[type=range] { width: 104px; }
+  select { font: inherit; background: #222736; color: #e8ecf5; border: 1px solid #333b4f;
+           border-radius: 8px; padding: 7px 9px; }
+  #notes { display: flex; gap: 8px; flex-wrap: wrap; }
+  .note { flex: 1 1 64px; min-width: 64px; height: 64px; border-radius: 9px; border: none;
+          color: #000; font-weight: 700; font-size: 17px; opacity: .92; }
+  .note:active, .note.held { opacity: 1; transform: translateY(2px); box-shadow: inset 0 0 0 3px #fff; }
+  #stats { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #7f8ba3; margin-top: 10px; }
+  .hint { font-size: 12px; color: #7f8ba3; margin-top: 6px; }
+  .seg { display: inline-flex; gap: 4px; }
+  .seg button { padding: 5px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Sound bench</h1>
+<div class="lead">
+  Tap for a one-shot, hold to sustain, drag across to hear a zone crossing
+  (<code>retuneVoice()</code>, not a new voice). Drives <b>the real engine in
+  <code>framework.js</code></b> — sound only, not the touch mapping.
+</div>
+
+<div class="cols">
+<div>
+<fieldset>
+  <legend>Notes</legend>
+  <div id="notes"></div>
+  <div class="row" style="margin-top:10px">
+    <label>Scale <select id="scale"></select></label>
+    <label>Root <select id="root"></select></label>
+    <label>Register <select id="octave"></select></label>
+    <label>Notes <input type="range" id="count" min="2" max="12" step="1"><span id="countV"></span></label>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Voice</legend>
+  <div class="row" id="voices"></div>
+</fieldset>
+
+<fieldset>
+  <legend>Shaping</legend>
+  <div class="row">
+    <label>Volume <input type="range" id="volume" min="0" max="1" step="0.02"></label>
+    <label>Brightness <input type="range" id="brightness" min="0" max="1" step="0.02"></label>
+    <label>Attack <input type="range" id="attack" min="0" max="1" step="0.02"></label>
+    <label>Ring <input type="range" id="ring" min="0" max="1" step="0.02"></label>
+  </div>
+  <div class="row" style="margin-top:7px">
+    <!-- Glide is three named settings in this engine, not a seconds slider —
+         GLIDE_TIMES = {off:0.02, gentle:0.10, smooth:0.25}. Showing a continuous
+         slider here would test a control the apps cannot produce. -->
+    <label>Glide <span class="seg" id="glideSeg"></span></label>
+    <button id="reverb">Reverb</button>
+    <button id="echo">Echo</button>
+    <button id="chorus">Chorus</button>
+    <button id="mute">Mute</button>
+    <button id="reset">Reset</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Stress — each button hunts one specific artefact</legend>
+  <div class="row">
+    <button id="sweep"   title="Squelch / machine-gun on a zone crossing">Fast sweep</button>
+    <button id="rapid"   title="Attack-truncation click: events landing in a rendered quantum">Rapid taps</button>
+    <button id="stab"    title="Click when a note is released mid-attack">Stab &amp; release</button>
+    <button id="chord"   title="Mix pumping / limiter behaviour on five voices">5-note chord</button>
+    <button id="silence" title="HDMI pop: the OS suspends a digitally silent stream">10 s silence</button>
+    <button id="panic">Release all</button>
+  </div>
+  <div class="hint">
+    Hover a button for the artefact it hunts. Listen on the room PC's real output:
+    anything that ticks, pops or warbles is a regression against a documented fix in
+    <code>framework.js</code> — not a new bug to work around.
+  </div>
+  <div id="stats"></div>
+</fieldset>
+</div>
+<div>
+<fieldset id="fsEditor">
+  <legend>Voice editor — tune the selected instrument</legend>
+  <div class="row" style="margin-bottom:10px">
+    <b id="edName">Pure</b>
+    <button id="ab" title="Hold to hear the saved version">Hold to A/B</button>
+    <button id="revert">Revert</button>
+    <button id="addPartial">+ partial</button>
+    <button id="export">Export ▾</button>
+    <span class="hint" style="margin:0">Changes apply to the next note — tap a key to hear them.</span>
+  </div>
+  <div id="editor"></div>
+  <div id="exportWrap" style="display:none;margin-top:10px">
+    <textarea id="exportOut" spellcheck="false"
+      style="width:100%;height:170px;background:#0d0f14;color:#b9f5c8;border:1px solid #2b3040;
+             border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace"></textarea>
+    <div class="hint">Paste this over the matching entry in <code>framework.js</code>'s <code>VOICES</code> table to keep it.</div>
+  </div>
+</fieldset>
+</div>
+</div>
+
+<script src="../framework.js"></script>
+<script>  // this page lives a folder down; the framework writes a relative Home link
+  addEventListener('DOMContentLoaded',()=>{ const h=document.getElementById('homeBtn'); if(h) h.href='../index.html'; });
+</script>
+<script>
+'use strict';
+
+// ── The adapter ──────────────────────────────────────────────────────────────
+// framework.js expects an app to supply Anim and then call boot(). The bench
+// supplies the smallest Anim that lets initSettings() run - it reads
+// Anim.defaults and Object.keys(Anim.themes) - and never calls boot(), so no
+// rail, no settings strip, no render loop and no WebGL context are created.
+// Settings persist under 'settings:sound-test.html', so nothing the bench is set
+// to can leak into a real app.
+const Anim = { themes: { bench: { label: 'Bench' } }, defaults: {} };
+initSettings();
+buildScale();
+
+// A note index becomes the CENTRE of that note's band. colIndex() in
+// framework.js is floor(x * NOTES.length), so (i + 0.5) / n lands mid-zone and
+// never on a boundary. y stays at 0.5: mid-height is no octave shift in Keys
+// mode, and neither the loudness nor the brightness tilt (yLoudness / yFilterPos
+// are both neutral at 0.5), so what is heard is the voice, not the gesture.
+const NOTE_Y = 0.5;
+const noteX = i => (i + 0.5) / Math.max(1, NOTES.length);
+
+function noteView(i) {
+  const n = NOTES[i];
+  return { i, label: n.label, freq: n.freq, color: bandRGB255(i) };
+}
+
+const Notes = {
+  get length() { return NOTES.length; },
+  list() { return NOTES.map((_, i) => noteView(i)); },
+  at(i) { return noteView(((i % NOTES.length) + NOTES.length) % NOTES.length); },
+  scales() { return SCALES; },
+  roots() { return Object.keys(ROOT_PC); },
+  get() {
+    return { scale: SETTINGS.scale, root: SETTINGS.rootNote,
+             octave: String(SETTINGS.octave), count: SETTINGS.noteCount };
+  },
+  set(p) {
+    if (p.scale !== undefined)  SETTINGS.scale = p.scale;
+    if (p.root !== undefined)   SETTINGS.rootNote = p.root;
+    if (p.octave !== undefined) SETTINGS.octave = String(p.octave);
+    if (p.count !== undefined)  SETTINGS.noteCount = p.count;
+    saveSettings(); buildScale();
+  }
+};
+
+// Held voices are keyed by the vid startVoice() returns. It returns 0 when the
+// 16-voice cap is already reached, and a handle on 0 must be inert rather than
+// silently retuning voice 1.
+function handleFor(vid) {
+  return {
+    vid,
+    strike(n) { if (vid) retuneVoice(vid, noteX(n.i), NOTE_Y); },
+    release() { if (vid) stopVoice(vid); }
+  };
+}
+
+const Sound = {
+  hold(n)  { return handleFor(startVoice(noteX(n.i), NOTE_Y)); },
+  play(n)  { pluckNote(noteX(n.i), NOTE_Y, 1); },
+  releaseAll() { Object.keys(voices).forEach(vid => stopVoice(+vid)); },
+  voices() { return VOICES; },
+  get() {
+    return {
+      voice: SETTINGS.voice, volume: SETTINGS.volume,
+      brightness: SETTINGS.tone,          // "Brightness (dark to bright)" in the app
+      attack: SETTINGS.attack, ring: SETTINGS.ring, glide: SETTINGS.glide,
+      reverb: !!SETTINGS.reverb, echo: !!SETTINGS.echo,
+      chorus: !!SETTINGS.chorus, mute: !!SETTINGS.mute
+    };
+  },
+  set(p) {
+    if (p.voice !== undefined)      SETTINGS.voice = p.voice;
+    if (p.brightness !== undefined) SETTINGS.tone = p.brightness;
+    if (p.attack !== undefined)     SETTINGS.attack = p.attack;
+    if (p.ring !== undefined)       SETTINGS.ring = p.ring;
+    if (p.glide !== undefined)      SETTINGS.glide = p.glide;
+    if (p.volume !== undefined)   { SETTINGS.volume = p.volume; applyVolume(); }
+    if (p.mute !== undefined)     { SETTINGS.mute = p.mute;     applyVolume(); }
+    if (p.reverb !== undefined)   { SETTINGS.reverb = p.reverb; applyReverb(); }
+    if (p.echo !== undefined)     { SETTINGS.echo = p.echo;     applyEcho(); }
+    if (p.chorus !== undefined)   { SETTINGS.chorus = p.chorus; applyChorus(); }
+    saveSettings();
+  },
+  stats() {
+    return {
+      state: audioCtx ? audioCtx.state : 'not created',
+      voices: soundingVoices,                    // includes fading release tails
+      held: Object.keys(voices).length,          // fingers still down
+      cap: MAX_VOICES
+    };
+  }
+};
+
+// ── Notes ────────────────────────────────────────────────────────────────────
+const notesEl = document.getElementById('notes');
+const held = new Map();          // pointerId -> { handle, el }
+
+function paintNotes() {
+  notesEl.innerHTML = '';
+  Notes.list().forEach((n, i) => {
+    const b = document.createElement('button');
+    b.className = 'note';
+    b.style.background = 'rgb(' + n.color.join(',') + ')';
+    b.textContent = n.label;
+    b.dataset.i = i;
+    notesEl.appendChild(b);
+  });
+}
+
+function noteAtPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el && el.classList.contains('note') ? el : null;
+}
+
+notesEl.addEventListener('pointerdown', e => {
+  const el = e.target.closest('.note'); if (!el) return;
+  e.preventDefault();
+  notesEl.setPointerCapture(e.pointerId);
+  const n = Notes.at(+el.dataset.i);
+  held.set(e.pointerId, { handle: Sound.hold(n), el });
+  el.classList.add('held');
+});
+// Dragging across notes strikes the SAME voice — the path that used to squelch.
+notesEl.addEventListener('pointermove', e => {
+  const h = held.get(e.pointerId); if (!h) return;
+  const el = noteAtPoint(e.clientX, e.clientY);
+  if (!el || el === h.el) return;
+  h.el.classList.remove('held'); el.classList.add('held'); h.el = el;
+  h.handle.strike(Notes.at(+el.dataset.i));
+});
+function lift(e) {
+  const h = held.get(e.pointerId); if (!h) return;
+  h.handle.release(); h.el.classList.remove('held'); held.delete(e.pointerId);
+}
+notesEl.addEventListener('pointerup', lift);
+notesEl.addEventListener('pointercancel', lift);
+
+// ── Note settings ────────────────────────────────────────────────────────────
+const scaleSel = document.getElementById('scale'), rootSel = document.getElementById('root');
+const octSel = document.getElementById('octave'), countSl = document.getElementById('count');
+const countV = document.getElementById('countV');
+
+const scales = Notes.scales();
+Object.keys(scales).forEach(k => scaleSel.add(new Option(scales[k].label, k)));
+Notes.roots().forEach(r => rootSel.add(new Option(r, r)));
+// The apps only ever offer 3/4/5 (Low/Middle/High), so the bench does too — an
+// artefact that only appears at an octave the apps cannot select is not a fault
+// anyone can hit. Voices with a negative oct still reach below this.
+[['3', 'Low (3)'], ['4', 'Middle (4)'], ['5', 'High (5)']]
+  .forEach(([v, l]) => octSel.add(new Option(l, v)));
+
+function syncNotes() {
+  const c = Notes.get();
+  scaleSel.value = c.scale; rootSel.value = c.root; octSel.value = c.octave;
+  countSl.value = c.count; countV.textContent = c.count;
+  paintNotes();
+}
+scaleSel.onchange = () => { Notes.set({ scale: scaleSel.value }); syncNotes(); };
+rootSel.onchange  = () => { Notes.set({ root: rootSel.value }); syncNotes(); };
+octSel.onchange   = () => { Notes.set({ octave: octSel.value }); syncNotes(); };
+countSl.oninput   = () => { Notes.set({ count: +countSl.value }); syncNotes(); };
+
+// ── Voice ────────────────────────────────────────────────────────────────────
+const voicesEl = document.getElementById('voices');
+const voiceTable = Sound.voices();
+Object.keys(voiceTable).forEach(k => {
+  const b = document.createElement('button');
+  b.textContent = voiceTable[k].label; b.dataset.k = k;
+  b.onclick = () => { Sound.set({ voice: k }); paintVoices(); buildEditor(); };
+  voicesEl.appendChild(b);
+});
+function paintVoices() {
+  const cur = Sound.get().voice;
+  voicesEl.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === cur));
+}
+
+// ── Shaping ──────────────────────────────────────────────────────────────────
+const SHAPERS = ['volume', 'brightness', 'attack', 'ring'];
+SHAPERS.forEach(k => {
+  const el = document.getElementById(k);
+  el.oninput = () => Sound.set({ [k]: +el.value });
+});
+
+const glideSeg = document.getElementById('glideSeg');
+Object.keys(GLIDE_TIMES).forEach(k => {
+  const b = document.createElement('button');
+  b.textContent = k + ' (' + (GLIDE_TIMES[k] * 1000) + 'ms)';
+  b.dataset.k = k;
+  b.onclick = () => { Sound.set({ glide: k }); syncShaping(); };
+  glideSeg.appendChild(b);
+});
+
+const TOGGLES = ['reverb', 'echo', 'chorus', 'mute'];
+TOGGLES.forEach(k => {
+  document.getElementById(k).onclick = () => {
+    Sound.set({ [k]: !Sound.get()[k] }); syncShaping();
+  };
+});
+
+function syncShaping() {
+  const c = Sound.get();
+  SHAPERS.forEach(k => document.getElementById(k).value = c[k]);
+  TOGGLES.forEach(k => document.getElementById(k).classList.toggle('on', !!c[k]));
+  glideSeg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.k === c.glide));
+}
+// Back to what an app opens with, not to invented numbers.
+document.getElementById('reset').onclick = () => {
+  Sound.set({
+    volume: SHARED_DEFAULTS.volume, brightness: SHARED_DEFAULTS.tone,
+    attack: SHARED_DEFAULTS.attack, ring: SHARED_DEFAULTS.ring,
+    glide: SHARED_DEFAULTS.glide
+  });
+  syncShaping();
+};
+
+// ── Voice editor ─────────────────────────────────────────────────────────────
+// Sliders bound straight onto the live VOICES entry. The engine reads the voice
+// when a note STARTS, so an edit is audible on the very next tap — that is the
+// whole point: tuning a timbre needs an instant A/B, not a page reload.
+//
+// Voices live in framework.js rather than a JSON file (a fetch would break "works
+// from a USB stick with no network"), so this editor's real output is the Export
+// block: paste it back into the table to keep a tuning.
+const PRISTINE = JSON.parse(JSON.stringify(Sound.voices()));   // for A/B and Revert
+const editorEl = document.getElementById('editor');
+const OSC_TYPES = ['sine', 'triangle', 'sawtooth', 'square'];
+const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass'];
+
+// [label, path, min, max, step] — path is resolved against the voice object.
+const GLOBAL_FIELDS = [
+  ['Level',        'gain',           0.02, 0.40, 0.005],
+  ['Octave',       'oct',              -2,    2,     1],
+  ['Pluck (0 = sustains)', 'pluck',     0,    4,  0.05],
+  ['Filter from',  'filter.base',     100, 8000,    25],
+  ['Filter travel','filter.track',      0, 4000,    25],
+  ['Filter Q',     'filter.q',        0.5,   20,   0.5],
+  ['Vibrato rate', 'lfo.rate',          0,   12,   0.5],
+  ['Vibrato depth','lfo.depth',         0, 0.03, 0.001]
+];
+const FM_FIELDS = [
+  ['FM ratio',   'fm.ratio',   0.5,  20, 0.5],
+  ['FM depth',   'fm.depth',     0,   8, 0.1],
+  ['FM decay to','fm.decayTo',   0,   1, 0.01],
+  ['FM decay',   'fm.decay',  0.02,   1, 0.01]
+];
+
+function dig(obj, path) {
+  const parts = path.split('.');
+  const last = parts.pop();
+  let o = obj;
+  for (const p of parts) { if (o[p] == null) o[p] = {}; o = o[p]; }
+  return { o, last };
+}
+function getPath(obj, path) { const { o, last } = dig(obj, path); return o[last]; }
+function setPath(obj, path, val) { const { o, last } = dig(obj, path); o[last] = val; }
+
+function field(label, get, set, min, max, step) {
+  const row = document.createElement('label');
+  row.style.cssText = 'min-width:206px;justify-content:space-between;gap:6px;' +
+    'background:#1a1e29;border:1px solid #23283a;border-radius:7px;padding:4px 8px';
+  const name = document.createElement('span'); name.textContent = label;
+  const inp = document.createElement('input');
+  inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step;
+  inp.style.width = '86px';
+  const val = document.createElement('span');
+  val.style.cssText = 'font:12px ui-monospace,Consolas,monospace;color:#7f8ba3;min-width:46px;text-align:right';
+  const paint = () => { const v = get(); inp.value = v == null ? 0 : v; val.textContent = v == null ? '–' : (+v).toFixed(step < 0.01 ? 3 : step < 1 ? 2 : 0); };
+  inp.oninput = () => { set(parseFloat(inp.value)); paint(); };
+  paint();
+  row.append(name, inp, val); return row;
+}
+function picker(label, options, get, set) {
+  const row = document.createElement('label');
+  row.style.cssText = 'min-width:150px;justify-content:space-between;gap:6px;' +
+    'background:#1a1e29;border:1px solid #23283a;border-radius:7px;padding:3px 8px';
+  const name = document.createElement('span'); name.textContent = label;
+  const sel = document.createElement('select');
+  options.forEach(o => sel.add(new Option(o, o)));
+  sel.value = get(); sel.onchange = () => set(sel.value);
+  row.append(name, sel); return row;
+}
+function group(title, nodes) {
+  const box = document.createElement('div');
+  box.style.cssText = 'border-top:1px solid #23283a;padding-top:8px;margin-top:8px';
+  const h = document.createElement('div');
+  h.style.cssText = 'font-size:12px;color:#7f8ba3;margin-bottom:6px';
+  h.textContent = title;
+  const r = document.createElement('div'); r.className = 'row';
+  nodes.forEach(n => r.appendChild(n));
+  box.append(h, r); return box;
+}
+
+function buildEditor() {
+  const key = Sound.get().voice, V = Sound.voices()[key];
+  document.getElementById('edName').textContent = V.label + '  (' + key + ')';
+  editorEl.innerHTML = '';
+
+  const globals = [picker('Filter', FILTER_TYPES, () => V.filter.type, v => V.filter.type = v)];
+  GLOBAL_FIELDS.forEach(([l, p, min, max, st]) =>
+    globals.push(field(l, () => getPath(V, p), v => setPath(V, p, v), min, max, st)));
+  editorEl.appendChild(group('Instrument', globals));
+
+  V.oscs.forEach((o, i) => {
+    const nodes = [
+      picker('Wave', OSC_TYPES, () => o.type || 'sine', v => o.type = v),
+      field('Ratio', () => o.ratio == null ? 1 : o.ratio, v => o.ratio = v, 0.25, 12, 0.01),
+      field('Level', () => o.gain == null ? 1 : o.gain, v => o.gain = v, 0, 1, 0.01),
+      field('Detune', () => o.detune || 0, v => o.detune = v, -30, 30, 1),
+      field('Fades to', () => o.decayTo == null ? 1 : o.decayTo, v => o.decayTo = (v >= 1 ? undefined : v), 0, 1, 0.01)
+    ];
+    if (V.oscs.length > 1) {
+      const del = document.createElement('button');
+      del.textContent = 'remove'; del.style.padding = '5px 9px';
+      del.onclick = () => { V.oscs.splice(i, 1); buildEditor(); };
+      nodes.push(del);
+    }
+    editorEl.appendChild(group('Partial ' + (i + 1) + (i === 0 ? '  (the fundamental)' : ''), nodes));
+  });
+
+  if (V.fm) {
+    editorEl.appendChild(group('FM modulator',
+      FM_FIELDS.map(([l, p, min, max, st]) => field(l, () => getPath(V, p), v => setPath(V, p, v), min, max, st))));
+  }
+}
+
+document.getElementById('addPartial').onclick = () => {
+  Sound.voices()[Sound.get().voice].oscs.push({ type: 'sine', ratio: 2, gain: 0.3, decayTo: 0.1 });
+  buildEditor();
+};
+document.getElementById('revert').onclick = () => {
+  const key = Sound.get().voice;
+  Sound.voices()[key] = JSON.parse(JSON.stringify(PRISTINE[key]));
+  buildEditor();
+};
+// Hold to hear the SAVED version — swapping on pointerdown/up gives a true A/B.
+// Comparing timbres from memory across a reload is exactly what doesn't work.
+const abBtn = document.getElementById('ab');
+let edited = null;
+abBtn.addEventListener('pointerdown', () => {
+  const key = Sound.get().voice;
+  edited = Sound.voices()[key];
+  Sound.voices()[key] = JSON.parse(JSON.stringify(PRISTINE[key]));
+  abBtn.classList.add('on');
+});
+const abOff = () => {
+  if (!edited) return;
+  Sound.voices()[Sound.get().voice] = edited; edited = null;
+  abBtn.classList.remove('on');
+};
+abBtn.addEventListener('pointerup', abOff);
+abBtn.addEventListener('pointerleave', abOff);
+abBtn.addEventListener('pointercancel', abOff);
+
+// Emit the voice as a paste-ready VOICES entry, formatted like the source.
+function exportVoice() {
+  const key = Sound.get().voice, V = Sound.voices()[key];
+  const num = n => Number(n.toFixed(4));
+  const parts = [];
+  parts.push('label: ' + JSON.stringify(V.label));
+  parts.push('oct: ' + num(V.oct));
+  parts.push('gain: ' + num(V.gain));
+  if (V.pluck) parts.push('pluck: ' + num(V.pluck));
+  const f = ['type: ' + JSON.stringify(V.filter.type), 'base: ' + num(V.filter.base), 'track: ' + num(V.filter.track)];
+  if (V.filter.q) f.push('q: ' + num(V.filter.q));
+  const head = '    ' + parts.join(', ') + ',\n' +
+    '    filter: { ' + f.join(', ') + ' }, lfo: { rate: ' + num(V.lfo.rate) + ', depth: ' + num(V.lfo.depth) + ' },';
+  const fm = V.fm ? '\n    fm: { ratio: ' + num(V.fm.ratio) + ', depth: ' + num(V.fm.depth) +
+    ', decayTo: ' + num(V.fm.decayTo) + ', decay: ' + num(V.fm.decay) + ' },' : '';
+  const oscs = V.oscs.map(o => {
+    const bits = ['type: ' + JSON.stringify(o.type || 'sine')];
+    if (o.ratio != null && o.ratio !== 1) bits.push('ratio: ' + num(o.ratio));
+    if (o.gain != null && o.gain !== 1) bits.push('gain: ' + num(o.gain));
+    if (o.detune) bits.push('detune: ' + num(o.detune));
+    if (o.decayTo != null) bits.push('decayTo: ' + num(o.decayTo));
+    return '{ ' + bits.join(', ') + ' }';
+  }).join(', ');
+  return '  ' + key + ': {\n' + head + fm + '\n    oscs: [' + oscs + ']\n  },';
+}
+document.getElementById('export').onclick = () => {
+  const wrap = document.getElementById('exportWrap');
+  const open = wrap.style.display === 'none';
+  wrap.style.display = open ? 'block' : 'none';
+  if (open) { const t = document.getElementById('exportOut'); t.value = exportVoice(); t.select(); }
+};
+
+// ── Stress tests ─────────────────────────────────────────────────────────────
+// A held voice dragged fast across every note, repeatedly. This is retuneVoice()
+// — the zone-crossing path that squelched when a crossing stopped one voice and
+// started another, and that machine-gunned before the articulation dip replaced
+// a re-trigger.
+document.getElementById('sweep').onclick = () => {
+  const v = Sound.hold(Notes.at(0));
+  let i = 0;
+  const t = setInterval(() => {
+    v.strike(Notes.at(i % Notes.length)); i++;
+    if (i > Notes.length * 4) { clearInterval(t); v.release(); }
+  }, 45);
+};
+// One-shots faster than the attack ramp — catches events landing in an
+// already-rendered quantum (the +12 ms scheduling headroom in startVoice).
+document.getElementById('rapid').onclick = () => {
+  let i = 0;
+  const t = setInterval(() => {
+    Sound.play(Notes.at(i % Notes.length)); i++;
+    if (i > 40) clearInterval(t);
+  }, 35);
+};
+// Held notes released while the attack ramp is still in flight — the case that
+// clicked whenever the release cancelled the envelope gain instead of closing
+// the articulation node. See the WHY block in stopVoice().
+document.getElementById('stab').onclick = () => {
+  let i = 0;
+  const t = setInterval(() => {
+    const v = Sound.hold(Notes.at(i % Notes.length));
+    setTimeout(() => v.release(), 30);
+    i++; if (i > 25) clearInterval(t);
+  }, 90);
+};
+document.getElementById('chord').onclick = () => {
+  const hs = [];
+  for (let i = 0; i < 5; i++) hs.push(Sound.hold(Notes.at(i % Notes.length)));
+  setTimeout(() => hs.forEach(h => h.release()), 2500);
+};
+// The HDMI case: let the output go digitally silent, then strike.
+document.getElementById('silence').onclick = e => {
+  const b = e.target, was = b.textContent;
+  Sound.releaseAll();
+  let left = 10;
+  b.disabled = true; b.textContent = 'Silent… ' + left;
+  const t = setInterval(() => {
+    left--; b.textContent = left ? 'Silent… ' + left : 'Listen!';
+    if (!left) { clearInterval(t); Sound.play(Notes.at(0)); b.disabled = false; b.textContent = was; }
+  }, 1000);
+};
+document.getElementById('panic').onclick = () => Sound.releaseAll();
+
+// ── Live stats ───────────────────────────────────────────────────────────────
+// "sounding" counts fading release tails as well as audible notes, so it settles
+// a second or two after "held" reaches 0. That is the engine finishing, not a
+// stuck note — see the release-tail note in .claude/skills/verify/SKILL.md.
+setInterval(() => {
+  const s = Sound.stats();
+  document.getElementById('stats').textContent =
+    'context: ' + s.state + '   sounding: ' + s.voices +
+    '   held: ' + s.held + ' / ' + s.cap;
+}, 250);
+
+syncNotes(); paintVoices(); syncShaping(); buildEditor();
+</script>
+</body>
+</html>

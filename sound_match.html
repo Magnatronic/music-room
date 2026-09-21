@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sound Match – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Sound Match — a pairs game where a pair is a NOTE. Turn two cards over; if
+   they are the same note they stay won, and if they are not you hear them again
+   one after the other.
+
+   Three things about how this app is wired, none of them optional:
+
+   1. A TAP ARRIVES THROUGH splat(), NOT through a DOM listener. The cards are
+      DOM elements, but they carry no click handler: the gamepad pointer and the
+      mouse dwell inject coordinates rather than dispatching DOM events, so an
+      app that listens for clicks is an app a student on a stick cannot play.
+      `opts.velScale === 0` is the press — onDown passes 0, and the render loop
+      only ever splats with a velocity above it (PHASE-4I). One entry point,
+      every device.
+
+   2. THE NOTES ARE THE FRAMEWORK'S NOTES. `NOTES.length` is the Notes tab's
+      "Number of notes", and it is also the number of PAIRS — which is why this
+      app has no grid control of its own. Register, Scale and Starting note all
+      arrive the same way and need no code here. Sounding a card is `pluckNote`
+      at that note's column, so the Sound tab's voice, effects, volume and the
+      Shape-the-sound macros all apply exactly as in every other app.
+
+   3. NOTHING IS RE-LAID-OUT WHEN THE CHROME OPENS. The board is sized from
+      #surface, which is always the whole screen; fitSurface() scales it. The
+      cards move with the reach area for free.
+*/
+const Anim = (function(){
+
+  // ── Settings this app owns ────────────────────────────────────────────────
+  // show     'colour' the note's Boomwhacker colour and letter | 'alone' nothing
+  // forgive  'stay' a revealed card never re-hides | 'flip' it turns back over
+  // hold     ms a mismatch stays up before flipping back
+  // players  1 | 2
+  // makeChips reads map[k].label and writes the KEY, as a string — so every
+  // default below is a string too, or the chip a therapist is looking at is not
+  // the one lit.
+  const SHOW    = { colour:{label:'Colour and sound'}, alone:{label:'Sound alone'} };
+  // The board is a grid the therapist sets directly, and the number of NOTES
+  // follows from it — not the other way round. cols x rows can be odd (3x3),
+  // and a pairs game cannot use an odd card, so the last row simply comes up one
+  // short rather than leaving a slot that looks like a card that failed to deal.
+  // Each size is a STATED grid, not a search. Letting the app pick the shape
+  // gave boards that were even, full and still wrong: with four cards on a 16:9
+  // screen, 2x2 and 4x1 score within a percent of each other, so the same size
+  // came out as a block on one display and a single row on the next. These are
+  // fixed, and the ladder reads as one — add a column, add a row.
+  const SIZES = {
+    small:  {label:'Small',  cols:2, rows:2},
+    medium: {label:'Medium', cols:3, rows:2},
+    large:  {label:'Large',  cols:4, rows:3},
+    huge:   {label:'Huge',   cols:5, rows:4},
+  };
+  function boardShape(){
+    const z = SIZES[SETTINGS.boardSize] || SIZES.medium;
+    // A stated grid is stated for a landscape screen, which is what a room
+    // projector is. On a display taller than it is wide, turn it.
+    return stageEl && stageEl.clientHeight > stageEl.clientWidth
+      ? { cols:z.rows, rows:z.cols } : { cols:z.cols, rows:z.rows };
+  }
+  function cardCount(){ const z = SIZES[SETTINGS.boardSize] || SIZES.medium; return z.cols*z.rows; }
+  function pairCount(){ return cardCount()/2; }
+  const FORGIVE = { stay:{label:'Stay up'}, flip:{label:'Flip back'} };
+  const HOLDS   = { '1000':{label:'1 second'}, '2000':{label:'2 seconds'}, '4000':{label:'4 seconds'} };
+  const PLAYERS = { '1':{label:'One'}, '2':{label:'Two'} };
+  const PLAYER_COLOUR = ['#8fb4ff','#ffbe78'];
+
+  // Sound-alone play has nothing on screen to help, so every pair takes its own
+  // voice, ordered so that neighbouring pairs are as unalike as possible. These
+  // are framework voice keys; any that a future framework drops are filtered out
+  // at boot rather than throwing.
+  const ALONE_VOICES = ['deep','bell','synth','marimba','pad','glass','musicbox',
+                        'warm','pure','harp','kalimba','epiano'];
+  let aloneVoices = [];
+
+  let ctx=null, boardEl=null, turnEl=null, doneEl=null;
+  let deck=[], chosen=[], busy=false, turn=0, scores=[0,0];
+  let cells=[];             // {x,y,w,h} in surface pixels — what splat hit-tests
+  let noteSig='';           // changes whenever the Notes tab does
+  let timers=[];
+
+  const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
+  const later = (fn, ms) => { timers.push(setTimeout(fn, ms)); };
+
+  // ── The notes ─────────────────────────────────────────────────────────────
+  // NOTES is the framework's scale. Eight pairs of a seven-note scale wraps into
+  // the next octave, and C and C' share a pitch class — so without this two
+  // DIFFERENT pairs would be drawn as the same card. The octave above is the
+  // same Boomwhacker colour lightened, and the letter takes a mark.
+  const MARK = ['', '′', '″', '‴'];
+  function octaveOf(i){
+    let n = 0;
+    for(let k=0; k<i; k++) if(NOTES[k].pc === NOTES[i].pc) n++;
+    return n;
+  }
+  function cardColour(i){
+    const base = bandRGB255(i), lift = 0.34*Math.min(octaveOf(i), 2);
+    const up = base.map(v => v + (255-v)*lift);
+    // Colour strength pulls each face toward the grey of its own brightness, so
+    // turning it down calms the board without turning it into a different one.
+    const k = Math.max(0, Math.min(1, SETTINGS.colourStrength == null ? 1 : +SETTINGS.colourStrength));
+    const grey = 0.299*up[0] + 0.587*up[1] + 0.114*up[2];
+    return up.map(v => Math.round(grey + (v - grey)*k));
+  }
+  // Register, Scale and Starting note change WHICH note each card is — not how
+  // many there are, and not where they lie. Re-dealing on them threw away a
+  // student's board because a therapist nudged the register, so the cards keep
+  // their positions and only their note, colour and letter are rewritten.
+  function retune(){
+    noteSig = signature();
+    const alone = SETTINGS.show === 'alone';
+    deck.forEach(c => {
+      c.rgb  = cardColour(c.col);
+      c.name = NOTES[c.col].label + MARK[Math.min(octaveOf(c.col), 3)];
+    });
+    cells.forEach(cell => {
+      const card = deck[cell.idx];
+      cell.el.style.setProperty('--c', card.rgb.join(','));
+      if(alone && !card.matched) return;            // its face is a waveform
+      cell.el.querySelector('.smf').textContent =
+        (SETTINGS.showNames === false ? '' : card.name);
+    });
+  }
+
+  function signature(){
+    return NOTES.length + ':' + NOTES.map(n => n.pc).join(',') + ':' + SETTINGS.octave;
+  }
+
+  // A card sounds through the framework's own one-shot, so it is the Sound tab's
+  // voice with the Sound tab's effects. x picks the note column; y is centred so
+  // that "Up/down means loudness" or "2 octaves" moves every card together and
+  // can never break a pair.
+  function sound(card, gain){
+    const x = (card.col + 0.5) / Math.max(1, NOTES.length);
+    if(card.voice && VOICES[card.voice]){
+      // Sound-alone gives each pair its own instrument. pluckNote reads
+      // SETTINGS.voice synchronously, so borrowing it for one call is safe —
+      // and it is never saved, so the therapist's choice is untouched.
+      const keep = SETTINGS.voice;
+      SETTINGS.voice = card.voice;
+      pluckNote(x, 0.5, gain);
+      SETTINGS.voice = keep;
+    } else {
+      pluckNote(x, 0.5, gain);
+    }
+  }
+
+  // How long to leave between the two cards of a replay. The framework's
+  // one-shot decays over 0.7 s × the Ring macro, and a note heard over another
+  // note is not the same sound — which is the whole game. So the gap follows
+  // Ring rather than being a constant, capped so a long Ring slows the
+  // comparison instead of stalling it.
+  function replayGap(){
+    return Math.max(650, Math.min(1500, 700*ringMul() + 220));
+  }
+
+  // ── Building the board ────────────────────────────────────────────────────
+  function deal(){
+    clearTimers();
+    const alone = SETTINGS.show === 'alone';
+    // The grid decides how many notes there are. Writing noteCount here rather
+    // than offering a second slider is what stops the two disagreeing.
+    const pairs = pairCount();
+    if(Math.round(+SETTINGS.noteCount) !== pairs){
+      SETTINGS.noteCount = pairs; saveSettings(); buildScale();
+    }
+    noteSig = signature();
+    // Stay up exists so information stays on the screen; sound alone exists so
+    // there is none. Together they leave a board of identical face-up cards.
+    // The pane hides the choice in this mode, so the stored value moves with it.
+    if(alone && SETTINGS.forgive === 'stay'){ SETTINGS.forgive = 'flip'; saveSettings(); }
+    deck = [];
+    for(let i=0; i<Math.min(NOTES.length, pairCount()); i++){
+      const card = { id:i, col:i, rgb:cardColour(i),
+                     name: NOTES[i].label + MARK[Math.min(octaveOf(i), 3)],
+                     voice: alone ? aloneVoices[i % aloneVoices.length] : null };
+      deck.push(Object.assign({}, card), Object.assign({}, card));
+    }
+    for(let i=deck.length-1; i>0; i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [deck[i], deck[j]] = [deck[j], deck[i]];
+    }
+    chosen = []; busy = false; turn = 0; scores = [0,0];
+    if(doneEl) doneEl.classList.remove('show');
+    render();
+  }
+
+  function render(){
+    if(!boardEl) return;
+    boardEl.innerHTML = '';
+    cells = [];
+    const gap = Math.round(10 * (parseFloat(getComputedStyle(document.documentElement)
+                  .getPropertyValue('--ui-scale')) || 1));
+    const padT = +SETTINGS.players > 1 ? 52 : gap;
+    const W = stageEl.clientWidth  - gap*2;
+    const H = stageEl.clientHeight - gap*2 - padT;
+    // The stated grid fills the activity. Cards are not square and do not need
+    // to be — what made the small boards look wrong was the grid changing shape
+    // under them, not their proportions.
+    const { cols, rows } = boardShape();
+    const cw = Math.floor((W - gap*(cols-1)) / cols);
+    const ch = Math.floor((H - gap*(rows-1)) / rows);
+    const left0 = Math.round((stageEl.clientWidth - (cw*cols + gap*(cols-1)))/2);
+    const top0  = gap + padT;
+    const alone = SETTINGS.show === 'alone';
+
+    for(let r=0; r<rows; r++){
+      for(let c=0; c<cols; c++){
+        const idx = r*cols + c;
+        if(idx >= deck.length) break;
+        const card = deck[idx];
+        const x = left0 + c*(cw+gap), top = top0 + r*(ch+gap);
+        const el = document.createElement('div');
+        el.className = 'smc' + (alone ? ' blank' : '') +
+                       (card.matched ? ' done' : '') + (card.revealed ? ' up' : '');
+        el.style.cssText = 'left:'+x+'px;top:'+top+'px;width:'+cw+'px;height:'+ch+'px';
+        el.style.setProperty('--c', card.rgb.join(','));
+        el.innerHTML = '<div class="smi"><div class="smb"></div><div class="smf">' +
+          (alone && !card.matched ? '<span class="smw"><i></i><i></i><i></i><i></i><i></i></span>'
+                                  : (SETTINGS.showNames === false ? '' : card.name)) + '</div></div>' +
+          '<div class="smp"></div><div class="smown"></div>';
+        boardEl.appendChild(el);
+        cells.push({ x:x, y:top, w:cw, h:ch, el:el, idx:idx });
+      }
+    }
+    updateTurn();
+  }
+
+  const elFor = idx => { const c = cells.find(c => c.idx === idx); return c && c.el; };
+
+  // Turning a card over: squash it to nothing on the X axis and back, swapping
+  // which face is opaque at the halfway point. render() sets `up` directly for a
+  // card that is already revealed, so a re-layout never re-animates the board.
+  const FLIP_MS = 300;
+  function flipCard(el, up){
+    if(!el) return;
+    el.classList.add('flipping');
+    later(() => el.classList.toggle('up', up), FLIP_MS/2);
+    later(() => el.classList.remove('flipping'), FLIP_MS);
+  }
+
+  function updateTurn(){
+    if(!turnEl) return;
+    if(+SETTINGS.players < 2){ turnEl.innerHTML = ''; document.body.dataset.smPlayers = '1'; return; }
+    document.body.dataset.smPlayers = '2';
+    turnEl.innerHTML = '<span class="smdot" style="background:'+PLAYER_COLOUR[turn]+'"></span>' +
+      'Player ' + (turn+1) + '<span class="smsc">' + scores[0] + ' – ' + scores[1] + '</span>';
+  }
+
+  // ── Sounding a card, visibly ──────────────────────────────────────────────
+  function ping(idx, gain){
+    const card = deck[idx], el = elFor(idx);
+    sound(card, gain);
+    if(!el) return;
+    el.classList.add('sounding');
+    later(() => el.classList.remove('sounding'), 430);
+    const ring = document.createElement('div');
+    ring.className = 'smr';
+    ring.style.setProperty('--rc', SETTINGS.show === 'alone' ? '255,255,255' : card.rgb.join(','));
+    el.querySelector('.smp').appendChild(ring);
+    ring.animate([{transform:'scale(0.3)',opacity:0.9},{transform:'scale(2.4)',opacity:0}],
+                 {duration:750, easing:'ease-out'}).onfinish = () => ring.remove();
+    const bars = el.querySelectorAll('.smw i');
+    if(bars.length){
+      let n = 0;
+      const tick = setInterval(() => {
+        bars.forEach(b => b.style.height = (20 + Math.random()*75) + '%');
+        if(++n > 7){ clearInterval(tick); bars.forEach(b => b.style.height = '22%'); }
+      }, 70);
+    }
+  }
+
+  // ── A turn ────────────────────────────────────────────────────────────────
+  function tap(idx){
+    if(busy || deck[idx].matched) return;
+    const el = elFor(idx); if(!el) return;
+    const at = chosen.indexOf(idx);
+    if(at >= 0){
+      // Taking a choice back. This is also how a student hears a card again
+      // without spending a turn — the press-and-hold "peek" of the prototype
+      // cannot be built here, because an app is told about presses and not
+      // about releases. A second tap does the same job on every input device.
+      chosen.splice(at, 1);
+      el.classList.remove('chosen');
+      if(!deck[idx].revealed) flipCard(el, false);
+      return;
+    }
+    if(chosen.length >= 2) return;
+    chosen.push(idx);
+    el.classList.add('chosen');
+    flipCard(el, true);
+    ping(idx, 1);
+    if(chosen.length === 2) judge();
+  }
+
+  // A MATCH never replays. There is nothing left to compare — the answer is
+  // yes — and the two seconds it cost were two seconds of a student waiting to
+  // be told something they had already worked out.
+  //
+  // A mismatch replays only if the therapist asks for it. It was built to fix a
+  // real fault (both notes landing on one tap) but the fix for THAT is that a
+  // card damps the one before it; hearing them a second time is a teaching aid,
+  // not a correctness measure, and it slows the game down for everyone else.
+  function judge(){
+    busy = true;
+    const [a, b] = chosen;
+    const match = deck[a].id === deck[b].id;
+    if(match || SETTINGS.replay !== true){ later(() => verdict(a, b), 460); return; }
+    const g = replayGap();
+    later(() => ping(a, 1), g);
+    later(() => ping(b, 1), g*2);
+    later(() => verdict(a, b), g*2 + 560);
+  }
+
+  function verdict(a, b){
+    const match = deck[a].id === deck[b].id;
+    [a, b].forEach(i => { const e = elFor(i); if(e) e.classList.remove('chosen'); });
+
+    if(match){
+      [a, b].forEach(i => {
+        deck[i].matched = true; deck[i].revealed = true;
+        const e = elFor(i); if(!e) return;
+        e.classList.add('done');
+        e.style.setProperty('--pc', PLAYER_COLOUR[turn]);
+        e.classList.remove('blank');
+        e.querySelector('.smf').textContent =
+          (SETTINGS.showNames === false ? '' : deck[i].name);   // sound-alone pays out here
+      });
+      scores[turn]++;
+      // A rising figure, not a louder version of the same note.
+      const top = NOTES.length - 1;
+      [0,1,2,3].forEach((step,k) => later(() => {
+        const col = Math.min(top, deck[a].col + step);
+        pluckNote((col + 0.5)/Math.max(1,NOTES.length), 0.5, 0.45 - k*0.06);
+      }, k*95));
+      chosen = []; busy = false;
+      if(deck.every(c => c.matched)) finish(); else updateTurn();
+      return;
+    }
+
+    later(() => {
+      if(SETTINGS.forgive === 'flip'){
+        [a, b].forEach(i => { deck[i].revealed = false; flipCard(elFor(i), false); });
+      } else {
+        [a, b].forEach(i => { deck[i].revealed = true; });   // stays up AND stays choosable
+      }
+      chosen = []; busy = false;
+      if(+SETTINGS.players > 1){ turn = 1 - turn; updateTurn(); }
+    }, +SETTINGS.hold || 2000);
+  }
+
+  // The board ends as a grid of hollow outlines, which is a quiet way to finish
+  // something a student has just worked through. So it fills back in: every card
+  // lights in its own colour and sounds, in a wave across the board, and the
+  // whole thing is left glowing rather than emptied.
+  function finish(){
+    const wave = 130;
+    cells.forEach((c, i) => later(() => {
+      c.el.classList.add('win');
+      sound(deck[c.idx], 0.5);
+      const ring = document.createElement('div');
+      ring.className = 'smr';
+      ring.style.setProperty('--rc', deck[c.idx].rgb.join(','));
+      c.el.querySelector('.smp').appendChild(ring);
+      ring.animate([{transform:'scale(0.3)',opacity:0.95},{transform:'scale(2.6)',opacity:0}],
+                   {duration:900, easing:'ease-out'}).onfinish = () => ring.remove();
+    }, i*wave));
+    later(() => { if(doneEl) doneEl.classList.add('show'); }, cells.length*wave + 150);
+  }
+
+  // ── The app's own tab ─────────────────────────────────────────────────────
+  function syncPane(){ if(currentQuickMode === 'app') buildAppPanel(); }
+
+  return {
+    appLabel:'🃏 Game',
+    sectionLabel:'Cards',
+    lockMode:'notes',      // there is no Flow here: a card is a card
+    noVoices:true,         // the app sounds its own cards, one note per press
+    hideRail:['clear'],    // nothing is painted, so there is nothing to clear
+    onCell(){},            // suppress the framework's cell flash; cards are the feedback
+    themes:{ boom:{label:'🎨 Boomwhacker', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                                   [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    defaults:{
+      theme:'boom',
+      show:'colour', forgive:'flip', hold:'2000', players:'1',
+      boardSize:'medium', replay:false, colourStrength:1, showNames:true,
+      // framework keys this app needs a particular way
+      mode:'notes', paint:true, yAxis:'none', zoneLook:'off', showLabels:false,
+      colorMode:'note', noteCount:8, scale:'major',   // noteCount is driven by cols x rows
+    },
+    schema:[],
+
+    railButtons:[
+      { id:'smnew', icon:()=>'🔄', label:'Deal', title:()=>'Deal a new board', onClick(){ deal(); } },
+    ],
+
+    buildApp(el){
+      el.appendChild(makeChips('Game type','show',SHOW,()=>{ syncPane(); deal(); }));
+      const why = document.createElement('div');
+      why.className='smwhy';
+      why.textContent = SETTINGS.show === 'alone'
+        ? 'Nothing on the faces — the ear does all of it. Every pair takes its own '
+          + 'instrument, because a tone apart on one voice is not a difference a student '
+          + 'can hold on to. Stay up is off here: identical faces left showing tell you nothing.'
+        : 'The note\'s Boomwhacker colour with its letter. An octave up is the same colour '
+          + 'lightened, so two pairs are never the same card.';
+      el.appendChild(why);
+
+      el.appendChild(makeChips('Board size','boardSize',SIZES,()=>{ deal(); syncPane(); }));
+      const n = document.createElement('div'); n.className='smwhy';
+      n.textContent = cardCount() + ' cards, ' + pairCount() + ' pairs — and so '
+        + pairCount() + ' notes, which is why there is no number-of-notes slider '
+        + 'anywhere. The rows and columns are whatever fits the screen.';
+      el.appendChild(n);
+
+      const h2 = document.createElement('div'); h2.className='sectn';
+      h2.textContent = 'Playing'; el.appendChild(h2);
+      if(SETTINGS.show !== 'alone'){
+        el.appendChild(makeChips('If they don\'t match','forgive',FORGIVE,()=>{ syncPane(); deal(); }));
+      }
+      if(SETTINGS.show === 'alone' || SETTINGS.forgive === 'flip'){
+        el.appendChild(makeChips('They stay up for','hold',HOLDS,null));
+      }
+      el.appendChild(makeChips('Players','players',PLAYERS,()=>{ deal(); }));
+      el.appendChild(makeToggle('Play them again','replay',null));
+      const r = document.createElement('div'); r.className='smwhy';
+      r.textContent = 'Off, a turn is over as soon as the second card has sounded. '
+        + 'On, two cards that did NOT match are played once more, one after the other, '
+        + 'for a student being taught to compare them. A match never replays.';
+      el.appendChild(r);
+    },
+
+    // ── Notes: Register, Scale, Starting note — and nothing else ────────────
+    // The framework's own Notes pane also carries "Number of notes" and
+    // "Up / down means…". Neither belongs here: the grid decides how many notes
+    // there are, and this app never reads the height of a touch, so a Y-axis row
+    // would be a control that does nothing at all. appendTuning is the
+    // framework's own helper for exactly this, so the three rows that DO apply
+    // keep their order and their labels.
+    buildInstrument(el){
+      // refreshMusic() is what actually rebuilds NOTES. Passing retune alone left
+      // the three rows changing SETTINGS and nothing else — the pane looked live and
+      // the game never moved. The framework passes refreshMusic here for exactly
+      // this reason; an app that substitutes its own callback must still call it.
+      appendTuning(el, ()=>{ refreshMusic(); retune(); }, {label:'Which notes'});
+      const n = document.createElement('div'); n.className='smwhy';
+      n.textContent = 'These choose WHICH notes are on the cards, and change them where '
+        + 'they lie rather than dealing again — a register nudged mid-game does not cost a '
+        + 'student their board. How many there are is Board size, on the Game tab.';
+      el.appendChild(n);
+    },
+
+    // ── Sound: the standard pane, with one line saying what it does here ────
+    soundExtras(el){
+      const n = document.createElement('div'); n.className='smwhy';
+      n.textContent = SETTINGS.show === 'alone'
+        ? 'Sound alone gives every pair its own instrument, so the Voice below is not '
+          + 'used in this game type. Volume, the effects and Shape the sound still are.'
+        : 'Voice is the instrument every card plays — it is the sound a student is '
+          + 'matching, so it changes how hard the game is to hear.';
+      el.appendChild(n);
+    },
+
+    // ── Visuals: only what this app actually has ────────────────────────────
+    // No paint trails and no paint colour: nothing is painted here. The cards
+    // ARE the picture, so the only visuals worth a control are how strong their
+    // colour is and whether the letters are on at all.
+    buildVisuals(el){
+      const h = document.createElement('div'); h.className='sectn';
+      h.textContent = 'Cards'; el.appendChild(h);
+      el.appendChild(makeSlider({key:'colourStrength', label:'Colour strength',
+        min:0, max:1, step:0.05, dp:2,
+        fmt:v=>Math.round(v*100)+'%', onChange:()=>{ render(); }}));
+      el.appendChild(makeToggle('Show note letters','showNames',()=>{ render(); }));
+      const n = document.createElement('div'); n.className='smwhy';
+      n.textContent = 'Turn the letters off for a student who reads colour but not '
+        + 'notation. In Sound alone the faces are blank either way.';
+      el.appendChild(n);
+    },
+
+    // ── Framework lifecycle ─────────────────────────────────────────────────
+    init(cv){
+      ctx = cv.getContext('2d');
+      aloneVoices = ALONE_VOICES.filter(k => VOICES[k]);
+      if(!document.getElementById('smCss')){
+        const st = document.createElement('style'); st.id = 'smCss';
+        st.textContent =
+          // pointer-events:none is not decoration, it is THE reason the game
+          // works. The framework's mouse and touch listeners are on `canvas`
+          // (framework.js:1164, :1204), and this board covers it — anything here
+          // that accepts a pointer swallows every real click before the
+          // framework sees it. The gamepad and the dwell call onDown() directly
+          // and never noticed, which is how this shipped past a test suite that
+          // only ever synthesised presses. Hit-testing is done in splat().
+          '#smBoard,#smTurn,#smDone,.smc,.smp{pointer-events:none}' +
+          '#smBoard{position:fixed;inset:0;z-index:2}' +
+          // THERE IS NO 3D HERE, DELIBERATELY. The flip used transform-style:
+          // preserve-3d with a rotateY and a hidden backface, and on a real GPU it
+          // produced dark lines across the cards that no headless run could
+          // reproduce — a compositor tile seam, at a fixed screen x, crossing
+          // several cards at once and appearing on a plainly revealed card. Three
+          // patches (a z separation, fading the back out, will-change) each fixed
+          // one case and left the class of fault alive, so the mechanism is gone
+          // instead: a card squashes to nothing on the X axis and comes back, and
+          // the two faces swap which is opaque at the halfway point. It looks the
+          // same, there is no back face to leak, and nothing is promoted to a
+          // layer of its own. Do not reintroduce preserve-3d or will-change here.
+          '.smc{position:absolute}' +
+          '.smi{position:absolute;inset:calc(4px * var(--ui-scale));' +
+            'transition:transform .3s ease-out}' +
+          '.smc.flipping .smi{animation:smFlip .3s ease-in-out}' +
+          '@keyframes smFlip{0%,100%{transform:scaleX(1)}50%{transform:scaleX(0.06)}}' +
+          '.smb,.smf{position:absolute;inset:0;border-radius:var(--radius);' +
+            'display:flex;align-items:center;justify-content:center;overflow:hidden;' +
+            'font-family:system-ui,-apple-system,"Segoe UI",sans-serif}' +
+          // The faces swap instantly, at the midpoint of the squash, where the
+          // card is 6% wide and the change cannot be seen happening.
+          '.smb{background:linear-gradient(155deg,#1c1c24,#131318);' +
+            'border:1px solid rgba(255,255,255,0.16);opacity:1}' +
+          '.smb::after{content:"";width:22%;aspect-ratio:1;border-radius:50%;' +
+            'border:calc(2px * var(--ui-scale)) solid rgba(255,255,255,0.10)}' +
+          '.smf{opacity:0;border:1px solid rgba(255,255,255,0.22);' +
+            'background:rgb(var(--c,120,120,130));color:#12121a;font-weight:800;' +
+            'font-size:calc(38px * var(--ui-scale));text-shadow:0 1px 0 rgba(255,255,255,0.30)}' +
+          '.smc.up .smb{opacity:0}' +
+          '.smc.up .smf{opacity:1}' +
+          '.smc.blank .smf{background:#191920;border-color:rgba(255,255,255,0.16)}' +
+          '.smw{display:flex;align-items:flex-end;gap:calc(5px * var(--ui-scale));height:26%}' +
+          '.smw i{display:block;width:calc(6px * var(--ui-scale));' +
+            'border-radius:calc(3px * var(--ui-scale));background:rgba(255,255,255,0.32);' +
+            'height:22%;transition:height .12s ease-out}' +
+          '.smp{position:absolute;inset:calc(4px * var(--ui-scale));border-radius:var(--radius);' +
+            'overflow:hidden;pointer-events:none}' +
+          '.smr{position:absolute;left:50%;top:50%;width:60%;aspect-ratio:1;margin:-30% 0 0 -30%;' +
+            'border-radius:50%;border:calc(3px * var(--ui-scale)) solid rgb(var(--rc,255,255,255))}' +
+          '.smc.sounding .smi{transform:scale(1.04)}' +
+          '.smc.sounding .smf{border-color:rgba(255,255,255,0.9)}' +
+          '.smc.chosen .smf,.smc.chosen .smb{box-shadow:inset 0 0 0 ' +
+            'calc(4px * var(--ui-scale)) var(--accent)}' +
+          /* Matched is EMPTIED, not dimmed. Under "Stay up" the board is full of
+             bright face-up cards and a merely darker one is not a category;
+             filled versus hollow survives a projector in a lit room. */
+          '.smc.done .smi{transform:scale(0.90)}' +
+          '.smc.done .smf{background:transparent;color:rgb(var(--c));text-shadow:none;' +
+            'border:calc(6px * var(--ui-scale)) solid rgb(var(--c));animation:smMatch .55s ease-out}' +
+          '@keyframes smMatch{0%{transform:scale(1)}40%{transform:scale(1.10)}' +
+            '100%{transform:scale(1)}}' +
+          /* Winning the whole board fills every card back in, in a wave. */
+          '.smc.win .smf{background:rgb(var(--c));color:#12121a;' +
+            'border-color:rgba(255,255,255,0.85);filter:none}' +
+          '.smc.win .smi{transform:scale(1.05)}' +
+          '.smc .smown{position:absolute;right:7%;top:7%;width:calc(16px * var(--ui-scale));' +
+            'aspect-ratio:1;border-radius:50%;background:var(--pc,#fff);z-index:2;opacity:0;' +
+            'box-shadow:0 0 0 calc(2px * var(--ui-scale)) rgba(0,0,0,0.45)}' +
+          'body[data-sm-players="2"] .smc.done .smown{opacity:1}' +
+          '#smTurn{position:fixed;top:0;left:0;right:0;height:calc(46px * var(--ui-scale));' +
+            'display:flex;align-items:center;justify-content:center;z-index:3;' +
+            'gap:calc(10px * var(--ui-scale));font-size:var(--font-m);font-weight:700;' +
+            'color:var(--ink);pointer-events:none;background:linear-gradient(#000c,transparent)}' +
+          '#smTurn .smdot{width:calc(14px * var(--ui-scale));' +
+            'height:calc(14px * var(--ui-scale));border-radius:50%}' +
+          '#smTurn .smsc{opacity:.55;margin-left:calc(14px * var(--ui-scale))}' +
+          // Against a board that has just lit up in full colour, a 64px sparkle
+          // is lost. It has to be the size of the moment.
+          '#smDone{position:fixed;inset:0;display:none;align-items:center;justify-content:center;' +
+            'z-index:4;pointer-events:none;font-size:calc(150px * var(--ui-scale));' +
+            'text-shadow:0 0 calc(40px * var(--ui-scale)) #000,' +
+            '0 calc(3px * var(--ui-scale)) calc(14px * var(--ui-scale)) rgba(0,0,0,0.85)}' +
+          // The sparkle animates ONCE and then holds still. An infinite animation
+          // on a full-screen overlay repaints for ever, and the edges of that
+          // repaint region were showing straight through the cards underneath as
+          // dark lines — the rectangle the user photographed is the sparkle's own
+          // dirty rect. `will-change` puts it on its own compositor layer so its
+          // painting cannot touch the 3D card layers at all, and `smGlow` is gone
+          // because a celebration does not need to run for ever to be one.
+          '#smDone.show{display:flex;animation:smPop .8s ease-out both}' +
+          '@keyframes smPop{from{transform:scale(0.4) rotate(-25deg);opacity:0}' +
+            '60%{transform:scale(1.15) rotate(6deg);opacity:1}' +
+            'to{transform:scale(1) rotate(0);opacity:1}}' +
+          '.smwhy{font-size:var(--font-s);color:var(--ink-quiet);line-height:1.45;' +
+            'margin:calc(-4px * var(--ui-scale)) 0 var(--gap)}';
+        document.head.appendChild(st);
+      }
+      // Every one of these goes on stageEl (#surface), never document.body: the
+      // surface carries the transform, so the board scales with the activity and
+      // travels into the reach area.
+      if(!boardEl){
+        boardEl = document.createElement('div'); boardEl.id = 'smBoard';
+        turnEl  = document.createElement('div'); turnEl.id  = 'smTurn';
+        doneEl  = document.createElement('div'); doneEl.id  = 'smDone'; doneEl.textContent = '✨';
+        stageEl.appendChild(boardEl); stageEl.appendChild(turnEl); stageEl.appendChild(doneEl);
+      }
+      deal();
+    },
+
+    resize(){ this.clearCanvas(); render(); },
+
+    // The one entry point for a press, whatever produced it — finger, mouse,
+    // dwell or gamepad stick. velScale is 0 only on the press itself; every
+    // splat the render loop makes carries a velocity above it, so a drag across
+    // the board turns nothing over.
+    splat(x, y, dx, dy, color, opts){
+      if(!opts || opts.velScale !== 0) return;
+      if(signature() !== noteSig){                      // the Notes tab changed under us
+        if(NOTES.length === pairCount()) retune(); else deal();
+        return;
+      }
+      const px = x*stageEl.clientWidth, py = (1-y)*stageEl.clientHeight;
+      for(const c of cells){
+        if(px >= c.x && px < c.x + c.w && py >= c.y && py < c.y + c.h){ tap(c.idx); return; }
+      }
+    },
+
+    frame(){
+      this.clearCanvas();
+      if(signature() !== noteSig){          // Register / Scale / Starting note
+        if(NOTES.length === pairCount()) retune(); else deal();
+      }
+    },
+
+    clearCanvas(){
+      if(!ctx) return;
+      ctx.fillStyle = 'rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    },
+
+    reset(){ this.clearCanvas(); deal(); },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

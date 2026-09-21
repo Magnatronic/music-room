@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sampler Pads – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Pads look like pads: rounded tiles with a strong colour fill (the framework's
+   default band tint is designed for translucent fullscreen apps and is far too
+   subtle here — see restyle(), which sets --a per pad).
+   Selectors use #bands .band (not .band.cell) because single-row layouts
+   have no .cell class — pads must look like pads in every layout. */
+#bands .band{border-radius:18px;margin:6px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,0.09)}
+#bands .band.held,#bands .band.flash{background:rgba(var(--c),0.85)}
+#bands .band .lbl{color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.45);
+  top:50%;bottom:auto;transform:translate(-50%,-50%)}
+/* Looping state on the framework's band cells */
+.band.looping{animation:smLoop 1.6s ease-in-out infinite}
+@keyframes smLoop{0%,100%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.55)}50%{box-shadow:inset 0 0 0 3px rgba(255,255,255,0.15)}}
+#smToast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:70;
+  background:rgba(0,0,0,0.75);color:rgba(255,255,255,0.95);font:14px sans-serif;
+  padding:10px 18px;border-radius:14px;max-width:80%;text-align:center;
+  opacity:0;transition:opacity 0.3s;pointer-events:none}
+#smToast.show{opacity:1}
+/* Pad editor dialog */
+#smOv{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.55);
+  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+#smDlg{width:min(440px,94vw);max-height:88vh;overflow-y:auto;
+  background:rgba(17,19,27,0.97);border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  border-radius:20px;padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,0.5);
+  color:rgba(255,255,255,0.9);font-family:sans-serif;font-size:var(--font-m)}
+#smDlg .dlghead{display:flex;justify-content:space-between;align-items:center;margin:-16px -18px 12px;padding:12px 18px;background:color-mix(in srgb,var(--accent) 20%,transparent);border-bottom:2px solid color-mix(in srgb,var(--accent) 65%,transparent)}
+#smDlg .dlghead .ttl{font-size:var(--font-m);font-weight:600}
+#smWave{width:100%;height:96px;border-radius:10px;background:rgba(255,255,255,0.05);
+  touch-action:none;display:block;cursor:ew-resize}
+#smWaveInfo{color:var(--ink-quiet);font-size:var(--font-s);margin:6px 0 12px;text-align:center}
+#smRecBtn{width:100%;text-align:center;font-size:var(--font-m);padding:12px;margin-bottom:14px}
+#smRecBtn.recing{animation:smRec 0.9s ease-in-out infinite;border-color:rgba(255,60,60,0.9)}
+@keyframes smRec{0%,100%{box-shadow:inset 0 0 0 3px rgba(255,60,60,0.9)}50%{box-shadow:inset 0 0 0 8px rgba(255,60,60,0.35)}}
+#smDlg .cap{color:var(--ink-quiet);font-size:var(--font-s);margin:-8px 0 14px}
+#smDlg input[type=text]{width:100%;background:rgba(255,255,255,0.08);
+  border:1px solid rgba(255,255,255,0.22);color:#fff;border-radius:10px;
+  padding:9px 12px;font:var(--font-m) sans-serif;outline:none;margin:2px 0 14px}
+#smDlg input[type=text]:focus{border-color:rgba(255,255,255,0.5)}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Sampler Pads — Koala-lite. Big pads; tap to play. The therapist toggles the
+   rail ✏️ button into EDIT mode (the rail is hidden by the session lock, so
+   students can't erase pads); in edit mode, tapping a pad opens an editor
+   dialog: record from the mic (up to 20 s), trim by dragging the waveform's
+   start/end handles (silence is auto-trimmed on save), label the pad (emoji or
+   short word), set pitch/speed, and mark it to loop while playing (tap the pad
+   again to stop). Tempo/BPM retiming existed once and was stripped — unused in
+   real sessions. The kit persists in localStorage, export/import as .json.
+
+   The student's own voice/sounds become the instrument — recordings play as
+   AudioBuffers through the framework master chain (volume, effects, limiter).
+*/
+const Anim = (() => {
+
+  const KIT_KEY='kit:'+location.pathname.split('/').pop();
+  const REC_MAX=20;                    // seconds per recording
+  // One chip per valid arrangement (same UI as Drums). Single rows suit
+  // switch/eye-gaze left-to-right scanning; grids give bigger targets for
+  // imprecise motor control (the surface is a touchscreen projector).
+  const LAYOUTS={
+    r3:{label:'3',cols:3,rows:1}, r4:{label:'4',cols:4,rows:1}, r5:{label:'5',cols:5,rows:1},
+    r6:{label:'6',cols:6,rows:1}, r7:{label:'7',cols:7,rows:1}, r8:{label:'8',cols:8,rows:1},
+    r9:{label:'9',cols:9,rows:1},
+    g4:{label:'2×2',cols:2,rows:2}, g6:{label:'3×2',cols:3,rows:2},
+    g8:{label:'4×2',cols:4,rows:2}, g9:{label:'3×3',cols:3,rows:3}};
+  const ROW_LAYOUTS={}, GRID_LAYOUTS={};
+  for(const k in LAYOUTS) (LAYOUTS[k].rows>1?GRID_LAYOUTS:ROW_LAYOUTS)[k]=LAYOUTS[k];
+  // Pad colour themes (picked in ✨ Visuals, like Fluid's themes). 9 colours
+  // each — one per pad slot, cycling.
+  const PADTHEMES={
+    bright:{label:'🌈 Bright', pads:[[226,28,28],[245,125,23],[245,209,23],[59,181,74],[28,169,169],[63,120,224],[125,79,181],[224,90,156],[200,200,210]]},
+    ocean: {label:'🌊 Ocean',  pads:[[0,119,182],[2,195,209],[72,202,228],[0,150,199],[86,227,190],[3,140,244],[38,166,154],[100,181,246],[144,224,239]]},
+    sunset:{label:'🌅 Sunset', pads:[[255,94,58],[255,149,5],[255,203,71],[229,80,120],[255,111,145],[201,75,75],[255,171,111],[255,127,80],[240,98,146]]},
+    forest:{label:'🌿 Forest', pads:[[87,166,74],[134,197,84],[46,139,87],[181,214,104],[96,150,96],[154,205,50],[107,142,35],[85,160,120],[189,224,150]]},
+    calm:  {label:'☁️ Calm',   pads:[[120,132,150],[150,160,175],[103,115,133],[168,178,193],[133,144,162],[113,126,145],[153,165,181],[98,109,126],[178,188,203]]},
+  };
+  const EMPTYCOL=[105,110,120];
+  const ICONS=['🔊','🎤','🗣️','🎵','🥁','🎸','🎹','🎺','🎻','🪗','🔔','👏'];
+
+  let ctx=null, kit=loadKit(), buffers=[], playing={};
+  let editMode=false, dlgPad=-1, dlgEl=null;
+  let recStream=null, micPending=false, recorder=null, recChunks=[];
+  let recStartAt=0, recTick=null;
+  let storeTimer=null;
+
+  function loadKit(){
+    try{ const k=JSON.parse(localStorage.getItem(KIT_KEY)||'{}');
+      return {pads:Array.isArray(k.pads)?k.pads.slice(0,9):[]}; }
+    catch(e){ return {pads:[]}; }
+  }
+  function storeKit(){
+    try{ localStorage.setItem(KIT_KEY,JSON.stringify(kit)); }
+    catch(e){ toast('Storage is full — that recording plays now but can\'t be kept. Save the sounds to a file.'); }
+  }
+  function storeKitSoon(){ clearTimeout(storeTimer); storeTimer=setTimeout(storeKit,400); }
+  function abToB64(ab){
+    const u=new Uint8Array(ab); let s='';
+    for(let i=0;i<u.length;i+=8192) s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));
+    return btoa(s);
+  }
+  function b64ToAb(b64){
+    const s=atob(b64), u=new Uint8Array(s.length);
+    for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i);
+    return u.buffer;
+  }
+
+  function toast(msg,secs){
+    let el=document.getElementById('smToast');
+    if(!el){ el=document.createElement('div'); el.id='smToast'; stageEl.appendChild(el); }
+    el.textContent=msg; el.classList.add('show');
+    clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),(secs||3.5)*1000);
+  }
+
+  // ── layout: pads on the framework's cell grid ──
+  // Old saved settings stored grid layouts as '4'/'6'/'9' — map them to g4/g6/g9.
+  function layout(){ return LAYOUTS[SETTINGS.padLayout]||LAYOUTS['g'+SETTINGS.padLayout]||LAYOUTS.g6; }
+  function padCount(){ const L=layout(); return L.cols*L.rows; }
+  function padOf(col,row){ const rows=gridRowCount(); return (rows-1-row)*NOTES.length+col; }
+  function applyLayout(){
+    const L=layout();
+    SETTINGS.noteCount=L.cols; SETTINGS.octaveRows=String(L.rows); SETTINGS.yAxis='octaves';
+    saveSettings(); refreshMusic(); restyle();
+    if(dlgPad>=padCount()) closeEditor();
+  }
+  // Per-PAD colours/icons/states: the framework styles bands per COLUMN, so we
+  // re-style every cell after any buildBands (frame() re-runs this when the
+  // cells are fresh — see the _styled marker).
+  function restyle(){
+    const rows=gridRowCount(), cols=NOTES.length;
+    bandsEl.querySelectorAll('[data-cell]').forEach(d=>{
+      const cr=d.dataset.cell.split('-'), idx=(rows-1-cr[1])*cols+ +cr[0];
+      const pad=kit.pads[idx];
+      const pcols=(PADTHEMES[SETTINGS.theme]||PADTHEMES.bright).pads;
+      d._styled=true;
+      d.style.borderRight=''; d.style.borderBottom='';   // tiles, not gridlines
+      d.style.setProperty('--c',(pad?pcols[idx%pcols.length]:EMPTYCOL).join(','));
+      d.style.setProperty('--a',pad?String(SETTINGS.padFill||0.6):'0.16');
+      d.classList.toggle('looping',!!(playing[idx]&&pad&&pad.loop));
+      const l=d.querySelector('.lbl');
+      if(l) l.textContent=pad?(pad.icon||'🔊'):(editMode?'➕':'·');
+    });
+  }
+
+  // ── playback ──
+  function ensureDecoded(idx){
+    if(buffers[idx]) return Promise.resolve(buffers[idx]);
+    const pad=kit.pads[idx];
+    if(!pad||!pad.d) return Promise.reject();
+    return getAudio().decodeAudioData(b64ToAb(pad.d)).then(b=>{ buffers[idx]=b; return b; });
+  }
+  // Trim window in seconds, clamped to the buffer; old kits have no trim fields.
+  function trimBounds(pad,buf){
+    const a=Math.max(0,Math.min(pad.trimA||0,buf.duration-0.05));
+    let b=(pad.trimB==null?buf.duration:pad.trimB);
+    b=Math.max(a+0.05,Math.min(b,buf.duration));
+    return [a,b];
+  }
+  // Pitch/speed applies to loops and one-shots alike. (BPM retiming for backing
+  // tracks lived here once — stripped as unused; old kits' bpm fields are ignored.)
+  function padRate(pad){ return pad.pitch||1; }
+  function stopPad(idx){
+    const pl=playing[idx]; if(!pl) return;
+    delete playing[idx];
+    try{
+      const t=audioCtx.currentTime;
+      pl.g.gain.setTargetAtTime(0,t,0.03); pl.src.stop(t+0.25);
+    }catch(e){}
+  }
+  function playPad(idx){
+    const pad=kit.pads[idx]; if(!pad) return;
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    ensureDecoded(idx).then(buf=>{
+      const wasLooping=!!playing[idx]&&pad.loop;
+      stopPad(idx);
+      if(wasLooping){ restyle(); return; }   // tapping a looping pad stops it
+      const tb=trimBounds(pad,buf);
+      const src=ac.createBufferSource(); src.buffer=buf;
+      src.playbackRate.value=padRate(pad);
+      if(pad.loop){ src.loop=true; src.loopStart=tb[0]; src.loopEnd=tb[1]; }
+      const g=ac.createGain(); g.gain.value=1;
+      src.connect(g); g.connect(masterGain);
+      soundingVoices++; updatePolyGain();
+      const entry={src,g};
+      src.onended=()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+        if(playing[idx]===entry) delete playing[idx];
+        try{g.disconnect();}catch(e){} restyle(); };
+      if(pad.loop) src.start(ac.currentTime+0.012,tb[0]);
+      else src.start(ac.currentTime+0.012,tb[0],tb[1]-tb[0]);
+      playing[idx]=entry;
+      if(pad.loop) restyle();
+    }).catch(()=>{});
+  }
+  // One trimmed pass, never looped — feedback while editing (trim drags etc.).
+  function previewOnce(idx){
+    const pad=kit.pads[idx]; if(!pad) return;
+    const ac=getAudio(); if(!ac||!masterGain) return;
+    ensureDecoded(idx).then(buf=>{
+      stopPad(idx);
+      const tb=trimBounds(pad,buf);
+      const src=ac.createBufferSource(); src.buffer=buf;
+      src.playbackRate.value=padRate(pad);
+      const g=ac.createGain(); src.connect(g); g.connect(masterGain);
+      soundingVoices++; updatePolyGain();
+      src.onended=()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+        try{g.disconnect();}catch(e){} };
+      src.start(ac.currentTime+0.012,tb[0],tb[1]-tb[0]);
+    }).catch(()=>{});
+  }
+
+  // ── edit mode (therapist: rail ✏️ → tap a pad → editor dialog) ──
+  function setEditMode(v){
+    if(v===editMode) return;
+    editMode=v;
+    if(!v){
+      if(recorder&&recorder.state!=='inactive') recorder.stop();   // saves the take
+      if(recStream){ recStream.getTracks().forEach(t=>t.stop()); recStream=null; }
+      closeEditor();
+    }
+    showEditIndicator(v);              // pulsing pads + persistent pill (framework)
+    refreshRailButtons(); restyle();
+  }
+
+  // ── recording (inside the editor dialog) ──
+  function recToggle(){
+    if(recorder){ recorder.stop(); return; }
+    if(micPending) return;
+    if(!recStream){
+      micPending=true; getAudio(); updateRecBtn();
+      navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{
+        micPending=false; recStream=s; updateRecBtn();
+        toast('Microphone is ready — press ● Record when you\'re ready.');
+      }).catch(()=>{
+        micPending=false; updateRecBtn();
+        toast('The microphone was blocked — allow it in the browser and try again.');
+      });
+      return;
+    }
+    beginRec();
+  }
+  function beginRec(){
+    if(recorder||dlgPad<0||!recStream) return;
+    try{
+      recorder=MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? new MediaRecorder(recStream,{mimeType:'audio/webm;codecs=opus'})
+        : new MediaRecorder(recStream);
+    }catch(e){ try{ recorder=new MediaRecorder(recStream); }catch(e2){ recorder=null; return; } }
+    recChunks=[];
+    const mime=recorder.mimeType, padIdx=dlgPad;
+    recorder.ondataavailable=e=>{ if(e.data&&e.data.size) recChunks.push(e.data); };
+    recorder.onstop=()=>{ recorder=null; clearInterval(recTick); recTick=null;
+      updateRecBtn(); finishRec(padIdx,new Blob(recChunks,{type:mime})); };
+    recorder.start();
+    recStartAt=performance.now();
+    recTick=setInterval(()=>{
+      updateRecBtn();
+      if(performance.now()-recStartAt>REC_MAX*1000&&recorder) recorder.stop();
+    },100);
+    updateRecBtn();
+  }
+  function finishRec(idx,blob){
+    if(blob.size<600){ toast('Too short — press ● Record, make the sound, then press ■ Stop.'); return; }
+    blob.arrayBuffer().then(ab=>{
+      const prev=kit.pads[idx]||{};
+      kit.pads[idx]={d:abToB64(ab),mime:blob.type,
+        icon:prev.icon||'🔊',
+        pitch:prev.pitch||1,loop:!!prev.loop};
+      buffers[idx]=null;
+      ensureDecoded(idx).then(buf=>{
+        const t=autoTrim(buf);
+        kit.pads[idx].trimA=t[0]; kit.pads[idx].trimB=t[1];
+        storeKit(); restyle();
+        if(dlgPad===idx) buildDlgBody();
+        previewOnce(idx);   // instant audition of what was just saved
+      });
+    });
+  }
+  // Skip leading/trailing silence: per-10ms peak, threshold relative to the
+  // loudest moment, small margins so attacks aren't clipped.
+  function autoTrim(buf){
+    const ch=buf.getChannelData(0), win=Math.max(1,(buf.sampleRate*0.01)|0);
+    const n=Math.ceil(ch.length/win), peaks=new Float32Array(n);
+    let peak=0;
+    for(let w=0;w<n;w++){
+      let m=0; const end=Math.min(ch.length,(w+1)*win);
+      for(let i=w*win;i<end;i++){ const v=Math.abs(ch[i]); if(v>m)m=v; }
+      peaks[w]=m; if(m>peak)peak=m;
+    }
+    const thr=Math.max(0.02,peak*0.06);
+    let first=-1,last=-1;
+    for(let w=0;w<n;w++) if(peaks[w]>=thr){ first=w; break; }
+    for(let w=n-1;w>=0;w--) if(peaks[w]>=thr){ last=w; break; }
+    if(first<0) return [0,buf.duration];
+    return [Math.max(0,first*win/buf.sampleRate-0.03),
+            Math.min(buf.duration,(last+1)*win/buf.sampleRate+0.05)];
+  }
+
+  // ── editor dialog ──
+  function openEditor(idx){
+    dlgPad=idx;
+    if(!dlgEl){
+      // Stays on the body, NOT the stage - see the note in drums.html: a modal
+      // covers everything, rail included, or it invites a tap behind it.
+      dlgEl=document.createElement('div'); dlgEl.id='smOv'; dlgEl.className='modal';
+      dlgEl.addEventListener('pointerdown',e=>{ if(e.target===dlgEl) closeEditor(); });
+      const card=document.createElement('div'); card.id='smDlg';
+      dlgEl.appendChild(card); document.body.appendChild(dlgEl);
+    }
+    buildDlgBody();
+  }
+  function closeEditor(){
+    if(recorder&&recorder.state!=='inactive') recorder.stop();   // saves the take
+    if(dlgEl){ dlgEl.remove(); dlgEl=null; }
+    dlgPad=-1; restyle();
+  }
+  function updateRecBtn(){
+    const b=document.getElementById('smRecBtn'); if(!b) return;
+    if(recorder){
+      const s=Math.min(REC_MAX,(performance.now()-recStartAt)/1000);
+      b.textContent='■ Stop — '+s.toFixed(1)+' s (max '+REC_MAX+' s)';
+      b.classList.add('recing');
+    } else {
+      b.textContent=micPending?'… waiting for the microphone':'● Record';
+      b.classList.remove('recing');
+    }
+  }
+  function drawWave(cv,pad,buf){
+    const w=cv.width,h=cv.height,g=cv.getContext('2d');
+    g.clearRect(0,0,w,h);
+    const ch=buf.getChannelData(0), spx=ch.length/w;
+    g.fillStyle='rgba(140,190,255,0.85)';
+    for(let x=0;x<w;x++){
+      let m=0; const s=(x*spx)|0, e=Math.min(ch.length,((x+1)*spx)|0);
+      const skip=Math.max(1,((e-s)/200)|0);
+      for(let i=s;i<e;i+=skip){ const v=Math.abs(ch[i]); if(v>m)m=v; }
+      const bh=Math.max(2,m*(h-10));
+      g.fillRect(x,(h-bh)/2,1,bh);
+    }
+    const tb=trimBounds(pad,buf);
+    const xa=tb[0]/buf.duration*w, xb=tb[1]/buf.duration*w;
+    g.fillStyle='rgba(0,0,0,0.72)';
+    g.fillRect(0,0,xa,h); g.fillRect(xb,0,w-xb,h);
+    g.strokeStyle='rgba(255,255,255,0.5)'; g.lineWidth=2;
+    g.strokeRect(xa,1,xb-xa,h-2);
+    // grip tabs: full-height bar + rounded tab with grip lines at mid-height
+    const grip=x=>{
+      g.fillStyle='#fff';
+      g.fillRect(x-3,0,6,h);
+      g.beginPath();
+      if(g.roundRect) g.roundRect(x-14,h/2-26,28,52,10); else g.rect(x-14,h/2-26,28,52);
+      g.fill();
+      g.fillStyle='rgba(0,0,0,0.65)';
+      g.fillRect(x-5,h/2-14,3,28); g.fillRect(x+2,h/2-14,3,28);
+    };
+    grip(xa); grip(xb);
+    const info=document.getElementById('smWaveInfo');
+    if(info) info.textContent='Using '+(tb[1]-tb[0]).toFixed(1)+' s of '+buf.duration.toFixed(1)+' s — drag the white handles to trim';
+  }
+  function attachTrimDrag(cv,pad,buf){
+    let drag=null;
+    const posToT=e=>{
+      const r=cv.getBoundingClientRect();
+      return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*buf.duration;
+    };
+    const move=e=>{
+      if(!drag) return;
+      const t=posToT(e), tb=trimBounds(pad,buf);
+      if(drag==='a'){ pad.trimA=Math.min(t,tb[1]-0.05); if(pad.trimA<0.02) pad.trimA=0; }
+      else { pad.trimB=Math.max(t,tb[0]+0.05); if(pad.trimB>buf.duration-0.02) pad.trimB=buf.duration; }
+      storeKitSoon(); drawWave(cv,pad,buf);
+    };
+    cv.addEventListener('pointerdown',e=>{
+      const t=posToT(e), tb=trimBounds(pad,buf);
+      drag=Math.abs(t-tb[0])<=Math.abs(t-tb[1])?'a':'b';
+      cv.setPointerCapture(e.pointerId); e.preventDefault(); move(e);
+    });
+    cv.addEventListener('pointermove',move);
+    cv.addEventListener('pointerup',()=>{ if(drag){ drag=null; storeKit(); previewOnce(dlgPad); } });
+    cv.addEventListener('pointercancel',()=>{ drag=null; });
+  }
+  function buildDlgBody(){
+    const card=dlgEl&&dlgEl.querySelector('#smDlg'); if(!card) return;
+    card.innerHTML='';
+    const idx=dlgPad, pad=kit.pads[idx];
+
+    const head=document.createElement('div'); head.className='dlghead';
+    const ttl=document.createElement('div'); ttl.className='ttl';
+    ttl.textContent=(pad?(pad.icon||'🔊')+' ':'')+'Pad '+(idx+1);
+    const x=document.createElement('button'); x.className='btn'; x.textContent='✕';
+    x.title='Close'; x.addEventListener('click',e=>{ e.stopPropagation(); closeEditor(); });
+    head.appendChild(ttl); head.appendChild(x); card.appendChild(head);
+
+    if(pad){
+      const cv=document.createElement('canvas'); cv.id='smWave';
+      cv.width=800; cv.height=120; card.appendChild(cv);
+      const info=document.createElement('div'); info.id='smWaveInfo';
+      info.textContent='…'; card.appendChild(info);
+      ensureDecoded(idx).then(buf=>{
+        if(dlgPad!==idx) return;
+        drawWave(cv,pad,buf); attachTrimDrag(cv,pad,buf); updateSyncCap(pad,buf);
+      }).catch(()=>{ info.textContent='This recording couldn\'t be decoded.'; });
+    } else {
+      const none=document.createElement('div');
+      none.className='hint'; none.style.lineHeight='1.5';
+      none.textContent='Nothing on this pad yet. Press ● Record, make the sound, then press ■ Stop.';
+      card.appendChild(none);
+    }
+
+    const rec=document.createElement('button'); rec.id='smRecBtn'; rec.className='btn';
+    rec.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); recToggle(); });
+    card.appendChild(rec); updateRecBtn();
+
+    if(!pad) return;
+
+    const row=document.createElement('div'); row.className='chips';
+    row.appendChild(chip('▶ Play',false,()=>playPad(idx)));
+    row.appendChild(chip('↺ Full length',false,()=>{
+      pad.trimA=0; pad.trimB=null; storeKit(); buildDlgBody(); previewOnce(idx); }));
+    row.appendChild(chip('🗑 Clear pad',false,()=>{
+      stopPad(idx); kit.pads[idx]=null; buffers[idx]=null; storeKit();
+      restyle(); buildDlgBody(); toast('Pad '+(idx+1)+' cleared.'); }));
+    card.appendChild(row);
+
+    const h=document.createElement('div'); h.className='sectn'; h.textContent='Label (shown on the pad)'; card.appendChild(h);
+    const ic=document.createElement('div'); ic.className='chips';
+    ICONS.forEach(i=>ic.appendChild(chip(i,pad.icon===i,()=>{
+      pad.icon=i; storeKit(); restyle(); buildDlgBody(); })));
+    card.appendChild(ic);
+    const li=document.createElement('input'); li.type='text'; li.maxLength=12;
+    li.value=ICONS.indexOf(pad.icon)<0?(pad.icon||''):'';
+    li.placeholder='Or type your own — emoji or a short word';
+    li.addEventListener('pointerdown',e=>e.stopPropagation());
+    li.addEventListener('input',()=>{ pad.icon=li.value.trim()||'🔊'; storeKitSoon(); restyle(); });
+    li.addEventListener('change',()=>storeKit());
+    card.appendChild(li);
+
+    const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Playback'; card.appendChild(h2);
+    kslider(card,'Pitch / speed',()=>pad.pitch||1,v=>{ pad.pitch=v; storeKitSoon(); previewOnce(idx); },0.5,2,0.05);
+    ktoggle(card,'Loop while playing (tap the pad to stop)',()=>!!pad.loop,v=>{
+      pad.loop=v;
+      if(!v) stopPad(idx);
+      storeKit(); restyle();
+    });
+  }
+
+  // ── kit export / import ──
+  function exportKit(){
+    const blob=new Blob([JSON.stringify(kit)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='sampler-kit-'+new Date().toISOString().slice(0,10)+'.json';
+    a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }
+  function importKit(){
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+    inp.addEventListener('change',()=>{
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      f.text().then(txt=>{
+        const k=JSON.parse(txt);
+        if(!k||!Array.isArray(k.pads)) throw 0;
+        kit={pads:k.pads.slice(0,9)}; buffers=[]; storeKit();
+        restyle(); toast('Sounds loaded.');
+      }).catch(()=>toast('That file doesn\'t look like a saved sounds file.'));
+    });
+    inp.click();
+  }
+
+  // ── dialog/panel widget helpers (kit data lives outside SETTINGS) ──
+  function chip(txt,active,fn){
+    const c=document.createElement('div'); c.className='chip'+(active?' active':'');
+    c.textContent=txt;
+    c.addEventListener('click',e=>{ e.stopPropagation(); getAudio(); fn(c); });
+    return c;
+  }
+  function kslider(el,label,get,set,min,max,step,fmt){
+    fmt=fmt||(v=>(+v).toFixed(2));
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val'; val.textContent=fmt(get());
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=step; inp.value=get();
+    inp.addEventListener('input',()=>{ set(parseFloat(inp.value)); val.textContent=fmt(get()); });
+    row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+  }
+  function rebuildVis(){ if(currentQuickMode==='visuals') buildVisualsPanel(); }
+  function ktoggle(el,label,get,set){
+    const row=document.createElement('div'); row.className='toggle';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const sw=document.createElement('div'); sw.className='switch'+(get()?' on':'');
+    sw.addEventListener('click',e=>{ e.stopPropagation(); getAudio();
+      set(!get()); sw.classList.toggle('on',get()); });
+    row.appendChild(lab); row.appendChild(sw); el.appendChild(row);
+  }
+
+  return {
+    appLabel:'📼 Pads',
+    sectionLabel:'Sampler',
+    lockMode:'notes',
+    noVoices:true,                    // recordings ARE the sound
+    hideRail:['clear','instrument'],
+    // Framework themes mirror the pad themes (flow-mode splats, first 5 colours)
+    themes:(function(){ const t={};
+      for(const k in PADTHEMES) t[k]={label:PADTHEMES[k].label,
+        colors:PADTHEMES[k].pads.slice(0,5).map(c=>c.map(v=>v/255))};
+      return t; })(),
+    defaults:{ theme:'bright', padLayout:'g6', pressFx:'none', padFill:0.6,
+      mode:'notes', paint:false, yAxis:'octaves', octaveRows:'2', noteCount:3,
+      zoneLook:'tint', showLabels:true, colorMode:'note', scale:'major' },
+    schema:[],
+    railButtons:[
+      { id:'smedit', label:'Edit', icon:()=>'✏️',
+        title:()=>editMode?'Editing is ON — tap to go back to playing':'Edit pads: record, trim, loop',
+        active:()=>editMode,
+        onClick(){ setEditMode(!editMode); } },
+    ],
+    _dbg(){ return {editMode,dlgPad,mic:!!recStream,rec:!!recorder,
+      pads:kit.pads.map(p=>!!p),playing:Object.keys(playing).length}; },
+    // 📼 Pads tab
+    // The app's own tab. Everything here is what THIS app is; none of it is
+    // Register/Scale/Starting note, which is all the Notes tab holds now.
+    // See PHASE-4E-APP-TAB.md.
+    buildApp(el){
+      // Both chip groups drive the same setting; rebuild the pane on change so
+      // the highlight moves between groups.
+      const relayout=()=>{ applyLayout(); buildAppPanel(); };
+      el.appendChild(makeChips('Pads in one row','padLayout',ROW_LAYOUTS,relayout));
+      el.appendChild(makeChips('Pads in a grid','padLayout',GRID_LAYOUTS,relayout));
+      const hint=document.createElement('div');
+      hint.className='hint'; hint.style.lineHeight='1.5';
+      hint.textContent='To record or change sounds: tap the ✏️ button on the left rail, then tap a pad.';
+      el.appendChild(hint);
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Recorded sounds'; el.appendChild(h2);
+      const note=document.createElement('div');
+      note.className='hint'; note.style.lineHeight='1.5';
+      note.textContent='The ⭐ Presets tab saves settings only (pads, effects, visuals) — not sounds. Back up or share the recorded sounds here.';
+      el.appendChild(note);
+      const krow=document.createElement('div'); krow.className='chips';
+      krow.appendChild(chip('💾 Save sounds to a file',false,exportKit));
+      krow.appendChild(chip('📂 Load sounds from a file',false,importKit));
+      el.appendChild(krow);
+    },
+    // 🎛️ Sound tab
+    buildSound(el){
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(makeToggle('Reverb','reverb',applyReverb));
+      el.appendChild(makeToggle('Echo',  'echo',  applyEcho));
+      el.appendChild(makeToggle('Mute',  'mute',  applyVolume));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      const th=document.createElement('div'); th.className='ctlh'; th.textContent='Pad colours'; el.appendChild(th);
+      const tc=document.createElement('div'); tc.className='chips';
+      for(const k in PADTHEMES)
+        tc.appendChild(chip(PADTHEMES[k].label,SETTINGS.theme===k,()=>{
+          setTheme(k); restyle(); rebuildVis(); }));
+      el.appendChild(tc);
+      el.appendChild(makeSlider({key:'padFill',label:'Pad colour strength',
+        min:0.2,max:0.9,step:0.05,dp:2,onChange:restyle}));
+      el.appendChild(makeToggle('Icons on pads','showLabels',()=>{ buildBands(); restyle(); }));
+      appendBgControl(el);
+      el.appendChild(makeChips('When a pad is hit','pressFx',PRESSFX_OPTS));
+    },
+    onCell(col,row){
+      pokeSim();
+      const idx=padOf(col,row);
+      if(editMode){ openEditor(idx); return; }
+      playPad(idx); fxCell(col,row);
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      applyLayout();
+      this.reset();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      if(editMode&&SETTINGS.locked) setEditMode(false);   // lock always wins
+      // re-style fresh cells whenever the framework rebuilt the band grid
+      const first=bandsEl.firstChild;
+      if(first&&!first._styled) restyle();
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

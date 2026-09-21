@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Prototype — grouped panel controls</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+/* framework.css opens with html,body{height:100%;overflow:hidden}. Any page that
+   loads it without being an activity is CLIPPED, not scrolled. Undo it. */
+html,body{height:auto;overflow:auto;background:#07080b}
+body{font-family:sans-serif;color:#fff;padding:20px 24px 60px}
+
+h1{font-size:22px;margin-bottom:4px}
+.sub{color:rgba(255,255,255,0.72);font-size:15px;margin-bottom:18px;max-width:980px;line-height:1.5}
+.bar{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start;
+  background:#11131a;border:1px solid rgba(255,255,255,0.18);border-radius:12px;
+  padding:14px 16px;margin-bottom:22px}
+.bar h2{font-size:13px;text-transform:uppercase;letter-spacing:0.08em;
+  color:rgba(255,255,255,0.6);margin-bottom:8px;font-weight:700}
+.opt{display:flex;gap:8px;flex-wrap:wrap}
+.opt button{font:inherit;font-size:14px;padding:8px 12px;border-radius:8px;cursor:pointer;
+  background:#1b1e27;color:#fff;border:2px solid rgba(255,255,255,0.25)}
+.opt button.on{border-color:#8fb4ff;background:#28324a}
+.swatch{width:14px;height:14px;border-radius:3px;display:inline-block;
+  margin-right:7px;vertical-align:-2px;border:1px solid rgba(255,255,255,0.35)}
+
+.cols{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
+.col{flex:0 0 auto}
+.col > .cap{font-size:14px;font-weight:700;margin-bottom:8px;color:#fff}
+.col > .cap span{display:block;font-weight:400;font-size:13px;
+  color:rgba(255,255,255,0.65);margin-top:3px;max-width:420px;line-height:1.45}
+
+/* A real settings strip, at its real width and colour. */
+.strip{width:460px;background:#0c0d12;border:1px solid var(--line);border-radius:10px;
+  padding:22px 24px;max-height:78vh;overflow-y:auto;
+  scrollbar-width:auto;scrollbar-color:var(--line-strong) transparent}
+
+/* ── what is being trialled ────────────────────────────────────────────────
+   .gbox is the generalised .tabpanel: a container that says "these controls
+   belong to the heading above". Colours come from two variables so they can be
+   swapped live from the bar at the top. */
+:root{--gp-bg:rgba(255,255,255,0.12);--gp-line:rgba(255,255,255,0.55)}
+.gbox{background:var(--gp-bg);border:2px solid var(--gp-line);
+  border-radius:var(--radius);
+  padding:calc(10px * var(--ui-scale)) calc(12px * var(--ui-scale)) calc(2px * var(--ui-scale));
+  margin-bottom:var(--gap)}
+.gbox > .ctlh:first-child,.gbox > .row:first-child{margin-top:2px}
+/* attached: the heading sits on top of the box, like the Access tab row does */
+.sectn.attached{margin-bottom:0}
+.gbox.attached{border-top-left-radius:0}
+/* the tabbed variant re-uses the framework's own tab classes, recoloured */
+.chips.tabs .chip.active{background:var(--gp-bg);border-color:var(--gp-line);
+  border-bottom-color:var(--gp-bg)}
+.tabpanel{background:var(--gp-bg);border-color:var(--gp-line)}
+</style>
+</head>
+<body>
+
+<h1>Grouping the panes — four shapes, side by side</h1>
+<p class="sub">
+  The Bubbles pane, as it is now and as three grouped alternatives. Real
+  <code>framework.css</code>, real control markup, real strip width (460&nbsp;px) and
+  real strip colour (<code>#0c0d12</code>). Nothing here is wired to sound — it is
+  for judging shape and colour only. Change the panel colour and the menu size
+  from the bar below and everything updates at once.
+</p>
+
+<div class="bar">
+  <div>
+    <h2>Group panel colour</h2>
+    <div class="opt" id="colOpts"></div>
+  </div>
+  <div>
+    <h2>Menu size</h2>
+    <div class="opt" id="scaleOpts"></div>
+  </div>
+</div>
+
+<div class="cols" id="cols"></div>
+
+<script>
+// ── the pane's real content, as data ─────────────────────────────────────────
+const CHIPS = (label, opts, active) =>
+  `<div><div class="ctlh">${label}</div><div class="chips">` +
+  opts.map(o => `<div class="chip${o === active ? ' active' : ''}">${o}</div>`).join('') +
+  `</div></div>`;
+
+const SLIDER = (label, val, pos) =>
+  `<div class="row"><div class="rowhead"><label>${label}</label>` +
+  `<span class="val">${val}</span></div>` +
+  `<input type="range" min="0" max="100" value="${pos}"></div>`;
+
+const MODE = ['✨ Free pop', '♫ Song bubbles'];
+const GOALS = ['Off', '🌈 Fill the rainbow', '🎯 Pop the colour'];
+const DRIFT = ['↑ Floating up', '→ Drifting across', '↓ Falling like snow'];
+
+// ── A. today ────────────────────────────────────────────────────────────────
+const A = `
+  ${CHIPS('Bubbles', MODE, MODE[0])}
+  ${CHIPS('Little goals', GOALS, GOALS[2])}
+  ${SLIDER('Pops to fill the meter', '20', 100)}
+  ${CHIPS('Drift', DRIFT, DRIFT[2])}
+  ${SLIDER('Drift speed', '1.00', 100)}
+  ${SLIDER('Bubble size', '1.00', 100)}
+  ${SLIDER('How many bubbles', '1.00', 100)}
+`;
+
+// ── B. chips for the mode, group boxes for what belongs together ────────────
+// "Drift and below" is NOT one group: Drift speed belongs to Drift, but bubble
+// size and count are properties of the bubbles whichever way they move.
+const B = `
+  ${CHIPS('Bubbles', MODE, MODE[0])}
+  <div class="sectn attached">Little goals</div>
+  <div class="gbox attached">
+    <div class="chips">${GOALS.map(o => `<div class="chip${o === GOALS[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Pops to fill the meter', '20', 100)}
+  </div>
+  <div class="sectn attached">Drift</div>
+  <div class="gbox attached">
+    <div class="chips">${DRIFT.map(o => `<div class="chip${o === DRIFT[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Drift speed', '1.00', 100)}
+  </div>
+  <div class="sectn attached">The bubbles</div>
+  <div class="gbox attached">
+    ${SLIDER('Bubble size', '1.00', 100)}
+    ${SLIDER('How many bubbles', '1.00', 100)}
+  </div>
+`;
+
+// ── C. the mode as TABS, everything else inside the tab panel ───────────────
+const C = `
+  <div class="chips tabs">
+    ${MODE.map(o => `<div class="chip${o === MODE[0] ? ' active' : ''}">${o}</div>`).join('')}
+  </div>
+  <div class="tabpanel">
+    <div class="ctlh">Little goals</div>
+    <div class="chips">${GOALS.map(o => `<div class="chip${o === GOALS[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Pops to fill the meter', '20', 100)}
+    <div class="ctlh">Drift</div>
+    <div class="chips">${DRIFT.map(o => `<div class="chip${o === DRIFT[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Drift speed', '1.00', 100)}
+    ${SLIDER('Bubble size', '1.00', 100)}
+    ${SLIDER('How many bubbles', '1.00', 100)}
+  </div>
+`;
+
+// ── D. both, because they are answering different questions ─────────────────
+// Tabs frame the MODE; group boxes group CONTROLS. C alone puts the whole pane
+// in one container, which frames the mode but groups nothing inside it.
+const D = `
+  <div class="chips tabs">
+    ${MODE.map(o => `<div class="chip${o === MODE[0] ? ' active' : ''}">${o}</div>`).join('')}
+  </div>
+  <div class="tabpanel">
+    <div class="ctlh">Little goals</div>
+    <div class="gbox">
+      <div class="chips">${GOALS.map(o => `<div class="chip${o === GOALS[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+      ${SLIDER('Pops to fill the meter', '20', 100)}
+    </div>
+    <div class="ctlh">Drift</div>
+    <div class="gbox">
+      <div class="chips">${DRIFT.map(o => `<div class="chip${o === DRIFT[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+      ${SLIDER('Drift speed', '1.00', 100)}
+    </div>
+    <div class="ctlh">The bubbles</div>
+    <div class="gbox">
+      ${SLIDER('Bubble size', '1.00', 100)}
+      ${SLIDER('How many bubbles', '1.00', 100)}
+    </div>
+  </div>
+`;
+
+const SONG = ['Twinkle', 'Frère Jacques', 'Old MacDonald'];
+
+// ── E. THE AGREED RULE, on Bubbles ──────────────────────────────────────────
+// A tab holds ONLY what is contextual to that mode; everything shared lives
+// outside, in its own group box.
+//
+// Little goals turns out to be a FREE POP setting, not a shared one - in song
+// mode "Pop the colour" can target a colour the song never plays, which is a
+// goal that can never be completed. So it belongs in this tab, and both tabs
+// now have something behind them.
+const E = `
+  <div class="chips tabs">
+    ${MODE.map(o => `<div class="chip${o === MODE[0] ? ' active' : ''}">${o}</div>`).join('')}
+  </div>
+  <div class="tabpanel">
+    <div class="ctlh">Little goals</div>
+    <div class="chips">${GOALS.map(o => `<div class="chip${o === GOALS[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Pops to fill the meter', '20', 100)}
+  </div>
+  <div class="sectn attached">Drift</div>
+  <div class="gbox attached">
+    <div class="chips">${DRIFT.map(o => `<div class="chip${o === DRIFT[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Drift speed', '1.00', 100)}
+  </div>
+  <div class="sectn attached">The bubbles</div>
+  <div class="gbox attached">
+    ${SLIDER('Bubble size', '1.00', 100)}
+    ${SLIDER('How many bubbles', '1.00', 100)}
+  </div>
+`;
+
+// ── F. the same pane with the OTHER tab selected
+const F = `
+  <div class="chips tabs">
+    ${MODE.map(o => `<div class="chip${o === MODE[1] ? ' active' : ''}">${o}</div>`).join('')}
+  </div>
+  <div class="tabpanel">
+    <div class="ctlh">Song</div>
+    <div class="chips">${SONG.map(o => `<div class="chip${o === SONG[0] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    <div class="ctlh">Add your own song</div>
+    <div class="chips"><div class="chip">📂 Load a song file…</div></div>
+  </div>
+  <div class="sectn attached">Drift</div>
+  <div class="gbox attached">
+    <div class="chips">${DRIFT.map(o => `<div class="chip${o === DRIFT[2] ? ' active' : ''}">${o}</div>`).join('')}</div>
+    ${SLIDER('Drift speed', '1.00', 100)}
+  </div>
+  <div class="sectn attached">The bubbles</div>
+  <div class="gbox attached">
+    ${SLIDER('Bubble size', '1.00', 100)}
+    ${SLIDER('How many bubbles', '1.00', 100)}
+  </div>
+`;
+
+const VARIANTS = [
+  ['A — today', 'The flat list, for comparison.', A],
+  ['E — Free pop selected', 'The tab holds what only Free pop has: <b>Little goals</b>. Everything shared — Drift, and the bubbles themselves — sits outside in its own box.', E],
+  ['F — Song bubbles selected', 'The same pane, other tab. The song picker and the importer are song-only, so they sit behind the tab; the shared groups below do not move.', F],
+  ['B — no tabs, group boxes only', 'The alternative for panes where only one mode has extras: keep the mode as a chip pair and let the boxes do the separating.', B],
+];
+
+const cols = document.getElementById('cols');
+cols.innerHTML = VARIANTS.map(([t, d, html]) =>
+  `<div class="col"><div class="cap">${t}<span>${d}</span></div>` +
+  `<div class="strip">${html}</div></div>`).join('');
+
+// ── the two things to choose ─────────────────────────────────────────────────
+// "Slightly darker grey than it is now" - so a ladder that steps down gently
+// from today rather than jumping to a black well. The strip behind is #0c0d12.
+const COLOURS = [
+  ['Today (white 12%)', 'rgba(255,255,255,0.12)', 'rgba(255,255,255,0.55)'],
+  ['A little darker (white 8%)', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.45)'],
+  ['Darker still (white 5%)', 'rgba(255,255,255,0.05)', 'rgba(255,255,255,0.40)'],
+  ['Below the strip (black 20%)', 'rgba(0,0,0,0.20)', 'rgba(255,255,255,0.38)'],
+  ['A well (black 35%)', 'rgba(0,0,0,0.35)', 'rgba(255,255,255,0.42)'],
+  ['Cool tint', 'rgba(143,180,255,0.09)', 'rgba(143,180,255,0.50)'],
+];
+const colOpts = document.getElementById('colOpts');
+colOpts.innerHTML = COLOURS.map(([n, bg], i) =>
+  `<button data-i="${i}"><span class="swatch" style="background:${bg}"></span>${n}</button>`).join('');
+function setCol(i) {
+  const [, bg, line] = COLOURS[i];
+  document.documentElement.style.setProperty('--gp-bg', bg);
+  document.documentElement.style.setProperty('--gp-line', line);
+  [...colOpts.children].forEach((b, j) => b.classList.toggle('on', j === i));
+}
+colOpts.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (b) setCol(+b.dataset.i);
+});
+
+// Menu size matters: a layout that breaks at 1.5 is a broken layout.
+const SCALES = [0.8, 1, 1.25, 1.5];
+const scaleOpts = document.getElementById('scaleOpts');
+scaleOpts.innerHTML = SCALES.map((s, i) =>
+  `<button data-s="${s}">${Math.round(s * 100)}%</button>`).join('');
+function setScale(s) {
+  document.documentElement.style.setProperty('--ui-scale', s);
+  [...scaleOpts.children].forEach(b => b.classList.toggle('on', +b.dataset.s === s));
+}
+scaleOpts.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (b) setScale(+b.dataset.s);
+});
+
+setCol(2);
+setScale(1);
+</script>
+</body>
+</html>

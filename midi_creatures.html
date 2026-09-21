@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Drift – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="midi.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Creatures — every note hatches something that lives and sings.
+   Design: PHASE-9-MIDI.md. Shares midi.js with the other MIDI apps.
+
+   THE IDEA: a sound that is a THING is easier to attend to than a sound that is
+   an event. Joint attention is a named goal in this work, and it is far easier
+   to share attention on a creature — "look at yours, the big blue one" — than on
+   a note that has already gone. So a press hatches something that stays on the
+   screen and sings the note it was born with, in its own time, for as long as it
+   is alive.
+
+   It is generative the way Loop Garden is, but the music comes from a POPULATION
+   rather than a wheel: they drift out of step with each other, so a handful of
+   notes becomes a slowly shifting texture with nobody playing.
+
+   HOLDING A KEY GROWS YOURS, which gives sustained pressure something to do and
+   makes a bigger creature that sings lower and louder. A TOUCH hatches one where
+   it is touched.
+
+   Cleared and redrawn every frame, never faded toward the background — a fade
+   does not converge on an accelerated canvas. See APPS.md on Soundscape.
+*/
+const Anim = (function(){
+
+  let screen=null, W=0, H=0;
+  const pond=[];
+  const BLEND=MIDIIN.BLEND;
+  const paint=MIDIIN.makePaint();
+  const held=new Map();
+  let hushed=false;
+
+  const SING = { '4.5':{label:'Calm'}, '2.6':{label:'Chatty'}, '1.4':{label:'Busy'} };
+  const LIFE = { '20':{label:'Short lives'}, '45':{label:'Long lives'},
+                 '120':{label:'Very long lives'}, '99999':{label:'Forever'} };
+
+  /* FOUR ABSTRACT LOOKS, and not one of them has a face.
+     The app was a pond with fish in it: 🐟 on the tab, Fish as the default, eyes
+     drawn on three of the four looks. Two of the looks were already abstract
+     underneath - the drawing was fine, the framing was doing the damage. Now
+     nothing here is an animal, so a fifteen-year-old is not being shown
+     cartoon fish. Old setting values fall back to Motes.                     */
+  /* A NOTE HATCHES A SWARM, and a look is how the swarm is DRAWN.
+     Third pass. Abstract was right, small was right, and it was still "just
+     circles in slightly different forms" - because all four looks drew the same
+     dot in four arrangements. The behaviour was the missing half: eight to
+     twenty agents per note, each steering by the three flocking rules against
+     its own group, so the shape on screen is something the swarm is DOING
+     rather than a shape anything was drawn as.
+
+     Borrowed from `flock.html`, which had already solved the rendering: a
+     velocity-aligned streak, a pulsing glow, a tail with a bright head. Threads
+     is the one that is ours - lines between near neighbours, so the silhouette
+     is a web rather than a cloud of points.
+
+     `f` is the flocking character of a look and is NOT exposed: cohesion,
+     separation, alignment and speed together are what makes a murmuration a
+     murmuration, and a therapist has no reason to be handed four more sliders. */
+  const LOOK = {
+    murmur: {label:'🜁 Murmuration', render:'streak',
+      f:{coh:1.45, sep:1.05, ali:2.15, spd:1.6},  params:[
+      ['many','How many',8,40,24], ['len','Streak',0.3,3,1.4], ['tight','Togetherness',0.15,3,1]]},
+    fire:   {label:'🪰 Fireflies',   render:'glow',
+      f:{coh:0.30, sep:0.66, ali:0.50, spd:0.5},  params:[
+      ['many','How many',3,20,10], ['blink','Blink',0,2.5,1.2], ['wander','Wander',0.2,3.5,1]]},
+    // EMBERS WAS A SECOND MURMURATION - a tail and a head is the same picture a
+    // streak makes. It is now the thing it is named after: barely flocking at
+    // all, rising, and flickering hard, so it reads as sparks off a fire rather
+    // than as birds.
+    embers: {label:'🔥 Embers',      render:'spark',
+      f:{coh:0.10, sep:0.30, ali:0.18, spd:0.75}, params:[
+      ['many','How many',5,26,15], ['rise','Rise',0.2,3,1.2], ['flick','Flicker',0,2.5,1.3]]},
+    // Threads was cut on 2026-09-02. A web of lines between neighbours was a
+    // good idea that never came right: three attempts at making it crisp, and it
+    // still read as blurry on a screen. Three looks that work beat four with a
+    // dud in the set. Its render path is gone with it.
+  };
+  const MAXAG = 40;
+
+  const sing = () => +SETTINGS.singEvery || 2.6;
+  const life = () => +SETTINGS.lifespan || 45;
+  const look = () => LOOK[SETTINGS.look] || LOOK.murmur;
+  const rnd = (a,b) => { const x=Math.sin(a*127.1+b*311.7)*43758.5453; return x-Math.floor(x); };
+  const BR   = () => 0.35+0.9*(+SETTINGS.bright);
+  const SZ   = () => 0.45+1.5*(+SETTINGS.size);
+  const DRIFT= () => +SETTINGS.drift;
+
+  function pv(key){
+    const o=SETTINGS.sp && SETTINGS.sp[SETTINGS.look], v=o?o[key]:null;
+    if(v!=null) return +v;
+    const d=(look().params||[]).find(p=>p[0]===key);
+    return d?d[4]:1;
+  }
+  function setPv(key,val){
+    SETTINGS.sp=SETTINGS.sp||{};
+    SETTINGS.sp[SETTINGS.look]=Object.assign({},SETTINGS.sp[SETTINGS.look],{[key]:val});
+    saveSettings();
+  }
+  const WHOLE={fins:1,arms:1,motes:1,seg:1};
+
+  /* ── A note hatches one ────────────────────────────────────────────────
+     It appears WHERE THE NOTE IS: across from the range that surface has been
+     playing in, up from how hard it was hit. A touch has a place of its own, and
+     midi.js hands that back through PX/PY, so it hatches under the finger.   */
+  function hatch(ev){
+    const c={ id:ev.id, note:ev.note, ch:ev.ch, col:ev.col, hue:ev.hue, vel:ev.force,
+              x:MIDIIN.PX(ev), y:1-MIDIIN.PY(ev),
+              vx:(Math.random()-0.5)*0.03, vy:(Math.random()-0.5)*0.02,
+              // SMALL. It was 0.014-0.040 of the screen and grew from there,
+              // which is where the tacky came from.
+              size:0.004+0.009*ev.force, grow:true, age:0,
+              next:0.4+Math.random()*sing(), wob:Math.random()*6.3,
+              trail:[], sung:0, ag:[] };
+    // The swarm is made once, at full strength, and only the first `many` of
+    // them are ever used - so moving the slider cannot leave half a group.
+    for(let k=0;k<MAXAG;k++){
+      const a=Math.random()*Math.PI*2, d=Math.random()*0.02;
+      c.ag.push({ x:c.x+Math.cos(a)*d, y:c.y+Math.sin(a)*d,
+                  vx:Math.cos(a)*0.004, vy:Math.sin(a)*0.004,
+                  ph:Math.random()*6.3 });
+    }
+    hushed=false;
+    pond.push(c); held.set(ev.id,c);
+    if(pond.length>48) pond.shift();
+    MIDIIN.pluck(ev.col, MIDIIN.level(ev.force));
+    refreshRailButtons();
+  }
+  function letGo(ev){ const c=held.get(ev.id); if(c){ c.grow=false; held.delete(ev.id); } }
+
+  return {
+    appLabel:'✨ Drift',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    onCell(){},
+    themes:{ dark:{label:'🎵 Notes', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                             [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    defaults:Object.assign({}, MIDIIN.DEFAULTS, {
+      theme:'dark', look:'murmur', singEvery:2.6, lifespan:45,
+      bright:0.7, size:0.55, drift:0.5,
+    }),
+    schema:[],
+
+    railButtons:[
+      // The pond sings on its own, so a hush has to stop it singing - otherwise
+      // the button is inaudible. The next one hatched wakes it.
+      { id:'crsil', icon:()=>hushed?'▶️':'🔇', label:()=>hushed?'Let them sing':'Silence',
+        title:()=>hushed?'Let them sing again':'Hush them',
+        onClick(){ hushed=!hushed; MIDIIN.silence(); refreshRailButtons(); } },
+      { id:'crwipe', icon:()=>'🧽', label:'Wipe', title:()=>'Clear the picture',
+        show:()=>MIDIIN.PERSIST()>0.01,
+        onClick(){ paint.clear(); } },
+      { id:'crclr', icon:()=>'🧹', label:'Empty', title:()=>'Clear them all away',
+        show:()=>pond.length>0,
+        onClick(){ pond.length=0; held.clear(); refreshRailButtons(); } },
+    ],
+
+    buildApp(el){
+      MIDIIN.buildConnect(el);
+      const labels={}; for(const k in LOOK) labels[k]={label:LOOK[k].label};
+      el.appendChild(makeChips('Look','look',labels,()=>{
+        paint.clear();
+        if(currentQuickMode==='visuals') buildVisualsPanel(); }));
+      el.appendChild(makeChips('How often they sing','singEvery',SING,null));
+      el.appendChild(makeChips('How long they live','lifespan',LIFE,null));
+      MIDIIN.snapChips(el);
+      el.appendChild(MIDIIN.note('Every note sets a swarm adrift that sings in its own time. Holding a key '
+        + 'spreads yours: bigger sings lower.'));
+    },
+
+    buildInstrument(el){ MIDIIN.buildNotesPane(el); },
+
+    buildVisuals(el){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Colour';
+      el.appendChild(h); MIDIIN.paletteChips(el);
+
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Light';
+      el.appendChild(h2);
+      el.appendChild(makeSlider({key:'bright',label:'Brightness',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeSlider({key:'size',label:'Size',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      // NO LINGER HERE. It was on the pane and never read - the app's marks are
+      // the swarms, and how long THEY last is "How long they live" on the first
+      // tab. Two controls for one thing, one of them inert.
+      MIDIIN.persistSlider(el, ()=>refreshRailButtons());
+      el.appendChild(makeSlider({key:'drift',label:'How much they move',min:0,max:1,step:0.05,dp:2,
+        fmt:v=>v<0.01?'still':Math.round(v*100)+'%'}));
+      el.appendChild(MIDIIN.note('Turn the movement right down and they stay where they started.'));
+
+      const h3=document.createElement('div'); h3.className='sectn';
+      h3.textContent=look().label; el.appendChild(h3);
+      for(const p of look().params) el.appendChild(styleSlider(p[0],p[1],p[2],p[3],p[4]));
+      el.appendChild(MIDIIN.note('These belong to this look alone — every look has its own three.'));
+    },
+
+    init(cv){
+      screen=cv.getContext('2d');
+      MIDIIN.setKnobs([{key:'bright',label:'Brightness'},{key:'size',label:'Size'},
+                       {key:'drift',label:'How much they move'}]);
+      MIDIIN.attach({ onHit:hatch, onRelease:letGo });
+      this.reset();
+    },
+
+    resize(){ this.reset(); },
+
+    // A touch hatches one, so it is never a dead screen with no instrument.
+    splat(x,y,dx,dy,color,opts){ MIDIIN.splatTouch(x,y,opts,300); },
+
+    frame(dt){
+      if(!screen) return;
+      W=canvas.width; H=canvas.height;
+      MIDIIN.ease(dt);
+      const S=Math.min(W,H), mode=SETTINGS.look, dr=DRIFT();
+
+      const real=screen;
+      screen=paint.begin(W,H);
+      screen.globalCompositeOperation=BLEND;
+
+      for(let i=pond.length-1;i>=0;i--){
+        const c=pond[i];
+        c.age+=dt;
+        const left=1-c.age/life();
+        if(left<=0){ pond.splice(i,1); refreshRailButtons(); continue; }
+
+        if(c.grow) c.size=Math.min(0.085, c.size+dt*0.030);
+
+        // drift, turning away from the walls rather than bouncing off them
+        c.wob+=dt*1.7;
+        c.vx+=Math.sin(c.wob*0.7)*0.010*dt; c.vy+=Math.cos(c.wob)*0.008*dt;
+        const m=c.size*1.6;
+        if(c.x<m) c.vx+=0.06*dt; if(c.x>1-m) c.vx-=0.06*dt;
+        if(c.y<m) c.vy+=0.06*dt; if(c.y>1-m) c.vy-=0.06*dt;
+        c.vx*=0.995; c.vy*=0.995;
+        c.x+=c.vx*dt*60*dr; c.y+=c.vy*dt*60*dr;
+        c.x=Math.max(0.02,Math.min(0.98,c.x)); c.y=Math.max(0.02,Math.min(0.98,c.y));
+
+        // it sings in its own time, so a population drifts out of step by itself
+        c.next-=dt;
+        if(c.next<=0 && !hushed){
+          c.next=sing()*(0.6+Math.random()*0.9);
+          const drop=Math.round((c.size-0.014)/0.020);      // bigger sings lower
+          MIDIIN.pluck(MIDIIN.stepBy(c.note,c.ch,-drop),
+                       MIDIIN.level(c.vel, 0.55*Math.max(0.25,left)));
+          c.sung=1;
+        }
+        c.sung=Math.max(0,c.sung-dt*1.8);
+
+        const px=c.x*W, py=c.y*H;
+        const col=MIDIIN.colourOf(c.note,c.ch,c.hue).join(',');
+        const a=Math.max(0.12,left)*(0.55+0.45*c.sung)*BR();
+        const R=look().render, FL=look().f;
+        const n=Math.min(MAXAG, Math.round(pv('many')));
+        // how wide the swarm sits: this is what holding a key grows, instead of
+        // one mark getting bigger, which is what looked tacky
+        const spread=(0.030+2.1*c.size)*SZ()*(0.7+0.030*n);
+        // A FLOOR ON THE MARK. At the bottom of Size this came out under a
+        // pixel and clamped to 0.7, which is barely visible on a projector - the
+        // slider had most of its travel below the point where anything could be
+        // seen. The range starts where the mark is already legible.
+        const unit=Math.max(1.25, S*0.0034*SZ());
+
+        /* ── the three rules, against this note's own group only ───────────*/
+        let mx=0, my=0, mvx=0, mvy=0;
+        for(let k=0;k<n;k++){ const g=c.ag[k]; mx+=g.x; my+=g.y; mvx+=g.vx; mvy+=g.vy; }
+        mx/=n; my/=n; mvx/=n; mvy/=n;
+        // Togetherness pulls the group in AND lets it spread: driving cohesion
+        // alone barely showed, because separation was still holding them apart.
+        const tight=(R==='streak'?pv('tight'):1);
+        const loose=(R==='streak'? 1/Math.max(0.25,pv('tight')) : 1);
+        const sepD=spread*0.42;
+        const spd=0.0016*FL.spd*(0.35+0.9*dr);
+        for(let k=0;k<n;k++){
+          const g=c.ag[k];
+          // cohesion, toward the group and toward the note's own drifting point
+          g.vx += ((mx-g.x)*0.55+(c.x-g.x)*0.45)*FL.coh*tight*dt*2.2;
+          g.vy += ((my-g.y)*0.55+(c.y-g.y)*0.45)*FL.coh*tight*dt*2.2;
+          // separation
+          for(let q=0;q<n;q++){
+            if(q===k) continue;
+            const h=c.ag[q], ddx=g.x-h.x, ddy=g.y-h.y;
+            const d2=ddx*ddx+ddy*ddy;
+            if(d2>0 && d2<sepD*sepD){
+              const d=Math.sqrt(d2);
+              g.vx += (ddx/d)*FL.sep*loose*dt*0.22; g.vy += (ddy/d)*FL.sep*loose*dt*0.22;
+            }
+          }
+          // alignment
+          g.vx += (mvx-g.vx)*FL.ali*dt*1.4;
+          g.vy += (mvy-g.vy)*FL.ali*dt*1.4;
+          // a little wander of its own, and embers want to rise
+          g.ph += dt*(1.4+0.9*(k%5));
+          const wd=(R==='glow'?pv('wander'):0.55);
+          g.vx += Math.cos(g.ph*1.7+k)*0.00040*wd;
+          g.vy += Math.sin(g.ph*1.3+k)*0.00040*wd;
+          if(R==='spark') g.vy -= 0.00105*pv('rise');
+          const sp=Math.hypot(g.vx,g.vy);
+          if(sp>spd){ g.vx=g.vx/sp*spd; g.vy=g.vy/sp*spd; }
+          g.x+=g.vx*dt*60; g.y+=g.vy*dt*60;
+          // A SMOOTHED HEADING, for drawing only. The steering changes a
+          // agent's velocity every frame and the speed cap clips it, so a streak
+          // drawn straight off `v` jitters in length and angle each frame - which
+          // is the flicker. The physics keeps the real velocity; the picture uses
+          // a lagged copy of it.
+          g.dx=(g.dx||g.vx)+(g.vx-(g.dx||g.vx))*Math.min(1,dt*7);
+          g.dy=(g.dy||g.vy)+(g.vy-(g.dy||g.vy))*Math.min(1,dt*7);
+        }
+
+        /* ── four renderings, and they are not the same mark ───────────────*/
+        if(R==='streak'){
+          // velocity-aligned segments: the flock's DIRECTION is the picture
+          screen.lineCap='round';
+          screen.lineWidth=Math.max(0.8, unit*1.1);
+          for(let k=0;k<n;k++){
+            const g=c.ag[k];
+            const kk=(0.06+0.34*pv('len'))*60;
+            screen.strokeStyle='rgba('+col+','+Math.min(1,a*0.85).toFixed(3)+')';
+            screen.beginPath();
+            screen.moveTo((g.x-g.dx*kk)*W,(g.y-g.dy*kk)*H);
+            screen.lineTo(g.x*W,g.y*H);
+            screen.stroke();
+          }
+        } else if(R==='glow'){
+          // a soft pulse and a crisp core, blinking out of step
+          for(let k=0;k<n;k++){
+            const g=c.ag[k];
+            const pulse=0.5+0.5*Math.sin(g.ph*1.6+k*2.1);
+            const blink=1-pv('blink')*0.8*(0.5+0.5*Math.sin(g.ph*0.9+k*1.7));
+            const aa=Math.min(1, a*(0.35+0.65*pulse)*blink);
+            if(aa<0.02) continue;
+            const rr=unit*(2.6+2.2*pulse);
+            const rg=screen.createRadialGradient(g.x*W,g.y*H,0,g.x*W,g.y*H,rr);
+            rg.addColorStop(0,'rgba('+col+','+(aa*0.55).toFixed(3)+')');
+            rg.addColorStop(1,'rgba('+col+',0)');
+            screen.fillStyle=rg;
+            screen.beginPath(); screen.arc(g.x*W,g.y*H,rr,0,Math.PI*2); screen.fill();
+            screen.fillStyle='rgba('+col+','+aa.toFixed(3)+')';
+            screen.beginPath(); screen.arc(g.x*W,g.y*H,unit*0.75,0,Math.PI*2); screen.fill();
+          }
+        } else if(R==='spark'){
+          // A SPARK GOES OUT AND COMES BACK. Short tail, hard flicker, and it
+          // dims as it rises - the tail-and-head of the old version was the same
+          // picture Murmuration draws, which is why the two looked alike.
+          screen.lineCap='round';
+          const fl=pv('flick');
+          for(let k=0;k<n;k++){
+            const g=c.ag[k];
+            const tw=0.5+0.5*Math.sin(g.ph*4.4+k*2.7);
+            const burn=Math.max(0, 1-fl*0.85*tw);
+            const high=Math.max(0, Math.min(1, (c.y-g.y)*5.5));   // dimmer the higher it gets
+            const aa=Math.min(1, a*burn*(1-0.55*high));
+            if(aa<0.02) continue;
+            const kk=(0.03+0.10*pv('rise'))*60;
+            screen.lineWidth=Math.max(0.6, unit*0.55);
+            screen.strokeStyle='rgba('+col+','+(aa*0.22).toFixed(3)+')';
+            screen.beginPath();
+            screen.moveTo((g.x-g.dx*kk)*W,(g.y-g.dy*kk)*H);
+            screen.lineTo(g.x*W,g.y*H); screen.stroke();
+            screen.fillStyle='rgba('+col+','+aa.toFixed(3)+')';
+            screen.beginPath();
+            screen.arc(g.x*W,g.y*H,unit*(0.55+0.55*tw)*(1-0.4*high),0,Math.PI*2);
+            screen.fill();
+          }
+        }
+      }
+      screen.globalCompositeOperation='source-over';
+      screen=real;
+      paint.stamp(dt);
+      screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      screen.fillRect(0,0,W,H);
+      paint.show(screen);
+      if(pond.length || paint.painting()) pokeSim();
+    },
+
+    reset(){
+      pond.length=0; held.clear(); paint.clear();
+      if(screen){
+        screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        screen.fillRect(0,0,canvas.width,canvas.height);
+      }
+    },
+  };
+
+  /* NOTHING IS DRAWN AS A SOFT BLOB ANY MORE. `blob()` and `body()` were the
+     radial-gradient marks every look used to sit on, and they are what made a
+     thing look like a graphic as soon as it had any size. Every look is points. */
+  function styleSlider(key,label,min,max,def){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    const whole=!!WHOLE[key];
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=whole?1:(max-min)/40; inp.value=pv(key);
+    const show=v=>whole?String(Math.round(v)):Math.round(v/def*100)+'%';
+    val.textContent=show(inp.value);
+    inp.addEventListener('input',()=>{ const v=parseFloat(inp.value); setPv(key,v); val.textContent=show(v); });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
+  }
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

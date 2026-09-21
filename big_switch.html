@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Big Switch Songs – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="songs.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Big Switch Songs — the whole screen is ONE giant button. Every activation
+   (touch anywhere, any keyboard key, or an accessibility switch presenting as
+   Space/Enter) plays the NEXT note or phrase of the song, with a full-screen
+   wash of the note's Boomwhacker colour and a giant note letter. The classic
+   switch-access interaction: full musical agency from a single reliable action.
+
+   Reuses songs.js and the framework's pitched voice engine (pluckNote) — the
+   note grid exists invisibly underneath so pitch/colour mapping stays identical
+   to Song Grid, but no zones are drawn and touch position doesn't matter.
+*/
+const Anim = (() => {
+
+  const SONGS = window.MUSIC_SONGS;   // shared library — see songs.js
+
+  // PATTERNS, AND WHY THEY SUIT THIS APP BETTER THAN SONGS DO.
+  //
+  // In Big Switch the STUDENT supplies the rhythm: one press, one note, at
+  // whatever pace they manage. A song is half pitch and half rhythm, so pressing
+  // through Twinkle at an irregular pace loses half of what makes it Twinkle —
+  // and stopping after eight presses leaves a student mid-phrase, on a note that
+  // wants to go somewhere. A pattern depends only on pitch ORDER, which survives
+  // being played at any speed, and has no wrong place to stop.
+  //
+  // Named for what they sound like, not for what they are: the therapist
+  // choosing one is not necessarily a musician.
+  //
+  // They are generated in the SHAPE OF A SONG — {label, span, bpm, notes} — so
+  // every part of the app downstream (progress, celebrate, repeat, the phrase
+  // splitter) works on them unchanged. They are built HERE rather than in
+  // songs.js on purpose: that file is shared by four apps, and a change in it is
+  // four changes.
+  const PATTERNS={
+    climb: {label:'↗ Climbing'}, fall:  {label:'↘ Falling'},
+    chimes:{label:'🔔 Chimes'},  wander:{label:'〰️ Wandering'},
+    bounce:{label:'🎪 Bouncing'},
+  };
+  const PAT_SPAN=8, PAT_LEN=16;
+  function buildPattern(key){
+    const n=[], S=PAT_SPAN;
+    const push=c=>n.push([Math.max(0,Math.min(S-1,c)),1]);
+    if(key==='climb')  for(let i=0;i<PAT_LEN;i++) push(i%S);
+    else if(key==='fall') for(let i=0;i<PAT_LEN;i++) push(S-1-(i%S));
+    else if(key==='chimes'){
+      // an arpeggio: scale degrees 1, 3, 5 and the octave. Whatever scale is
+      // chosen these are chord tones, so no two of them can clash.
+      const arp=[0,2,4,7,4,2];
+      for(let i=0;i<PAT_LEN;i++) push(arp[i%arp.length]);
+    }
+    else if(key==='wander'){
+      // PENTATONIC: degrees 1,2,3,5,6 — the scale with no semitone clashes in
+      // it, so a random walk cannot land on a wrong note. This is the one for a
+      // student who is exploring rather than following.
+      //
+      // IT REFLECTS AT THE ENDS RATHER THAN CLAMPING, and that is the whole
+      // difference between a wander and a flat line. Clamping meant that once
+      // the walk drifted to the bottom it STAYED there — half of the steps are
+      // downward and each of them just re-clamped to zero — so it drew seven
+      // identical notes along the floor of the screen. The user photographed it.
+      // Reflection turns a step that would leave the scale into a step back into
+      // it, so the index moves on every note and two in a row are never equal.
+      const pent=[0,1,2,4,5,7], top=pent.length-1;
+      let i=1+Math.floor(Math.random()*(top-1));
+      for(let k=0;k<PAT_LEN;k++){
+        push(pent[i]);
+        const step=(Math.random()<0.5?-1:1)*(Math.random()<0.35?2:1);
+        i+=step;
+        if(i<0) i=-i;                       // reflect off the bottom
+        if(i>top) i=2*top-i;                // and off the top
+        i=Math.max(0,Math.min(top,i));      // a double reflection can still overshoot
+      }
+    }
+    else {  // bounce: low, high, low, high — playful and very predictable
+      for(let i=0;i<PAT_LEN;i++) push(i%2 ? S-1-((i/2)|0) : ((i/2)|0));
+    }
+    return {label:PATTERNS[key].label, span:S, bpm:100, notes:n};
+  }
+  let patCache=null, patKey=null;
+  function isPattern(k){ return !!PATTERNS[k]; }
+  // ONE PRESS CAN PLAY THE WHOLE TUNE. For a student who has one reliable
+  // press and cannot repeat it, "one note per press" is a song they will never
+  // reach the end of. This is the Big Mack case the app is named for: press
+  // once, the music happens.
+  const GRAN_OPTS={note:{label:'One note'},phrase:{label:'A whole phrase'},
+                   whole:{label:'The whole tune'}};
+  const SG_SCALES={major:{label:'Major (do-re-mi)'},minor:{label:'Minor'}};
+
+  let pos=0, phrases=[], phrasePos=0, celebrating=false, finished=false, lastHit=0;
+  let playing=false;                  // a whole-tune press is under way
+  let ctx=null, wash=null, washA=0, letterEl=null, progEl=null;
+  // THE SONG BUILDS A PICTURE. Every press drops its note on screen — across by
+  // how far through the song it is, up by its pitch — so the melody draws itself
+  // as the student plays it and twenty presses leave twenty marks behind.
+  //
+  // It replaces a 6px progress bar at the very top of the screen, which a
+  // student looking at the middle never saw, with progress they cannot miss:
+  // the picture reaching the right-hand edge IS the song finishing.
+  //
+  // Marks are held as STATE and redrawn every frame onto a cleared canvas —
+  // never accumulated on the canvas itself. That is the rule this project
+  // learned the hard way (`canvas-fade-never-arrives`, PHASE-11 §12.3): a canvas
+  // used as memory keeps a residue no fade can remove.
+  let marks=[], idleT=0;
+
+  function song(){
+    const k=SETTINGS.song;
+    if(isPattern(k)){
+      // rebuilt only when the choice changes, so Wandering keeps one shape for
+      // the whole run rather than re-rolling under the student every frame
+      if(patKey!==k||!patCache){ patKey=k; patCache=buildPattern(k); }
+      return patCache;
+    }
+    return SONGS[k]||SONGS.twinkle;
+  }
+  function beatSecs(b){ return b*(60/song().bpm)/(SETTINGS.tempo||1); }
+  function total(){ return SETTINGS.granularity==='phrase' ? phrases.length : song().notes.length; }
+  function done(){ return SETTINGS.granularity==='phrase' ? phrasePos : pos; }
+  function whole(){ return SETTINGS.granularity==='whole'; }
+  function setProgress(){ if(progEl) progEl.style.width=(done()/Math.max(1,total())*100)+'%'; }
+
+  let hi=-1;                          // which mark the finishing flourish is on
+  let drawn=0;                        // notes marked this time through the tune
+  // EVERY SCHEDULED NOTE IS CANCELLABLE. A phrase, a whole tune and the
+  // finishing flourish all queue their notes on timers, and changing the song or
+  // the granularity used to reset the COUNTERS while leaving those timers to
+  // fire — so the previous tune carried on playing into the new one, moving
+  // `pos` and dropping marks as it went. The user: "it tries to continue and it
+  // gets confused."
+  //
+  // Nothing here is a real scheduler; it is one array and a helper, and it is
+  // what makes `resetRun()` able to promise that the run is actually over.
+  let timers=[];
+  function later(fn,ms){
+    const id=setTimeout(()=>{ timers=timers.filter(t=>t!==id); fn(); },ms);
+    timers.push(id); return id;
+  }
+  function clearTimers(){ for(const id of timers) clearTimeout(id); timers=[]; }
+  // ONE place that starts a fresh sheet, so a chip, the ⏮ button and a change of
+  // song cannot disagree about what "fresh" means.
+  function resetRun(){
+    clearTimers();
+    pos=0; phrasePos=0; drawn=0; hi=-1;
+    celebrating=false; playing=false; finished=false;
+    marks=[]; washA=0; idleT=0;
+    setProgress();
+    if(letterEl) letterEl.textContent='';
+    pokeSim();
+  }
+  function addMark(col){
+    // THE PICTURE IS THE STUDENT'S TUNE, not everything the app plays. The
+    // finishing flourish runs through playNote too, and every one of its notes
+    // landed at done()/total() = 1 — a stack of dots piled on the right-hand
+    // edge of the drawing the student had just made. Caught by looking at the
+    // screenshot, not by any of the checks, which were all still green.
+    if(celebrating) return;
+    // ACROSS THE SCREEN BY NOTES DRAWN, not by `done()/total()`.
+    //
+    // `done()` counts whatever the granularity counts, and in phrase mode
+    // `phrasePos++` runs the moment the press is handled while the phrase's
+    // notes play on timers afterwards — so every note of a phrase took the x for
+    // AFTER the phrase had finished, and a pattern that is one or two phrases
+    // put all of them in a vertical line against the right-hand edge. The user
+    // photographed it.
+    //
+    // A count of notes actually marked is the same quantity in all three
+    // granularities, and it cannot go backwards, so the picture reads left to
+    // right whatever a press is worth.
+    const t=Math.max(1,song().notes.length);
+    marks.push({u:Math.min(1,drawn/t), v:col/Math.max(1,song().span-1), c:bandRGB255(col), col});
+    drawn++;
+    if(marks.length>400) marks.shift();
+  }
+  // THE FULL-SCREEN FLASH IS RATE-LIMITED, AND THAT IS A SAFETY PROPERTY RATHER
+  // THAN A LOOK — the same call PHASE-9D made about MIDI Weather's lightning,
+  // which was a full-screen additive flash retriggerable at ~2 Hz and is now one
+  // strike per 1.1 s.
+  //
+  // Measured here before it was changed (`probes/phase-14/flash.js`):
+  //
+  //   one flash        0.037 change in relative luminance on the dark default —
+  //                    BELOW the 0.10 that defines a flash, so a single one does
+  //                    not qualify. A light background would raise it.
+  //   pressing fast    6 flashes/s
+  //   one whole tune   10/s
+  //   the flourish     10/s   <- and that one was MINE, at 110 ms a note
+  //
+  // The general flash threshold is THREE per second. The luminance change was
+  // under the limit and the rate was two to three times over it, so the rate is
+  // what gets fixed: one wash per 340 ms, about 2.9/s. A note that arrives
+  // sooner still SOUNDS, still draws its dot and still moves the progress bar —
+  // nothing the student did is discarded, only the screen-sized flash of it.
+  //
+  // `Screen flash` turns it off outright, for a student known to be
+  // photosensitive or simply overwhelmed by it. The dots remain, so the app
+  // still answers every press.
+  const FLASH_GAP=340;
+  let lastWash=-9e9;
+  function flashNote(col,dur){
+    const now=performance.now();
+    if(SETTINGS.screenFlash!==false && now-lastWash>=FLASH_GAP){
+      lastWash=now; wash=bandRGB255(col); washA=0.55;
+    }
+    idleT=0; pokeSim();
+    if(letterEl && SETTINGS.showLetter){
+      letterEl.textContent=NOTES[col]?NOTES[col].label:'';
+      letterEl.style.color='rgb('+wash.join(',')+')';
+      letterEl.classList.remove('pop'); void letterEl.offsetWidth;
+      letterEl.classList.add('pop');
+    }
+  }
+  function playNote(col,beats){
+    pluckNote((col+0.5)/song().span, 0.5, 1);
+    addMark(col);
+    flashNote(col,beats);
+  }
+  function applySong(){
+    if(song().scaleHint && SG_SCALES[song().scaleHint]) SETTINGS.scale=song().scaleHint;
+    SETTINGS.noteCount=song().span;
+    SETTINGS.yAxis='none'; SETTINGS.mode='notes'; SETTINGS.zoneLook='off';
+    saveSettings(); refreshMusic();
+    phrases=window.songPhrases(song());
+    resetRun();
+  }
+  // THE FLOURISH WALKS THE PICTURE THE STUDENT JUST DREW, lighting each dot as
+  // its note sounds. It used to be a chromatic run up the scale — a reward that
+  // had nothing to do with what they had played. Now the ending is a playback of
+  // their own tune: "here is what you made". If there is no picture (the trail
+  // is switched off, or the tune was cleared) it falls back to the scale run,
+  // because a celebration with nothing in it is worse than a generic one.
+  function celebrate(){
+    celebrating=true;
+    const step=110, mine=marks.slice();
+    let span=0;
+    if(mine.length){
+      span=250+mine.length*step;
+      // NO WASH IN THE FLOURISH. It runs at 110 ms a note, which is nine full
+      // screen flashes a second — the worst rate in the app, and introduced by
+      // this very feature. The travelling highlight is a small area of the
+      // screen, so it carries the ending without the strobe.
+      mine.forEach((m,i)=>later(()=>{
+        hi=i;
+        pluckNote((m.col+0.5)/song().span, 0.5, 1);
+        idleT=0; pokeSim();
+      }, 250+i*step));
+    } else {
+      const s=song().span;
+      span=250+s*140;
+      for(let i=0;i<s;i++) later(()=>{ playNote(i,1); }, 250+i*140);
+    }
+    later(()=>{ celebrating=false; hi=-1; pos=0; phrasePos=0;
+      finished=!SETTINGS.loopSong;   // with repeat off, wait for ⏮ before playing again
+      marks=[]; drawn=0;             // a fresh sheet for the next time through
+      setProgress();
+      if(letterEl) letterEl.textContent=''; }, span+1200);
+  }
+  // One activation = one step through the song. Debounced so a two-finger tap
+  // or a bouncy switch doesn't skip notes.
+  function advance(){
+    const now=performance.now();
+    if(celebrating || playing || finished || now-lastHit<180) return;
+    lastHit=now;
+    getAudio(); pokeSim();
+    if(whole()){
+      // The tune plays itself in its own rhythm. Presses during it are ignored
+      // rather than queued or restarting: for the student this mode is for,
+      // "I pressed and the music is happening" has to stay true, and a second
+      // press cutting the first one off would teach the opposite.
+      playing=true;
+      const ns=song().notes; let at=0;
+      for(const [c,b] of ns){
+        later(()=>{ playNote(c,b); pos++; setProgress(); }, at*1000);
+        at+=beatSecs(b);
+      }
+      pos=0;
+      later(()=>{ playing=false; celebrate(); }, at*1000+400);
+      return;
+    }
+    if(SETTINGS.granularity==='phrase'){
+      const ph=phrases[phrasePos]; if(!ph) return;
+      let at=0;
+      for(const [c,b] of ph){
+        later(()=>playNote(c,b), at*1000);
+        at+=beatSecs(b);
+      }
+      phrasePos++;
+      later(setProgress,50);
+      if(phrasePos>=phrases.length) later(celebrate, at*1000+300);
+    } else {
+      const n=song().notes[pos]; if(!n) return;
+      playNote(n[0],n[1]);
+      pos++; setProgress();
+      if(pos>=song().notes.length) later(celebrate,600);
+    }
+  }
+
+  return {
+    appLabel:'🔘 Song',
+    sectionLabel:'Big Switch',
+    lockMode:'notes',
+    noVoices:true,                    // any touch = the next song step, not a pitched zone
+    hideRail:['clear'],
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', song:'twinkle', granularity:'note', tempo:1.0, loopSong:true,
+      // The giant letter is 38vh of text across the middle of the screen. It was
+      // on by default and it dominates the picture the student is drawing, so it
+      // is off unless a therapist asks for it. The toggle was always there.
+      showLetter:false, showTrail:true, screenFlash:true, mode:'notes', paint:false, yAxis:'none', zoneLook:'off',
+      colorMode:'note', scale:'major', noteCount:6, showLabels:false },
+    schema:[],
+    railButtons:[
+      { id:'bsrestart', label:'Restart', icon:()=>'⏮', title:()=>'Restart the song from the beginning',
+        onClick(){ resetRun(); }},
+    ],
+    // 🎵 Songs tab
+    // The app's own tab. Everything here is what THIS app is; none of it is
+    // Register/Scale/Starting note, which is all the Notes tab holds now.
+    // See PHASE-4E-APP-TAB.md.
+    buildApp(el){
+      el.appendChild(makeChips('What it plays','song',
+        Object.assign({},PATTERNS,SONGS),()=>{ applySong(); buildAppPanel(); }));
+      // Changing what a press is worth starts the tune again. It used to reset
+      // two counters and leave the marks, the note count and any queued notes
+      // alone, so the picture carried on from the middle of the previous mode.
+      el.appendChild(makeChips('Each press plays…','granularity',GRAN_OPTS,()=>{
+        resetRun(); buildAppPanel(); }));
+      // The app plays the rhythm in both of these; in "One note" the STUDENT
+      // does, so the slider governs nothing there and is not shown.
+      if(SETTINGS.granularity!=='note')
+        el.appendChild(makeSlider({key:'tempo',
+          label:whole()?'Tune speed':'Phrase speed',min:0.4,max:1.6,step:0.05,dp:2}));
+      el.appendChild(makeToggle('Start again when finished','loopSong'));
+      // A pattern is generated here, so there is nothing to import into it.
+      if(!isPattern(SETTINGS.song))
+        el.appendChild(makeSongImportUI(()=>{ applySong(); buildAppPanel(); }));
+    },
+    // 🎼 Notes — the same in every app.
+    buildInstrument(el){
+      appendTuning(el,refreshMusic,{scales:SG_SCALES,heading:false});
+    },
+    // 🎸 Instrument tab — tuning on top of voice/effects/volume
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeToggle('Giant note letter','showLetter'));
+      el.appendChild(makeToggle('Draw the tune as it plays','showTrail'));
+      // Rate-limited to under three a second whatever this is set to; off is for
+      // a student for whom any of it is too much.
+      el.appendChild(makeToggle('Flash the screen on each note','screenFlash'));
+      appendBgControl(el);
+    },
+    onCell(){ advance(); },   // any touch anywhere counts
+    _washA(){ return washA; },   // probes/phase-14/flash.js counts WASHES, not notes
+    _marks(){ return marks.map(m=>({u:+m.u.toFixed(4), v:+m.v.toFixed(4), col:m.col})); },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!document.getElementById('bsCss')){
+        const st=document.createElement('style'); st.id='bsCss';
+        st.textContent=
+          '#bsLetter{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;'+
+            'font-family:system-ui,sans-serif;font-weight:800;font-size:38vh;pointer-events:none;'+
+            'text-shadow:0 0 6vh rgba(255,255,255,0.25);z-index:3;opacity:0.95}'+
+          '#bsLetter.pop{animation:bsPop 0.9s ease-out}'+
+          '@keyframes bsPop{0%{transform:scale(0.6);opacity:1}100%{transform:scale(1.15);opacity:0.85}}'+
+          // 6px was hard to see at the very top of a big screen. NOTE it lives
+          // inside #surface, which fitSurface() scales — so with the chrome open
+          // or the reach area reduced it ends where the ACTIVITY ends, not at
+          // the screen edge. That is correct, and it is the one way it can look
+          // as though it stops short.
+          '#bsProgress{position:fixed;top:0;left:0;height:10px;width:0;z-index:6;'+
+            'background:linear-gradient(90deg,#f5d117,#3bb54a,#1ca9a9);border-radius:0 3px 3px 0;'+
+            'transition:width 0.25s;pointer-events:none}';
+        document.head.appendChild(st);
+      }
+      if(!letterEl){ letterEl=document.createElement('div'); letterEl.id='bsLetter'; stageEl.appendChild(letterEl); }
+      if(!progEl){ progEl=document.createElement('div'); progEl.id='bsProgress'; stageEl.appendChild(progEl); }
+      // Keyboard / accessibility switch: any key advances (switch boxes send Space/Enter)
+      window.addEventListener('keydown',e=>{
+        if(e.target!==document.body) return;          // don't steal typing in the preset box
+        if(e.key==='Escape') return;
+        e.preventDefault(); advance();
+      });
+      this.reset();
+      applySong();
+    },
+    resize(w,h){ this.reset(); },
+    splat(){},
+    frame(dt){
+      if(!ctx) return;
+      const W=canvas.width, H=canvas.height;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,W,H);
+      if(wash && washA>0.005){
+        pokeSim();
+        ctx.fillStyle='rgba('+wash.join(',')+','+washA.toFixed(3)+')';
+        ctx.fillRect(0,0,W,H);
+        washA*=Math.pow(0.05,dt);   // smooth exponential fade (~1s)
+      }
+      // the tune so far, drawn from state onto the cleared frame
+      if(SETTINGS.showTrail && marks.length){
+        // The dots used to span 6%..94% while the progress bar spans 0..100%, so
+        // the picture and the bar disagreed about where "the end" was. They line
+        // up now, with just enough margin that a dot is not clipped in half.
+        const r=Math.max(6,H*0.030);
+        const x=m=>r*1.4+(W-r*2.8)*m.u, y=m=>H*(0.86-0.66*m.v);
+        ctx.lineWidth=Math.max(2,H*0.006); ctx.lineJoin='round'; ctx.lineCap='round';
+        ctx.strokeStyle='rgba(255,255,255,0.18)';
+        ctx.beginPath();
+        marks.forEach((m,i)=>{ const px=x(m),py=y(m); if(i) ctx.lineTo(px,py); else ctx.moveTo(px,py); });
+        ctx.stroke();
+        for(let i=0;i<marks.length;i++){
+          const m=marks[i], last=i===marks.length-1, lit=i===hi;
+          ctx.fillStyle='rgba('+m.c.join(',')+','+(lit?1:last&&hi<0?0.98:0.72)+')';
+          ctx.beginPath(); ctx.arc(x(m),y(m),r*(lit?1.9:last&&hi<0?1.35:1),0,Math.PI*2); ctx.fill();
+          if(lit){                       // a ring around the one being played
+            ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=Math.max(2,H*0.005);
+            ctx.beginPath(); ctx.arc(x(m),y(m),r*2.6,0,Math.PI*2); ctx.stroke();
+          }
+        }
+      }
+      // NOTHING TO PRESS, NOTHING TO SEE. At rest this screen was black, in the
+      // one app whose whole interaction is "press" — the same fault as a held
+      // note doing nothing in Starfield. A slow breath says the button is there
+      // and waiting. It only appears once the student has been still a moment,
+      // so it never competes with a note they just played.
+      if(!celebrating && washA<=0.02){
+        idleT+=dt;
+        if(idleT>1.6){
+          pokeSim();
+          const a=0.10+0.09*Math.sin(idleT*1.9), R=Math.min(W,H)*(0.17+0.012*Math.sin(idleT*1.9));
+          ctx.strokeStyle='rgba(255,255,255,'+a.toFixed(3)+')';
+          ctx.lineWidth=Math.max(3,H*0.008);
+          ctx.beginPath(); ctx.arc(W/2,H/2,R,0,Math.PI*2); ctx.stroke();
+        }
+      }
+    },
+    reset(){
+      if(!ctx) return;
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      washA=0; marks=[]; drawn=0; idleT=0; hi=-1;
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

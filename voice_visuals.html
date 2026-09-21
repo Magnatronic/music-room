@@ -1,0 +1,2090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Voice Visuals – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+<style>
+/* Mic gate — the one thing that must be tapped before anything works */
+#vvGate{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
+  align-items:center;justify-content:center;z-index:5;pointer-events:none}
+#vvGate.hidden{display:none}
+#vvGate button{pointer-events:auto;font-family:sans-serif;font-size:clamp(18px,3.2vh,26px);
+  font-weight:700;color:#fff;background:rgba(0,0,0,0.55);border:2px solid rgba(255,255,255,0.45);
+  border-radius:26px;padding:20px 34px;cursor:pointer;backdrop-filter:blur(8px);
+  -webkit-tap-highlight-color:transparent;touch-action:manipulation;
+  text-shadow:0 1px 4px rgba(0,0,0,0.8);transition:transform 0.15s,border-color 0.2s}
+#vvGate button:hover{border-color:#fff;transform:scale(1.04)}
+#vvGate .msg{pointer-events:none;font:15px sans-serif;color:rgba(255,255,255,0.75);
+  background:rgba(0,0,0,0.5);padding:8px 16px;border-radius:14px;max-width:70%;text-align:center}
+/* Live level meter in the Voice tab */
+#vvMeter{height:12px;background:rgba(255,255,255,0.12);border-radius:6px;overflow:hidden;margin:6px 0 6px}
+#vvMeterFill{height:100%;width:0;background:linear-gradient(90deg,#3bb54a,#f5d117,#e2641c);transition:width 0.12s}
+/* What the app is hearing, in numbers. A mark on the bar could not say this:
+   the bar is already normalised to the floor, so its own zero IS the floor. */
+#vvRead{font:12px ui-monospace,Menlo,Consolas,monospace;opacity:0.72;
+  margin:0 0 4px;min-height:1.3em;letter-spacing:0.01em}
+#vvRead .clip{color:#ff6a4d;font-weight:700}
+#vvWarn{font-size:13px;line-height:1.5;color:#ffcf5c;margin:2px 0 12px}
+#vvWarn:empty{margin:0}
+</style>
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Voice Visuals — vocalize and the room responds with light. Loudness = size
+   and brightness, pitch = height and colour. Rewards vocalization for
+   non-verbal students; "whisper" sensitivity makes tiny sounds huge.
+
+   Visual design (see fx research notes in git history): frequency → colour,
+   amplitude → size/brightness, feedback immediate (the cause-effect loop IS
+   the therapy). Each mode has a calm slow baseline that the voice energises,
+   sensory-room style. Colour comes from a palette THEME (Prism etc.) or a
+   single locked colour.
+
+   LISTEN-ONLY by design: the microphone signal is analysed and never routed
+   to the speakers, so feedback is impossible. The framework audio chain is
+   created (a user gesture unlocks the context) but nothing is played.
+
+   Pitch via autocorrelation on the time-domain buffer (fine for voice);
+   a light 10 Hz poll keeps running while the render loop sleeps so the
+   first sound after a silence wakes the visuals instantly. The render loop
+   keeps a ~20 s tail after the last sound so decays/twinkles wind down,
+   then the sim sleeps (last frame stays on screen).
+*/
+const Anim = (() => {
+
+  // Palette themes: pitch (or band index / position) sweeps across the list.
+  const THEMES={
+    prism: {label:'🌈 Prism',  colors:[[255,40,70],[255,140,0],[255,225,40],[60,255,140],[40,160,255],[170,70,255]]},
+    ocean: {label:'🌊 Ocean',  colors:[[0,70,160],[0,150,205],[60,215,220],[130,255,205],[220,255,245]]},
+    sunset:{label:'🌅 Sunset', colors:[[90,0,130],[205,45,105],[255,105,60],[255,185,65],[255,240,170]]},
+    aurora:{label:'✨ Aurora', colors:[[0,230,150],[0,190,210],[110,130,255],[190,90,255],[120,255,200]]},
+    candy: {label:'🍬 Candy',  colors:[[255,90,160],[255,170,220],[170,130,255],[130,220,255],[255,225,240]]},
+  };
+  function palAt(x){
+    const cols=(THEMES[SETTINGS.theme]||THEMES.prism).colors;
+    const f=Math.max(0,Math.min(0.999,x))*(cols.length-1);
+    const i=f|0, u=f-i, a=cols[i], b=cols[i+1]||a;
+    return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u];
+  }
+  function mix(a,b,u){ return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u, a[2]+(b[2]-a[2])*u]; }
+  function rgba(c,a){ return 'rgba('+(c[0]|0)+','+(c[1]|0)+','+(c[2]|0)+','+Math.max(0,a).toFixed(3)+')'; }
+
+  // Sensitivity is HOW WIDE A RANGE OF LOUDNESS FILLS THE SCREEN, in decibels
+  // above the room's measured noise floor — not a multiplier on the signal.
+  // The old ×60/×18/×6 gave every chip exactly 26 dB of range whatever it was
+  // set to, and pinned Talking from −25 dBFS up, so a firm voice and a shout
+  // drew the same picture. PHASE-11-LISTENING.md §2.1.
+  const SENS={ whisper:{label:'🤫 Whisper',range:18},
+               talk:   {label:'🙂 Talking',range:28},
+               sing:   {label:'📣 Singing',range:40} };
+  const VISMODES={ mandala:{label:'💠 Mandala'},
+                   lava:{label:'🫧 Lava'}, waves:{label:'〰️ Waves'},
+                   pixels:{label:'🟩 Pixels'},
+                   leds:{label:'💡 LEDs'},
+                   ripples:{label:'💧 Ripples'}, fountain:{label:'🎆 Fireworks'},
+                   stars:{label:'⭐ Starfield'} };
+  // ── the listening constants. Every decibel here is dBFS. PHASE-11-LISTENING.md.
+  // THE UPPER CLAMP WAS -25 AND THAT IS WHAT MADE A QUIET ROOM REPORT ITSELF
+  // AS NOISY. Measured 2026-09-05: rooms at -24, -20 and -16 dBFS all came back
+  // as the same floor, -19 dB after the +6 gate - so a hot microphone was
+  // reported 9 dB quieter than it was, availDb() pinned at 13, and the
+  // noisy-room warning fired permanently on a room nobody would call noisy. The
+  // clamp existed to stop a floor seeded during speech leaving the app deaf, but
+  // the tracking below already handles that: the floor falls AT ONCE the moment
+  // a quieter second arrives. So the clamp can be loose enough to tell the truth
+  // about a hot input, which is the thing a therapist can actually go and fix.
+  const FLOOR_MIN=-75, FLOOR_MAX=-15;  // the measured room floor is clamped to this
+  const HOT_FLOOR=-30;                 // above this the input is hot, not the room noisy
+  const GATE_OVER=6, GATE_HYST=2.5;    // the gate opens at floor+6 dB, shuts 2.5 dB under that
+  const CEIL_MAX=-6;                   // never ask for more level than the converter has
+  const RANGE_MIN=12, RANGE_MAX=54;
+  const LVL_GAMMA=0.6;                 // lifts the quiet end deliberately — §2.1
+  const HP_HZ=80;                      // high-pass: rumble, fans, knocks on the desk
+  const PITCH_LO=60, PITCH_HI=1300;    // the search band. Every colour map sits inside it
+  const PITCH_TRUST=0.5;               // NSDF confidence under this is not a pitch
+  const ONSET_K=100;                   // transient rate per second — §2.4
+  const ONSET_HOLD=0.12;               // the floor under every style's own rate gate
+  const VOICE_RANGE={ wide:[80,1200], adult:[70,400], child:[180,1000] };
+  const VRANGE={ wide: {label:'🌍 Wide'}, adult:{label:'🧑 Adult'},
+                 child:{label:'🧒 Child'}, auto: {label:'🎯 Auto'} };
+
+  let ctx=null, t=0, lastActive=-99;
+  let micState='off';               // off | starting | seeding | on | denied | error
+  let micWaitTimer=null, micWaitLong=false, micAttempt=0;  // the escalating wait, see enableMic
+  let micStream=null, analyser=null, fAnalyser=null, hpNode=null, pollId=null, pollCount=0;
+  const ABUF=new Float32Array(2048);
+  let FBUF=null, LOGK=null, NSDF=null, bands=null;
+  let level=0, meterLvl=0, pitch01=0.4, tp01=0.4, lastBurst=-9;
+  let lvlTarget=0, lvlRate=0, fastLvl=0;  // the target; the transient rate; the fast envelope
+  let micFloorDb=FLOOR_MIN, lastDbfs=-120, gateOpen=false, gateShutAt=0;
+  let seedLeft=0, seedSkip=0, seedMin=99, seedWait=0, trackMin=99, trackAt=0, trackBuck=[], gateOpenAt=0;
+  let f0Hz=0, conf=0, confS=0, bright=0, pitchHist=[];   // confS: conf, slowed for DRAWING
+  let onsetN=0, frameN=0, ringN=0, ringStr=[];   // debug counters, read by probes/phase-11/*.js
+  // ringN counts rings ACTUALLY CREATED. onsetN counts transients DETECTED, and
+  // the two are not the same number - there is a second gate between them. A
+  // probe that reports only onsetN cannot see a ring that was never drawn, which
+  // is how 'every second clap misses' survived a run that reported 40 of 40.
+
+  let autoLo=0, autoHi=0;           // the 'auto' voice range, tracked across a session
+  let col=[120,200,255], tcol=[120,200,255];  // smoothed + target display colour
+  let lastPitchAt=0, rot=0;
+  let mandBoost=null, mandReach=null, mandN=0; // Mandala: per-bar touch energy + reach-to-finger (ride on the spectrum)
+  let rings=[], parts=[], touchRings=[], shoots=[], stars=[], blobs=[], sparks=[];
+  let emitAcc=0, wave=null, wave2=null;   // rippleTimer retired - see TWEAKS.ripples
+  let pluckU=null, pluckV=null, pluckLive=false;  // Waves: touch-plucked string overlay
+  let memStars=[];
+  let pix=null, ledPulses=[], ledChase=0;    // Pixels grid; LED wall pulses/chase
+  let lastTouchAct=0;                        // rate-limit for discrete touch spawns
+  let fwBx=0, fwBy=0, fwAt=-99, fwId=0;      // Fireworks: where the last burst was born
+  let mandLenMax=0, mandRmax=0;              // Mandala: the longest spoke DRAWN, and its ceiling
+  let starResp=0;                            // stars that have swept past — the flight rate
+  let waxLvl=0;                              // Lava: loudness with wax's own inertia (see WAX_*)
+
+  // ── microphone ──
+  function micOn(){ return micState==='on'; }
+  function micWaitClear(){ if(micWaitTimer){ clearTimeout(micWaitTimer); micWaitTimer=null; } micWaitLong=false; }
+  // ── loudness: decibels, a measured floor, and a ceiling that stays put ──
+  // The old mapping was linear in AMPLITUDE with a fixed multiplier, which gave
+  // exactly 26 dB of usable range in every sensitivity and pinned at −25 dBFS in
+  // Talking. Measured 2026-09-03. §2.1.
+  function rangeDb(){
+    const s=(SENS[SETTINGS.sensitivity]||SENS.talk).range;
+    return Math.max(RANGE_MIN,Math.min(RANGE_MAX,s+(SETTINGS.micTrim||0)));
+  }
+  function floorDb(){ return micFloorDb+GATE_OVER; }
+  function ceilDb(){ return Math.min(floorDb()+rangeDb(),CEIL_MAX); }
+  function availDb(){ return Math.max(6,ceilDb()-floorDb()); }   // what the room actually leaves
+  function rawDbfs(){
+    if(!analyser) return -120;
+    analyser.getFloatTimeDomainData(ABUF);
+    let s=0; for(let i=0;i<ABUF.length;i++) s+=ABUF[i]*ABUF[i];
+    lastDbfs=20*Math.log10(Math.sqrt(s/ABUF.length)+1e-9);
+    return lastDbfs;
+  }
+  function levelFromDb(db){
+    const u=Math.max(0,Math.min(1,(db-floorDb())/availDb()));
+    return Math.pow(u,LVL_GAMMA);
+  }
+
+  // ── the room's noise floor: measured, never stored ──
+  // A floor is a fact about this room and this microphone TODAY — the fan, the
+  // projector, whether a window is open. Storing it would make it inheritable,
+  // and a floor measured on a quieter day leaves the next student unheard, which
+  // is the silent failure PHASE-7 was about. So it is a runtime value, re-derived
+  // every time the microphone is turned on. §2.2.
+  function clampFloor(db){ return Math.max(FLOOR_MIN,Math.min(FLOOR_MAX,db)); }
+  function seedFloor(){ seedLeft=8; seedSkip=2; seedMin=99; seedWait=0;
+                        trackMin=99; trackBuck=[]; trackAt=0; }
+  // `poll` is true only for the 10 Hz timer, so the seed always spans a real
+  // second. Counting frames instead spent the whole seed inside the first
+  // 170 ms, before the microphone had produced any audio at all — measured, and
+  // it set the floor to the −75 clamp on a room that was actually at −45.
+  function trackFloor(db,now,poll){
+    if(seedLeft>0){
+      // THE SEED COUNTS TICKS THAT CARRIED AUDIO, not ticks of the clock.
+      //
+      // It used to count clock ticks and, if none of the first ten carried any
+      // signal, throw the whole second away and start again — up to five times.
+      // A microphone that outputs exact zeros while its capture pipeline spins
+      // up (many do) therefore made the app sit dead for as long as five
+      // seconds. The user reported exactly that in UAT: "listening to the room
+      // hangs for quite a while before picking up sounds".
+      //
+      // Now: samples at or under −100 dB are not data and are simply not
+      // counted, so the clock does not start until the device does. The first
+      // two that ARE data are still discarded, because a partly-filled
+      // 2048-sample buffer reads several decibels low and the seed takes a
+      // minimum — the statistic that keeps the worst of them. Measured before
+      // that discard existed: a −45 dB room seeded at −52.8.
+      //
+      // So the seed is 0.8 s of real audio however long the hardware takes, and
+      // the hard stop below is the only thing left that can make it longer.
+      if(db>-100){
+        if(seedSkip>0){ if(poll) seedSkip--; }
+        else { if(db<seedMin) seedMin=db; if(poll) seedLeft--; }
+      }
+      if(poll) seedWait++;
+      // A genuinely silent device — muted, or unplugged mid-start. Six seconds
+      // is long enough that no real microphone is still waking up, and §6 says
+      // what happens then: the floor clamps low, the gate stays shut, and
+      // nothing responds rather than dither being amplified into a flicker.
+      if(seedLeft>0 && seedWait<60) return;
+      micFloorDb = seedMin<99 ? clampFloor(seedMin) : FLOOR_MIN;
+      seedLeft=0;
+      if(micState==='seeding'){ micState='on'; updateMicUI(); pokeSim(); }
+      return;
+    }
+    if(db<trackMin) trackMin=db;
+    if(now-trackAt<1000) return;
+    trackAt=now;
+    trackBuck.push(trackMin); if(trackBuck.length>3) trackBuck.shift();
+    trackMin=99;
+    const m=clampFloor(Math.min.apply(null,trackBuck));
+    // Down at once, up at 1 dB/s and ONLY while nothing is being heard. That is
+    // the direction guarantee: the floor can never rise under a student's own
+    // voice, so it can only ever fail in the way that corrects itself.
+    if(m<micFloorDb) micFloorDb=m;
+    else if(!gateOpen && now-gateShutAt>1000) micFloorDb=Math.min(m,micFloorDb+1);
+  }
+  // One read of the microphone: the gate (with hysteresis, so a signal sitting on
+  // the threshold cannot flicker the whole activity on and off), the floor
+  // tracking, and the level this instant deserves.
+  function hear(now,poll){
+    if(!analyser) return 0;
+    const db=rawDbfs();
+    trackFloor(db,now,poll);
+    if(seedLeft>0){ gateOpen=false; gateShutAt=now; gateOpenAt=now; return 0; }
+    const open=gateOpen ? db>floorDb()-GATE_HYST : db>floorDb();
+    if(gateOpen&&!open) gateShutAt=now;
+    if(!gateOpen&&open) gateOpenAt=now;
+    gateOpen=open;
+    // THE ESCAPE FROM A FLOOR THAT IS TOO LOW, and it is not optional. The rule
+    // above lets the floor fall at once but only rise in silence — and a floor
+    // set too low holds the gate open, which forbids the rise. That is a
+    // deadlock: seed the floor at −75 in a −45 room and the gate never shuts
+    // again, so every sound reads as full. Found by the probe, not by reading.
+    // Twenty seconds of unbroken sound is not a vocalisation, it is a wrong
+    // floor, so re-measure. A student who really does sustain for twenty
+    // seconds gets one re-seed that lands on their own quietest moment.
+    if(open&&now-gateOpenAt>20000) seedFloor();
+    return open?levelFromDb(db):0;
+  }
+  // A DEVICE OPEN THAT MAY NEVER ANSWER. Measured 2026-09-04 while chasing the
+  // user's "listening to the room hangs for quite a while": of three runs,
+  // getUserMedia resolved once at 4.2 s and twice not at all inside six seconds.
+  // The seed that follows it takes 1.0 s, so the seed was never the delay.
+  //
+  // PHASE-9C-MIDI-CONNECT-WAIT.md wrote exactly this fix for requestMIDIAccess,
+  // and said in passing that "the microphone path uses getUserMedia, which
+  // rejects rather than hangs". That is now measured to be false, and the doc is
+  // corrected. So this app had the same state it never leaves that 9c called a
+  // breach of "no fail states", and it gets 9c's answer:
+  //
+  //   the wording ESCALATES, and never concludes. A pending promise looks
+  //   identical whether a person is still reading the permission prompt or
+  //   Windows has wedged, so a deadline must not declare a cause. After ten
+  //   seconds the advice for both can be on screen without either being a lie.
+  //
+  // And a second tap starts no second request: it jumps to the ten-second text,
+  // because tapping again is what a person does when the first tap looked dead,
+  // which is precisely when that text is worth reading.
+  function enableMic(){
+    if(micState==='starting'){
+      // A SECOND TAP BEFORE TEN SECONDS starts no second request - that is 9c's
+      // rule and it is right, because two stacked requests give a person no more
+      // information than one. AFTER ten seconds it is a different question: the
+      // first attempt is almost certainly dead, and refusing to try again leaves
+      // reloading the page as the only way out of a state the app put them in.
+      // Reported from the room 2026-09-04 with a screenshot of exactly that.
+      //
+      // So the escalated state gets one thing the pending state does not: a tap
+      // abandons the old attempt and starts a fresh one. `micAttempt` is what
+      // makes abandoning safe - if the old promise ever does resolve, its stream
+      // belongs to a superseded attempt and is stopped rather than wired up.
+      if(!micWaitLong){ micWaitLong=true; updateMicUI(); return; }
+      micAttempt++; micWaitClear();
+    }
+    if(micState==='seeding'||micOn()) return;
+    const attempt=++micAttempt;
+    micState='starting'; micWaitLong=false;
+    if(micWaitTimer) clearTimeout(micWaitTimer);
+    micWaitTimer=setTimeout(()=>{ micWaitLong=true; updateMicUI(); },10000);
+    updateMicUI();
+    const ac=getAudio();   // user gesture unlocks the context; output stays silent
+    navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+      .then(stream=>{
+        // a stream from an attempt that has been superseded, or from one that
+        // resolved after the microphone was switched off. Not ours - let it go.
+        if(attempt!==micAttempt||micState==='off'){
+          stream.getTracks().forEach(tr=>tr.stop()); return;
+        }
+        micWaitClear();
+        micStream=stream;
+        const src=ac.createMediaStreamSource(stream);
+        // src → highpass → two analysers, and NOTHING to ac.destination. An
+        // AnalyserNode is a pass-through, so a stray connect() anywhere in here
+        // is the feedback howl this app exists without. §2.0.
+        hpNode=ac.createBiquadFilter();
+        hpNode.type='highpass'; hpNode.frequency.value=HP_HZ; hpNode.Q.value=0.707;
+        analyser=ac.createAnalyser(); analyser.fftSize=2048;   // time domain: level, pitch, Waves
+        // The spectrum needs its own, four times longer. A 2048-point FFT has
+        // 23 Hz bins, but a log-spaced band at 100 Hz is 8 Hz wide, so the bands
+        // below 295 Hz all read the same handful of bins — measured, and it is a
+        // third of the Mandala. 8192 gives 5.9 Hz bins. Smoothing goes to 0
+        // because updateBands() already applies its own attack and release, and
+        // 0.8 on top of that is why the ring lagged the voice. §2.5.
+        fAnalyser=ac.createAnalyser(); fAnalyser.fftSize=8192;
+        fAnalyser.smoothingTimeConstant=0;
+        // NOT MEASURED YET — a starting point. Per-bin levels are not the RMS
+        // level and cannot be derived from the room floor; the defaults
+        // (−100/−30) saturate every bin on a loud voice. §2.5.
+        fAnalyser.minDecibels=-90; fAnalyser.maxDecibels=-25;
+        src.connect(hpNode); hpNode.connect(analyser); hpNode.connect(fAnalyser);
+        const tr=stream.getAudioTracks()[0];
+        if(tr) tr.onended=()=>{ disableMic(); micState='error'; updateMicUI(); };
+        seedFloor();                  // one second of the room before anything responds
+        micState='seeding'; pokeSim(); updateMicUI();   // trackFloor() flips it to 'on'
+        // sim-sleep-proof wake: poll level cheaply, poke the loop when there's sound
+        pollId=setInterval(()=>{
+          pollCount++;
+          const r=hear(performance.now(),true);
+          if(r>0) pokeSim();
+          // peak-hold with a gentle fall, fed by the frame-smoothed level too so the
+          // meter shows exactly what the visuals respond to (10 Hz snapshots alone
+          // miss short sounds between ticks)
+          meterLvl=Math.max(r,level,meterLvl*0.82);
+          const f=document.getElementById('vvMeterFill');
+          if(f) f.style.width=Math.round(meterLvl*100)+'%';
+          updateVoiceRead();
+        },100);
+      })
+      .catch(()=>{ if(attempt!==micAttempt) return;
+                   micWaitClear(); micState='denied'; updateMicUI(); });
+  }
+  function disableMic(){
+    micWaitClear(); micAttempt++;   // any attempt still in flight is no longer ours
+    if(pollId){ clearInterval(pollId); pollId=null; }
+    if(micStream){ micStream.getTracks().forEach(tr=>{ tr.onended=null; tr.stop(); }); micStream=null; }
+    if(hpNode){ try{ hpNode.disconnect(); }catch(e){} hpNode=null; }
+    analyser=null; fAnalyser=null; level=0; lvlTarget=0; lvlRate=0;
+    gateOpen=false; conf=0; confS=0; bright=0; fastLvl=0; pitchHist=[]; micFloorDb=FLOOR_MIN;
+    micState='off'; updateMicUI();
+  }
+  // What the app is hearing, said in numbers a therapist can act on: how loud
+  // the room is right now, where the floor landed, and how much range that
+  // leaves. Redrawn by the 10 Hz poll while the Voice section is open.
+  function updateVoiceRead(){
+    const r=document.getElementById('vvRead'); if(!r) return;
+    const w=document.getElementById('vvWarn');
+    if(!micOn()&&micState!=='seeding'){
+      r.textContent='Microphone off'; if(w) w.textContent=''; return;
+    }
+    if(micState==='seeding'||seedLeft>0){
+      r.textContent='Listening to the room…'; if(w) w.textContent=''; return;
+    }
+    const clip=lastDbfs>-1;
+    r.innerHTML='Hearing '+lastDbfs.toFixed(0)+' dB · room floor '+floorDb().toFixed(0)+
+      ' dB · range '+availDb().toFixed(0)+' dB'+(clip?' · <span class="clip">TOO LOUD</span>':'');
+    if(!w) return;
+    // ONE WARNING, ON THE FLOOR, AND IT USED TO BE ON THE RANGE.
+    //
+    // The old test was availDb()<15 and it named the wrong cause. The range
+    // shrinks when the floor rises, and the floor rises for two quite different
+    // reasons — a genuinely loud room, or a microphone turned up too far — that
+    // need opposite advice. "Move the microphone closer to the student" makes a
+    // hot input worse, and a hot input is what a therapist can actually go and
+    // change. Measured 2026-09-05: an ordinary quiet room reads −53 dBFS and a
+    // busy one −37; nothing that is merely noisy reaches −30.
+    //
+    // AND SPLITTING IT IN TWO WAS WRONG TOO, which the panel probe caught rather
+    // than any reading of it. Once the hot branch takes everything above −30,
+    // the noisy-room branch needs a floor above −27 to reach availDb()<15 — so
+    // it can never run. Below −30 there is always at least 18 dB of range left,
+    // which is workable. A branch that cannot fire is not advice, it is
+    // decoration, so there is one message and it carries both remedies.
+    //
+    // The other way availDb() can fall under 15 is the therapist setting Range
+    // to 12 dB deliberately. That is a choice, not a fault, and warning about it
+    // would be telling them off for using the slider.
+    if(micFloorDb>HOT_FLOOR){
+      w.textContent='The microphone is hearing this room at '+micFloorDb.toFixed(0)+
+        ' dB, where a quiet room reads about −55 — that leaves only '+
+        availDb().toFixed(0)+' dB of range, and no setting here can get it back. '+
+        'Usually the microphone’s level is turned up too high: turn it down in '+
+        'Windows sound settings. If it is the room, turn off a fan or projector, '+
+        'or move the microphone away from it. Then tap “Listen to the room”.';
+    } else w.textContent='';
+  }
+  function updateMicUI(){
+    const gate=document.getElementById('vvGate'); if(!gate) return;
+    gate.classList.toggle('hidden',micOn());
+    const btn=gate.querySelector('button'), msg=gate.querySelector('.msg');
+    if(micState==='starting'){
+      btn.textContent=micWaitLong?'🎤 Still waiting…':'🎤 Starting…';
+      msg.textContent=micWaitLong
+        ? 'Still waiting for the microphone. Tap again to try once more. If no '+
+          'permission prompt appeared, the microphone or Windows may be stuck: unplug '+
+          'the microphone and plug it in again, and if that does not help, restart the PC.'
+        : 'Choose Allow on the prompt at the top of the window.';
+    }
+    // The seed is a second of nothing happening, and a second of nothing
+    // happening reads as broken. Say what it is doing instead.
+    else if(micState==='seeding'){ btn.textContent='🎧 Listening to the room…';
+      msg.textContent='One second of quiet, so tiny sounds can be told apart from the room.'; }
+    else if(micState==='denied'){ btn.textContent='🎤 Try again';
+      msg.textContent='The microphone was blocked — allow it in the browser, then tap again.'; }
+    else if(micState==='error'){ btn.textContent='🎤 Tap to restart the microphone';
+      msg.textContent='The microphone stopped (unplugged?).'; }
+    else { btn.textContent='🎤 Tap to turn on the microphone';
+      msg.textContent='Nothing is ever played out loud — this app only listens.'; }
+    refreshRailButtons();
+    if(currentQuickMode==='setup') buildSetupPanel();
+    updateVoiceRead();
+  }
+
+  // ── analysis: smoothed level + autocorrelation pitch → height/colour ──
+  function voiceTargetCol(){
+    if(SETTINGS.colorMode==='single'&&SETTINGS.lockedColor)
+      return SETTINGS.lockedColor.map(v=>Math.min(1,v)*255);
+    return palAt(tp01);
+  }
+  function analyse(dt){
+    if(!analyser){
+      level=Math.max(0,level-dt); lvlTarget=0; lvlRate=0; fastLvl=0;
+      conf=0; confS+=(0-confS)*(1-Math.exp(-dt/0.3));
+      bright+=(0-bright)*(1-Math.exp(-dt/0.3));
+    } else {
+      const now=performance.now();
+      lvlTarget=hear(now,false);
+      const tau=lvlTarget>level?0.05:0.35;              // fast attack, slow release
+      level+=(lvlTarget-level)*(1-Math.exp(-dt/tau));
+      // A SECOND ENVELOPE, for transients only, and it is not a refinement — it
+      // is the fix for two faults the user found in UAT: a second clap close
+      // behind the first made no ripple, and repeated loud sounds made no
+      // firework. `level` releases over 350 ms because that is what looks right,
+      // and measuring the transient off it means a sound arriving during that
+      // release has only a small gap left to jump. Two claps 250 ms apart: the
+      // second saw a gap of 0.3 where the first saw 0.9, and fell under the bar.
+      //
+      // So the LOOK keeps its slow release and the TRANSIENT gets its own fast
+      // one. 5 ms attack, 80 ms release: after 250 ms this envelope is down to
+      // 4% and the second clap is as big a jump as the first. Still a rate with
+      // no dt in it, so F3's frame-rate independence is untouched.
+      const ftau=lvlTarget>fastLvl?0.005:0.08;
+      lvlRate=(lvlTarget-fastLvl)/ftau;
+      fastLvl+=(lvlTarget-fastLvl)*(1-Math.exp(-dt/ftau));
+      readSpectrum(dt);
+      // A gap in the sound ends the pitch median, so a new sound is never
+      // averaged with the last one's octave.
+      if(!gateOpen && now-gateShutAt>500 && pitchHist.length) pitchHist.length=0;
+      const poll=activeQuality()==='low'?100:50;
+      if(lvlTarget>0.02 && now-lastPitchAt>poll){ lastPitchAt=now; detectPitch(); }
+      // `conf` is raw NSDF confidence, replaced whole every poll, and DRAWING
+      // must not use it directly. Measured on a babbling child: `defn` swung the
+      // full 0 -> 1 BETWEEN TWO FRAMES, and Lava's visible core radius with it —
+      // 82% in one frame while the blob's own R moved 0.64%. That is the user's
+      // "jerky with short sharp noises, especially when Voice texture is high",
+      // and every metric in probes/phase-11 missed it because they all measured
+      // R. The eye reads 0.6*e*R, and `e` had no inertia at all.
+      //
+      // Same shape as Lava's wax rise and for the same reason (a one-pole alone
+      // front-loads), but SYMMETRIC: there is no story about firming up faster
+      // than softening. A full swing takes about 0.6 s, so a sustained hiss
+      // still reaches its diffuse look and a short burst inside a sentence no
+      // longer snaps the edge.
+      //
+      // Raw `conf` still gates PITCH_TRUST — that is a detection decision and
+      // must stay instantaneous. This is the drawing's copy.
+      const cg=conf-confS;
+      confS+=Math.sign(cg)*Math.min(DEFN_RATE*dt,Math.abs(cg)*(1-Math.exp(-dt/DEFN_TAU)));
+    }
+    tcol=voiceTargetCol();
+    const ck=1-Math.exp(-dt/0.15);
+    pitch01+=(tp01-pitch01)*ck;
+    for(let i=0;i<3;i++) col[i]+=(tcol[i]-col[i])*ck;
+  }
+
+  // ── pitch: the normalised square difference function (MPM) ──
+  // The old detector was a raw autocorrelation with no octave check: its peaks
+  // are near-equal at every multiple of the period, so noise picked the winner.
+  // Measured 2026-09-03 over 14 synthetic voices — wrong by more than 50 cents
+  // in 5 of them, ALWAYS an octave or two low. A 200 Hz voice at 12 dB SNR read
+  // 100 Hz; a child at 700 Hz read 100 Hz. §2.3.
+  function pitchRange(){
+    if(SETTINGS.voiceRange==='auto'&&autoLo) return [autoLo,autoHi];
+    return VOICE_RANGE[SETTINGS.voiceRange]||VOICE_RANGE.wide;
+  }
+  // 'auto': the map follows this student's own voice — widen at once, narrow
+  // slowly, never narrower than an octave and a half.
+  function autoRange(f){
+    if(!autoLo){ autoLo=f/1.4; autoHi=f*1.4; }
+    else {
+      if(f<autoLo) autoLo=f; else autoLo+=(f-autoLo)*0.0005;
+      if(f>autoHi) autoHi=f; else autoHi+=(f-autoHi)*0.0005;
+    }
+    if(Math.log2(autoHi/autoLo)<1.5){
+      const c=Math.sqrt(autoLo*autoHi), h=Math.pow(2,0.75); autoLo=c/h; autoHi=c*h;
+    }
+    autoLo=Math.max(PITCH_LO,autoLo); autoHi=Math.min(PITCH_HI,autoHi);
+  }
+  function detectPitch(){
+    const sr=audioCtx.sampleRate, W=1024;
+    const scanMax=Math.min(ABUF.length-W-1,Math.floor(sr/PITCH_LO));
+    const loLag=Math.max(2,Math.floor(sr/PITCH_HI));
+    if(!NSDF||NSDF.length<scanMax+2) NSDF=new Float32Array(scanMax+2);
+    for(let lag=1;lag<=scanMax;lag++){
+      let ac=0,m=0;
+      for(let i=0;i<W;i+=2){ const a=ABUF[i],b=ABUF[i+lag]; ac+=a*b; m+=a*a+b*b; }
+      NSDF[lag]=m>0?2*ac/m:0;
+    }
+    // Key maxima: the peak of each positive lobe AFTER the lag-0 lobe, then the
+    // FIRST one within 15% of the best — that rule is what refuses the
+    // sub-octave peak the old code walked into.
+    //
+    // Scanning from lag 1 rather than from the shortest allowed lag is not a
+    // detail. Starting inside the first lobe swallows the true peak for a high
+    // voice: measured, 1150 Hz read as 575 Hz — an exact octave down — until the
+    // scan was moved back and the BAND LIMIT applied to the candidates instead.
+    const pkL=[], pkV=[]; let i=1, gmax=-2;
+    while(i<scanMax&&NSDF[i]>0) i++;                 // skip the lag-0 lobe
+    while(i<scanMax){
+      while(i<scanMax&&NSDF[i]<=0) i++;
+      let bl=i, bv=-2;
+      while(i<scanMax&&NSDF[i]>0){ if(NSDF[i]>bv){ bv=NSDF[i]; bl=i; } i++; }
+      if(bv>-2&&bl>=loLag){ pkL.push(bl); pkV.push(bv); if(bv>gmax) gmax=bv; }
+    }
+    conf=Math.max(0,gmax);
+    if(gmax<PITCH_TRUST) return;                     // breath, hiss, or too much room
+    const cut=0.85*gmax;
+    let l=0; for(let j=0;j<pkV.length;j++) if(pkV[j]>=cut){ l=pkL[j]; break; }
+    if(l<1||l+1>scanMax) return;
+    // Parabolic interpolation. Integer lags alone quantise to 22 cents at
+    // 600 Hz, which a held high note steps through as visible colour banding.
+    const y0=NSDF[l-1], y1=NSDF[l], y2=NSDF[l+1], d=y0-2*y1+y2;
+    const f=sr/(l+(d!==0?0.5*(y0-y2)/d:0));
+    if(!(f>=PITCH_LO&&f<=PITCH_HI)) return;
+    // Median of five, in the log domain. A median removes a one-frame octave
+    // flip outright; the 0.15 s smoothing that follows would only smear it
+    // across a third of the palette.
+    pitchHist.push(Math.log2(f)); if(pitchHist.length>5) pitchHist.shift();
+    const srt=pitchHist.slice().sort((a,b)=>a-b);
+    f0Hz=Math.pow(2,srt[srt.length>>1]);
+    if(SETTINGS.voiceRange==='auto') autoRange(f0Hz);
+    const r=pitchRange();
+    tp01=Math.max(0,Math.min(1,Math.log2(f0Hz/r[0])/Math.log2(r[1]/r[0])));
+  }
+
+  // ── the spectrum, read once a frame ──
+  // brightness is the spectral centroid over log frequency, normalised between
+  // 250 Hz and 5 kHz. It separates VOICED from UNVOICED by more than two
+  // octaves, and open vowels from closed ones. It is NOT vowel identification —
+  // measured, /i/ sits with /u/ — and nothing may be built on it that has to be
+  // right about which vowel is being sung. §2.6.
+  function readSpectrum(dt){
+    if(!fAnalyser) return;
+    const T=fAnalyser.frequencyBinCount;
+    if(!FBUF||FBUF.length!==T){
+      FBUF=new Uint8Array(T);
+      LOGK=new Float32Array(T);          // log2(bin) once, not 4096 times a frame
+      for(let k=0;k<T;k++) LOGK[k]=Math.log2(Math.max(1,k));
+    }
+    fAnalyser.getByteFrequencyData(FBUF);
+    const nyq=audioCtx.sampleRate/2;
+    const kLo=Math.max(2,Math.round(250/nyq*T)), kHi=Math.min(T-1,Math.round(6000/nyq*T));
+    let num=0,den=0;
+    for(let k=2;k<T;k++){ const w=FBUF[k]; if(w<8) continue; num+=w*LOGK[k]; den+=w; }
+    if(den>0){
+      const c=(num/den-LOGK[kLo])/Math.max(0.001,LOGK[kHi]-LOGK[kLo]);
+      bright+=(Math.max(0,Math.min(1,c))-bright)*(1-Math.exp(-dt/0.12));
+    }
+  }
+  // Log-spaced FFT bands with fast attack / slow release (Mandala, Lava, LEDs).
+  // The bins in a band are AVERAGED, not maxed: a max lets one loud bin claim
+  // every band whose range touches it, which is half of why the low end of the
+  // ring moved as a block.
+  function updateBands(n,dt){
+    if(!bands||bands.length!==n) bands=new Float32Array(n);
+    if(!fAnalyser||!FBUF){ for(let i=0;i<n;i++) bands[i]*=Math.pow(0.05,dt); return; }
+    const nyq=audioCtx.sampleRate/2, T=FBUF.length, fmin=90, fmax=6500;
+    for(let i=0;i<n;i++){
+      const f0=fmin*Math.pow(fmax/fmin,i/n), f1=fmin*Math.pow(fmax/fmin,(i+1)/n);
+      let a=(f0/nyq*T)|0, b=Math.max(a+1,Math.ceil(f1/nyq*T));
+      let s=0,c=0; for(let k=a;k<b&&k<T;k++){ s+=FBUF[k]; c++; }
+      const v=c?s/c/255:0;
+      const k2=1-Math.exp(-dt/(v>bands[i]?0.03:0.22));
+      bands[i]+=(v-bands[i])*k2;
+    }
+  }
+  // Onset = a sharp attack. A RATE per second, not a difference between two
+  // FRAMES: the old test needed level 0.29 to fire on a 24 fps machine and 0.99
+  // on a 165 Hz display, so the same sound made a firework on one room PC and
+  // nothing on another. K=100 against the FAST envelope (see analyse) puts the
+  // threshold at level 0.50 at every frame rate, so a single sound fires exactly
+  // as it always did.
+  //
+  // ONSET_HOLD was 0.3 s and is now 0.12, for two reasons both found in the UAT:
+  // a person clapping twice quickly got one ring, and Ripples' Wave rate slider
+  // is documented as reaching 0.22 s at the top, which a 0.3 s floor under it
+  // made unreachable — the slider lied at its own maximum. The hold is now low
+  // enough that each style's own gate is the thing that governs.
+  //
+  // The original note, kept because the arithmetic still stands:
+  // K puts the threshold at level 0.50 at EVERY frame
+  // rate, which is what the old test happened to give at 60 fps (measured 0.495)
+  // — so nothing changes on the machine this was tuned on, including Ripples.
+  // §2.4. The naive conversion of 0.10-per-frame at 60 fps is 6/s and it is
+  // wrong: it ignores that the old difference was a SMOOTHED step, not the gap.
+  function onset(){
+    const hit=lvlRate>ONSET_K && lvlTarget>0.16 && t-lastBurst>ONSET_HOLD;
+    if(hit){ lastBurst=t; onsetN++; }
+    return hit;
+  }
+
+  function voiceY(H){ return H*(0.8-0.6*pitch01); }
+  function vI(){ return SETTINGS.visIntensity||1; }
+  // Per-style fine-tuning: each mode exposes 2-3 multipliers (default 1 = the
+  // shipped look). Stored in SETTINGS.tw[mode][param] so they persist per
+  // device and are captured by ⭐ Presets — per-student tuning for therapists.
+  // Optional 5th element: formatter turning the multiplier into a friendly value
+  // ("6" ribbons instead of "×1.50"); optional 6th: slider step.
+  const TWEAKS={
+    mandala:[['detail','Detail (bars)',0.5,1.5],['reach','Reach',0.5,1.6],['bass','Bass glow',0,2],
+             ['texture','Voice texture',0,1]],
+    lava:   [['count','Blobs',0.4,1.8],['size','Size',0.5,2],['texture','Voice texture',0,1]],
+    waves:  [['height','Height',0.4,1.8],['thick','Thickness',0.4,2.2],['memory','Memory layer',0,2]],
+    pixels: [['px','Pixels across',0.27,2.4,v=>''+Math.max(8,Math.round(30*v)),0.01],
+             ['spread','Bloom spread',0.4,2],['linger','Afterglow',0.3,2.5]],
+    leds:   [['size','LED size',0.6,2],['chase','Chase speed',0,2.5],
+             ['spiral','Spiral',0,2],['spectrum','Sound spread',0,1.5]],
+    // "Wave rate ×0.30" told nobody that it meant "at most one ring every 0.67
+    // seconds", and at 0.30 a student clapping twice a second gets a ring for
+    // every OTHER clap. Measured 2026-09-05, 24 claps 0.6 s apart: 24 onsets
+    // detected and 12 rings drawn at ×0.30, 8 at ×0.15, against 24 at the
+    // default. Reported by the user as "it always seems to miss out the ring
+    // every second clap, but the centre pulses" - the centre glow is drawn off
+    // `level` and passes neither gate, which is what made the fault findable.
+    //
+    // This is §11.4's lesson a second time: SHOW THE RESULT, NOT THE MULTIPLIER.
+    // `Fine trim` said "+8 dB" when it meant a range, and was renamed to Range
+    // and made to print the number the readout prints. Same fix here - the
+    // slider now prints the gap it is actually imposing.
+    // THE RING GATE IS GONE, and the measurement is why. It was built for "a
+    // student whose sounds run into one another", so it was driven with the
+    // sounds that actually do that - a raspberry bursting every 71 ms, a babble
+    // with a syllable every 250 ms, a sustained hum - at gates of 1.33 s, 0.20 s
+    // and 0.07 s. Rings per second, 2026-09-05:
+    //
+    //   raspberry     0.06   0.06   0.06
+    //   babble        0.08   0.08   0.08
+    //   sustained hum 0.07   0.07   0.07
+    //   claps 0.6 s   0.53   1.60   1.60
+    //
+    // It changes NOTHING on any sound it was meant to tame - onset() already
+    // holds all three to one ring, because it tests for a transient and carries
+    // its own 0.12 s refractory. The only signal it measurably affects is
+    // deliberate, separated clapping: the one thing that must never be
+    // suppressed, and exactly what it was doing when the user found it.
+    //
+    // A control whose only measurable effect is to discard what a student meant
+    // to do is not a control. onset() governs alone now. Restoring it is one
+    // line if a student is ever found that needs it.
+    //
+    // The slot goes to `glow`, which is the user's own suggestion and the right
+    // one: the centre pulse is the only thing in this style that answers a sound
+    // too quiet to make a transient, so it is what a quiet student actually has.
+    ripples:[['glow','Centre glow',0,2],
+             ['speed','Wave speed',0.2,1],['thick','Wave thickness',0.4,2.5]],
+    fountain:[['embers','Embers',0,2],['burst','Burst size',0.3,2.2],
+              ['psize','Particle size',0.4,3],['fall','Fall speed',0.3,2]],
+    stars:  [['count','Stars',0.5,2.5],['travel','Travel speed',0.25,2],['twinkle','Twinkle',0.2,2],
+             ['band','Voice band',0.4,2],['sparks','Passing dust',0,2]],
+  };
+  // CLAMPED TO THE SLIDER'S OWN RANGE. Wave speed used to reach x2.00 and now
+  // stops at x1.00, so a preset or a localStorage value saved before today can
+  // carry a number the slider can no longer show — and an <input type=range>
+  // silently displays the clamped value while the drawing kept using the stored
+  // one. That is a control disagreeing with what is on screen, which is the
+  // fault this app has now had three times. The range in TWEAKS is the single
+  // definition, so read through it.
+  function tw(p){
+    const o=SETTINGS.tw&&SETTINGS.tw[SETTINGS.visMode];
+    const v=o?o[p]:null; if(v==null) return 1;
+    const d=(TWEAKS[SETTINGS.visMode]||[]).find(x=>x[0]===p);
+    return d?Math.max(d[2],Math.min(d[3],v)):v;
+  }
+  // Definition: how much this sound reads as a clear sung tone rather than
+  // breath, hiss or a raspberry. 1 at confidence 0.7 and above — which is what
+  // a voiced sound gives — so at rest and on any ordinary vocalisation every
+  // style looks exactly as it did before Phase 11. Only unvoiced sound is new.
+  //
+  // `p` names a per-style tweak slider so a therapist can turn it off: 0 pins
+  // this to 1 and restores the old look outright. Measured thresholds — a hiss
+  // reads 0.16, a clear 220 Hz tone reads 1.00. PHASE-11-LISTENING.md §2.6.
+  // How firmly defined the sound is: 1 = a clear voiced tone and EXACTLY the
+  // shipped look, 0 = breath and hiss. Reads `confS`, never raw `conf` — see
+  // analyse(). Mandala's spoke width and Lava's wax edge both hang off this, so
+  // the smoothing is here rather than in either style.
+  const DEFN_RATE=1.6, DEFN_TAU=0.25;
+  function defn(p){
+    const amt=p?tw(p):1;
+    if(amt<=0.001||!micOn()) return 1;
+    const d=Math.max(0,Math.min(1,(confS-0.3)/0.4));
+    return 1-(1-d)*Math.min(1,amt);
+  }
+  function glowDisc(x,y,R,c,a){
+    if(a<=0.002||R<=0) return;
+    const g=ctx.createRadialGradient(x,y,0,x,y,R);
+    g.addColorStop(0,rgba(c,a)); g.addColorStop(0.6,rgba(c,a*0.45)); g.addColorStop(1,rgba(c,0));
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2); ctx.fill();
+  }
+
+  // Touch → Mandala: pour energy into the spectrum bars nearest the finger's
+  // angle (a soft spread over neighbours) so the mandala flares outward there,
+  // in its own bars. The bars keep spinning, so the flare rotates round and the
+  // drag paints a trailing comet. mandHot keeps the sim awake while it fades.
+  function mandTouch(phi,amt,spread,reach){
+    if(!mandBoost||!mandN) return;
+    const centre=Math.round(((phi-rot)/(2*Math.PI))*mandN);
+    for(let k=-spread;k<=spread;k++){
+      const i=((centre+k)%mandN+mandN)%mandN;
+      const g=Math.exp(-(k*k)/(spread*spread*0.5+0.5));
+      mandBoost[i]=Math.min(1.25,mandBoost[i]+amt*g);
+      if(reach>0) mandReach[i]=Math.max(mandReach[i],reach*(0.55+0.45*g));  // stretch out to the finger
+    }
+  }
+  function mandBurst(amt){ if(!mandBoost) return;
+    for(let i=0;i<mandN;i++) mandBoost[i]=Math.min(1.25,mandBoost[i]+amt); }
+  function mandHot(){ if(!mandBoost) return false;
+    for(let i=0;i<mandBoost.length;i++) if(mandBoost[i]>0.01) return true; return false; }
+
+  // ── 💠 Mandala: three layers — bass glow washing the whole screen, the main
+  //    mirrored spectrum ring, and a counter-rotating outer ring of highs ──
+  // HOW LONG A SPOKE IS, and why it was never long enough. A band value is the
+  // AVERAGE of its FFT bins, and a voice puts its energy in a few harmonics, so
+  // averaging dilutes it — the loudest band of a sung 220 Hz tone measures 0.69,
+  // not 1. `Math.pow(v,1.5)` then compressed what was left. Measured at the top
+  // of the app's own calibrated loudness (`probes/phase-11/mandala.js`), the
+  // longest spoke was using this share of the reach it is allowed:
+  //
+  //     a sung tone 0.47-0.59    a babble 0.65    clapping 0.40    a hiss 0.115
+  //
+  // So at a student's loudest the mandala was drawing at half size. That is the
+  // user's "a stronger Mandala at full loudness", and it is arithmetic rather
+  // than taste.
+  //
+  // The gain SATURATES rather than clamping — the same shape as Lava's wax gain,
+  // and for the reason Waves' flat line taught: a hard clamp draws a flat top,
+  // and here that would be several spokes stopping at exactly the same length
+  // and reading as a circle. This asymptotes instead, so the loudest sounds
+  // still order themselves. The gamma is unchanged, so the SHAPE of the spectrum
+  // is exactly as it was; only the scale it is drawn at has moved.
+  // A STEEPER GAMMA WAS TRIED AND REJECTED on the measurement. The gain
+  // compresses the picture's dynamics — a half-loud sound went from 32% of the
+  // full picture to 56% — so gamma 2.2 with gain 6 was measured to see whether
+  // the contrast could be kept while still filling the frame. It could not: the
+  // ramp read 40/55/70% against 44/56/69%, a difference of nothing, while a
+  // hiss fell from 0.27 to 0.19. The compression is inherent to filling the
+  // picture, not a tuning failure, so the simpler curve stays and the
+  // trade-off goes to the user in the UAT.
+  const MAND_G=3;
+  const mandLen=v=>{ const x=Math.pow(v,1.5); return x*MAND_G/(1+(MAND_G-1)*x); };
+  function drawMandala(W,H,dt){
+    const q=activeQuality(), base=q==='high'?56:q==='med'?40:28;
+    const N=Math.max(16,Math.min(72,Math.round(base*tw('detail')/4)*4));
+    updateBands(N,dt);
+    // touch energy rides on top of the spectrum: same bars, so it reads as
+    // sound. It rotates with the mandala and fades, leaving a spinning trail.
+    if(!mandBoost||mandBoost.length!==N){ mandBoost=new Float32Array(N); mandReach=new Float32Array(N); }
+    mandN=N;
+    const bfade=Math.pow(0.5,dt/0.55);
+    for(let i=0;i<N;i++){ mandBoost[i]*=bfade; mandReach[i]*=bfade; }
+    rot+=dt*(0.06+level*0.4);
+    const cx=W/2, cy=H/2, m=Math.min(W,H);
+    const R0=m*0.13*(1+0.18*level), Rmax=m*0.30*tw('reach');
+    mandLenMax=0; mandRmax=Rmax/m;   // reset each frame — see _dbg().mand
+    // LAYER 1: bass fills the room — a huge slow glow behind everything
+    let bass=0; if(bands){ const nb=Math.max(2,N/6|0); for(let i=0;i<nb;i++) bass+=bands[i]; bass/=nb; }
+    glowDisc(cx,cy,m*0.62,SETTINGS.colorMode==='theme'?palAt(0.06):col,vI()*tw('bass')*(0.02+0.12*bass));
+    // breathing centre
+    glowDisc(cx,cy,R0*1.5,col,vI()*(0.04+0.16*level));
+    // base ring so the mandala exists even in silence
+    ctx.strokeStyle=rgba(col,vI()*(0.10+0.15*level)); ctx.lineWidth=Math.max(1.5,m*0.004);
+    ctx.beginPath(); ctx.arc(cx,cy,R0,0,Math.PI*2); ctx.stroke();
+    ctx.lineCap='round';
+    // LAYER 2: main mirrored spectrum.
+    // A clear tone draws narrow, bright, sharply-defined spokes; breath and hiss
+    // draw wide, dim, diffuse ones — so an unvoiced sound finally looks like
+    // itself instead of borrowing the last vowel's picture. d=1 restores the
+    // shipped numbers exactly.
+    const d=defn('texture'), wide=1.75-0.75*d, dim=0.55+0.45*d;
+    const bw=2*Math.PI*R0/N*0.42;
+    for(let i=0;i<N;i++){
+      const vs=bands?bands[i]:0;                        // sound only — the mirror's share
+      const v=Math.min(1,vs+mandBoost[i]);              // sound + touch — the primary bar
+      if(v<0.03&&mandReach[i]<1) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],v*0.25);
+      const ang=rot+i/N*Math.PI*2;
+      const ca=Math.cos(ang), sa=Math.sin(ang);
+      // primary bar: sound + touch; touch stretches it out to the finger
+      const len=Math.max(mandLen(v)*Rmax+bw*0.5,mandReach[i]);
+      // compare LIKE WITH LIKE: `len` is pixels and mandLenMax is a fraction of
+      // m. The first version compared the two directly, so every spoke beat the
+      // stored fraction and it recorded the LAST spoke rather than the longest —
+      // it reported 0.010 where the formula says 0.272.
+      { const ln=len/m; if(ln>mandLenMax) mandLenMax=ln; }   // probes/phase-11/mandala.js
+      ctx.strokeStyle=rgba(c,vI()*(0.14+0.44*v)*dim); ctx.lineWidth=bw*(0.55+0.65*v)*wide;
+      ctx.beginPath(); ctx.moveTo(cx+ca*R0,cy+sa*R0);
+      ctx.lineTo(cx+ca*(R0+len),cy+sa*(R0+len)); ctx.stroke();
+      // mirror: SOUND only (touch lights just the touched side — one clear
+      // cause→effect for students). Fades near the vertical axis, where it
+      // would land on the primary and double up into a white spoke.
+      if(vs>=0.03){
+        const mMul=Math.min(1,Math.abs(ca)*1.5);
+        const lenM=mandLen(vs)*Rmax+bw*0.5;
+        ctx.strokeStyle=rgba(c,vI()*(0.14+0.44*vs)*mMul*dim); ctx.lineWidth=bw*(0.55+0.65*vs)*wide;
+        ctx.beginPath(); ctx.moveTo(cx-ca*R0,cy+sa*R0);
+        ctx.lineTo(cx-ca*(R0+lenM),cy+sa*(R0+lenM)); ctx.stroke();
+      }
+    }
+    // LAYER 3: outer ring of the high bands, counter-rotating, reaching the edges.
+    // Brightness rides here: a hiss throws the outer ring out toward the walls, a
+    // dark "oo" pulls it in. A voice measures about 0.55, which is where `shine`
+    // is 1 — so an ordinary vocalisation is the shipped ring and it is the
+    // extremes of mouth shape that move it. NOT vowel identification: this axis
+    // separates open from closed and voiced from hiss, and /i/ sits with /u/.
+    const shine=1+(bright-0.55)*0.55*Math.min(1,tw('texture'));
+    const Ro=m*0.40;
+    for(let i=N>>1;i<N;i++){
+      const vs=bands?bands[i]:0, v=Math.min(1,vs+mandBoost[i]); if(v<0.05) continue;
+      const c=SETTINGS.colorMode==='theme'?palAt(i/(N-1)):mix(col,[255,255,255],0.35);
+      const ang=-rot*1.4+(i-(N>>1))/(N>>1)*Math.PI*2;
+      const ca=Math.cos(ang), sa=Math.sin(ang);
+      ctx.lineWidth=bw*0.4;
+      // primary: sound + touch
+      const len=(mandLen(v)*m*0.16+bw*0.3)*tw('reach')*shine;   // same gain as layer 2
+      ctx.strokeStyle=rgba(c,vI()*(0.09+0.34*v));
+      ctx.beginPath(); ctx.moveTo(cx+ca*Ro,cy+sa*Ro);
+      ctx.lineTo(cx+ca*(Ro+len),cy+sa*(Ro+len)); ctx.stroke();
+      // mirror: sound only, fading near the vertical axis (no white doubling)
+      if(vs>=0.05){
+        const mMul=Math.min(1,Math.abs(ca)*1.5);
+        const lenM=(mandLen(vs)*m*0.16+bw*0.3)*tw('reach')*shine;
+        ctx.strokeStyle=rgba(c,vI()*(0.09+0.34*vs)*mMul);
+        ctx.beginPath(); ctx.moveTo(cx-ca*Ro,cy+sa*Ro);
+        ctx.lineTo(cx-ca*(Ro+lenM),cy+sa*(Ro+lenM)); ctx.stroke();
+      }
+    }
+  }
+
+  // ── 🫧 Lava: drifting glow blobs, each swelling with its own frequency band —
+  //    the software lava lamp (grew out of the soundpanel prototype) ──
+  //
+  // WAX HAS MASS. `updateBands` runs a 30 ms attack because Mandala and the LEDs
+  // need to flash ON the syllable — but a lava blob that changes size that fast
+  // is the jitter the user reported, and it was measured before it was believed
+  // (`probes/phase-11/lava.js`, per FRAME: a 30 ms attack is invisible at the
+  // 100 ms poll every other probe here uses). Measured off `_dbg().lava.rad` —
+  // the R that was DRAWN, not one rebuilt from the bands — a blob's radius moved
+  // 20.2% of itself inside 200 ms on a child babbling and 68.7% on clapping
+  // (worst blob, p95), and reversed direction 27.1 times a second on a
+  // raspberry. A sustained hum measured 1.3%, which is why this never showed on
+  // a sung tone and reached the user instead.
+  //
+  // So the RADIUS gets its own slow follower on top of the band, and the
+  // LUMINANCE keeps the fast one. That split is the honest physics and it is
+  // also what keeps the app answering a student instantly: light has no mass,
+  // wax does. A blob still brightens on the syllable; it just no longer snaps.
+  //
+  // IT GROWS AT A CONSTANT RATE, AND FADES BACK EXPONENTIALLY. The first build
+  // of this used a one-pole both ways with a saturating gain on top, and the
+  // user's verdict was "I like how it fades back, but it is still jerky when
+  // detecting sound, maybe it should grow linearly". They were right twice over,
+  // and both faults were in the RISE:
+  //
+  //   - a one-pole moves FASTEST ON ITS FIRST FRAME and then creeps. It covered
+  //     42% of a clap's rise inside the first 100 ms.
+  //   - the saturating gain that bought the swell back is 2.5x STEEPEST AT ZERO,
+  //     which is exactly where a rise begins. It was added to fix the size of the
+  //     response and it steepened the start of it.
+  //
+  // A slew limit has neither property: the radius moves at WAX_RATE and no
+  // faster, so a big rise cannot front-load, and the gain is not needed at all
+  // because the rate alone sets how large a transient gets.
+  //
+  // BUT A SLEW LIMIT ALONE IS NOT THE ANSWER, and measuring it said so: a cap
+  // makes a SMALL rise move at the full rate too, where a one-pole makes it
+  // gentle in proportion to how small it is. Measured on the drawn radius, pure
+  // linear beat the one-pole on clapping (biggest frame 3.08% -> 2.19%) and LOST
+  // to it on a babbling child (0.94% -> 1.25%). Neither shape wins on both.
+  //
+  // So the rise takes WHICHEVER MOVES LESS this frame. The cap governs a clap,
+  // the one-pole governs a syllable, and the result is smoother than either on
+  // every signal measured. The user asked for linear growth and this is linear
+  // exactly where they were looking when they asked — a big rise runs at a
+  // constant rate for almost all of it.
+  //
+  // The FALL is untouched, because the user likes it: still a 0.8 s one-pole,
+  // which is the right shape for wax cooling — fast at first, then settling.
+  //
+  // NOTE the metric that could not see any of this. lava-ab.js measures how FAR
+  // the radius moves inside 200 ms, which scores a smooth ramp and a
+  // jump-then-flat identically. It is structurally blind to the SHAPE of a rise,
+  // and the shape was the whole report — it passed a build the user then called
+  // jerky. `lava-lin.js` measures the biggest single frame, and the share of a
+  // rise completed in its first 100 ms.
+  const WAX_RATE=1.0, WAX_ATK=0.35, WAX_REL=0.8;
+  const waxFollow=(y,x,dt)=>x>y
+    ? Math.min(x,y+Math.min(WAX_RATE*dt,(x-y)*(1-Math.exp(-dt/WAX_ATK))))  // grow
+    : y+(x-y)*(1-Math.exp(-dt/WAX_REL));                                   // fade
+  function buildBlobs(W,H){
+    const q=activeQuality();
+    const n=Math.max(3,Math.round((q==='high'?16:q==='med'?11:8)*tw('count')));
+    const m=Math.min(W,H);
+    blobs=[];
+    for(let i=0;i<n;i++){
+      const big=i<n*0.4;   // depth: big slow background blobs behind small lively ones
+      blobs.push({big,wax:0,x:Math.random()*W,y:Math.random()*H,
+        vx:(Math.random()-0.5)*m*(big?0.02:0.05),vy:(Math.random()-0.5)*m*(big?0.02:0.05),
+        r:(big?0.13:0.05)+Math.random()*(big?0.07:0.04),
+        ph:Math.random()*Math.PI*2,sp:(big?0.08:0.15)+Math.random()*(big?0.2:0.45)});
+    }
+  }
+  // One lava blob: backlit wax. Near-opaque body — overlapping blobs occlude
+  // each other cleanly instead of mixing into muddy see-through stacks — with
+  // a soft rim, a wobbly organic outline, and a colour-tinted sheen up-left.
+  // Brightness lives in the COLOUR (dim wax → glowing wax), never in
+  // transparency, so hues stay pure at every loudness.
+  // `lum` was called `bright` until Phase 11, when `bright` became a module-level
+  // signal. Two different meanings under one name inside the same function is a
+  // fault waiting to be written, so the parameter was renamed rather than the
+  // signal. This one is wax luminance; the other is spectral centroid.
+  function lavaBlob(b,R,c,lum,defn){
+    const cb=c.map(v=>v*lum);
+    const g=ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,R*1.06);
+    // A clear sung tone gives wax with a firm edge; breath and hiss give a soft,
+    // diffuse one. defn=1 is EXACTLY the shipped gradient, so a voiced sound
+    // looks like it always did and only unvoiced sound is new. §2.6.
+    const e=0.55+0.45*defn;
+    g.addColorStop(0,rgba(cb,1));
+    g.addColorStop(0.6*e,rgba(cb,0.97));
+    g.addColorStop(0.82*e,rgba(cb,0.75*(0.7+0.3*defn)));
+    g.addColorStop(0.94*e,rgba(cb,0.3*(0.6+0.4*defn)));
+    g.addColorStop(1,rgba(cb,0));
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    const K=26, w1=t*b.sp*2+b.ph, w2=t*b.sp*1.3-b.ph*1.7;
+    for(let j=0;j<=K;j++){
+      const th=j/K*Math.PI*2;
+      const rr=R*(1+0.045*Math.sin(3*th+w1)+0.03*Math.sin(5*th+w2));
+      const px=b.x+Math.cos(th)*rr, py=b.y+Math.sin(th)*rr;
+      if(j) ctx.lineTo(px,py); else ctx.moveTo(px,py);
+    }
+    ctx.closePath(); ctx.fill();
+    const hx=b.x-R*0.26, hy=b.y-R*0.3, hc=mix(cb,[255,255,255],0.4);
+    const hg=ctx.createRadialGradient(hx,hy,0,hx,hy,R*0.5);
+    hg.addColorStop(0,rgba(hc,0.3)); hg.addColorStop(1,rgba(hc,0));
+    ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(hx,hy,R*0.5,0,Math.PI*2); ctx.fill();
+  }
+  function drawLava(W,H,dt){
+    const q=activeQuality();
+    const want=Math.max(3,Math.round((q==='high'?16:q==='med'?11:8)*tw('count')));
+    if(blobs.length!==want) buildBlobs(W,H);
+    updateBands(blobs.length,dt);
+    waxLvl=waxFollow(waxLvl,level,dt);  // loudness carries the same inertia as
+                                        // the bands do — it is in the radius too
+    const m=Math.min(W,H);
+    // Drawn on a fully cleared frame (fade=1): motion trails only left ghost
+    // rings behind the breathing gradients. source-over, not additive, so
+    // nothing can ever exceed the palette colour itself.
+    ctx.globalCompositeOperation='source-over';
+    for(let i=0;i<blobs.length;i++){
+      const b=blobs[i], v=Math.min(1,(bands?bands[i]:0)+(b.hot||0)), slow=b.big?0.45:1;
+      b.hot=Math.max(0,(b.hot||0)-dt*1.5);
+      b.wax=waxFollow(b.wax||0,v,dt);   // the size the wax is actually reaching
+      b.vx+=Math.sin(t*b.sp+b.ph)*m*0.05*dt*slow;
+      b.vy+=Math.cos(t*b.sp*0.9+b.ph*1.7)*m*0.05*dt*slow;
+      b.vx*=Math.pow(0.5,dt); b.vy*=Math.pow(0.5,dt);
+      // snooker-table friction: a struck blob starts fast, then brakes firmly
+      // back down to cruising speed and resumes its lazy drift
+      const spd=Math.hypot(b.vx,b.vy), cruise=m*(b.big?0.05:0.09);
+      if(spd>cruise){ const k=Math.pow(0.5,dt/0.5); b.vx*=k; b.vy*=k; }
+      // Sound speeds the drift up, but it does it with the same mass the size
+      // has. On `level` this was the user's "the balls jump around instantly
+      // into different locations when detecting sound": a clap moved this
+      // multiplier 41% IN ONE FRAME and took every blob from rest to full speed
+      // in 66 ms, all together. On waxLvl the worst frame is 2.35%. The blobs
+      // still end up moving faster for a loud room — they just accelerate.
+      b.x+=b.vx*dt*(1+waxLvl*1.5); b.y+=b.vy*dt*(1+waxLvl*1.5);
+      const R=m*b.r*tw('size')*(0.85+0.15*Math.sin(t*0.5+b.ph))
+                *(1+(b.big?0.6:1.0)*b.wax+0.4*waxLvl);
+      b.R=R;   // what was actually drawn, for probes/phase-11/lava.js
+      // soft wall bounce (they used to wrap — teleporting to the other side)
+      const mgx=Math.min(R*0.55,W*0.45), mgy=Math.min(R*0.55,H*0.45);
+      if(b.x<mgx){ b.x=mgx; b.vx=Math.abs(b.vx)*0.7; }
+      else if(b.x>W-mgx){ b.x=W-mgx; b.vx=-Math.abs(b.vx)*0.7; }
+      if(b.y<mgy){ b.y=mgy; b.vy=Math.abs(b.vy)*0.7; }
+      else if(b.y>H-mgy){ b.y=H-mgy; b.vy=-Math.abs(b.vy)*0.7; }
+      const c=SETTINGS.colorMode==='theme'
+        ?palAt(0.04+0.84*i/(blobs.length-1))   // clamp off the palest end — no grey blobs
+        :mix(col,[255,255,255],(i%4)*0.06);
+      // wax luminance: a calm glow at rest, brightening as the blob's band
+      // sings; background blobs sit dimmer for depth
+      const lum=Math.min(1,vI()*(b.big?0.7:1)*(0.55+0.12*level+0.33*v));
+      b.L=lum;   // with b.R, what was actually drawn — probes/phase-11/lava.js
+      lavaBlob(b,R,c,lum,defn('texture'));
+    }
+    ctx.globalCompositeOperation='lighter';   // restore for touch rings
+  }
+
+  // ── 〰️ Waves: the actual shape of the sound — smoothed oscilloscope trace
+  //    with a soft/bright double stroke (soundpanel's waveform, rebuilt).
+  //    A calm baseline is always there, even in silence; touch grabs the line
+  //    itself (a plucked string: drag, release, watch the ripples run). ──
+  function drawWaves(W,H,dt){
+    const N=110;
+    if(!wave||wave.length!==N){ wave=new Float32Array(N); wave2=new Float32Array(N); }
+    if(!pluckU||pluckU.length!==N){ pluckU=new Float32Array(N); pluckV=new Float32Array(N); }
+    const step=(ABUF.length/N)|0, k=1-Math.exp(-dt/0.06), k2=1-Math.exp(-dt/0.5);
+    for(let i=0;i<N;i++){
+      let s=0,c=0;
+      for(let j=0;j<step;j+=4){ s+=ABUF[i*step+j]; c++; }
+      wave[i]+=(s/c-wave[i])*k;
+      wave2[i]+=(wave[i]-wave2[i])*k2;   // slow "memory" envelope
+    }
+    // plucked-string physics for the touch overlay: fixed ends, sub-stepped
+    // for stability, gently damped so a pluck rings out then settles
+    let rem=Math.min(dt,0.05), mx=0;
+    while(rem>0){
+      const h=Math.min(rem,1/120); rem-=h;
+      const pd=Math.pow(0.5,h/0.9);
+      for(let i=1;i<N-1;i++)
+        pluckV[i]=(pluckV[i]+(pluckU[i-1]+pluckU[i+1]-2*pluckU[i])*2200*h)*pd;
+      for(let i=1;i<N-1;i++) pluckU[i]+=pluckV[i]*h;
+    }
+    for(let i=0;i<N;i++){ const u=Math.abs(pluckU[i]); if(u>mx) mx=u; }
+    pluckLive=mx>0.5;
+    // THE STRAIGHT LINE ACROSS THE SCREEN. The trace used to end in
+    //     Math.max(-1, Math.min(1, buf[i]*mul))
+    // which is a hard clamp, so the waveform pinned flat at cy ± amp — the
+    // horizontal cut the user photographed, at exactly 0.20H from the top.
+    //
+    // And it bit far earlier than the comment above claimed. `ceilDb` is an RMS
+    // ceiling but `buf[i]` is an instantaneous sample, and a waveform's peak is
+    // its RMS times its crest factor — about 3.4 for a voice and 6 for a clap.
+    // Measured (probes/phase-11/waves.js): in an ordinary room the line went
+    // flat at level 0.75 for a voice and 0.61 for a clap, and in a hot room at
+    // 0.23 for a clap. So most of a loud sound was drawn as a flat line.
+    //
+    // Two changes. The crest allowance puts the RMS ceiling and the sample on
+    // the same footing, and tanh replaces the clamp: it is linear where the
+    // clamp was linear, asymptotes at ±1 instead of hitting it, and therefore
+    // has no flat top to draw at all.
+    const CREST=2.6;
+    const mul=Math.min(200,1/Math.max(0.005,Math.pow(10,ceilDb()/20)))/CREST;
+    const cy=H/2;
+    const grad=ctx.createLinearGradient(0,0,W,0);
+    if(SETTINGS.colorMode==='theme'){
+      for(let s=0;s<=4;s++) grad.addColorStop(s/4,rgba(palAt(s/4),1));
+    } else {
+      grad.addColorStop(0,rgba(mix(col,[255,255,255],0.2),1));
+      grad.addColorStop(0.5,rgba(col,1));
+      grad.addColorStop(1,rgba(mix(col,[255,255,255],0.2),1));
+    }
+    const trace=(buf,amp,flip)=>{
+      ctx.beginPath();
+      for(let i=0;i<N;i++){
+        const x=i/(N-1)*W;
+        const y=cy+(flip?-1:1)*Math.tanh(buf[i]*mul)*amp
+               +(flip?-1:1)*pluckU[i];   // touch pluck rides on the line itself
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    };
+    ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.strokeStyle=grad;
+    const hh=tw('height'), th=tw('thick');
+    // LAYER 1: the slow memory of the last phrase, huge and soft, filling the screen
+    ctx.globalAlpha=vI()*tw('memory')*(0.05+0.10*level); ctx.lineWidth=Math.max(10,H*0.05)*th;
+    trace(wave2,H*0.44*hh,false);
+    // LAYER 2: mirrored ghost — symmetric, sculptural
+    ctx.globalAlpha=vI()*(0.10+0.16*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th;
+    trace(wave,H*0.30*hh,true);
+    // LAYER 3: the live trace, halo + body + bright core
+    ctx.globalAlpha=vI()*(0.10+0.18*level); ctx.lineWidth=Math.max(6,H*0.022)*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=vI()*(0.20+0.35*level); ctx.lineWidth=Math.max(2.5,H*0.007)*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=Math.min(1,vI()*(0.35+0.40*level)); ctx.lineWidth=1.5*th; trace(wave,H*0.30*hh,false);
+    ctx.globalAlpha=1;
+  }
+
+  // ── 💧 Ripples: circular pulses spreading like drops in a pond. The voice
+  //    drops from the centre of the screen — louder = bigger, faster, brighter;
+  //    a sharp sound is a big splash. Touch drops a pulse right at the finger.
+  //    A soft glow breathes at the centre so the style is never invisible. ──
+  // THE RING IS SIZED FROM THE SOUND THAT MADE IT, and it used to be sized from
+  // a number that had not arrived yet. `str` came from `level`, the DISPLAY
+  // envelope — 50 ms attack, 350 ms release — while the onset firing the ring is
+  // detected off the instantaneous level. At 60 fps a 50 ms attack has caught
+  // only 28% of its target in one frame, and on a second clap `level` starts
+  // from the previous clap's tail rather than from zero. So identical claps drew
+  // different rings depending on the gap before them. Measured 2026-09-05:
+  //
+  //   claps 0.6 s apart   first ring 0.46, the rest 0.71
+  //   claps 0.8 s apart   first ring 0.46, the rest 0.61
+  //   claps 1.2 s apart   first ring 0.46, the rest 0.51
+  //
+  // — while `lvlTarget` read 1.00 for every one of them. Reported by the user as
+  // "the first ring comes out at a slower rate than the others".
+  //
+  // And the deeper fault the same numbers show: `str` never left 0.46..0.73, so
+  // LOUDNESS BARELY MOVED THE RING AT ALL. It is the instantaneous level now,
+  // unmultiplied, so it spans the whole 0..1 — a quiet sound finally gets a small
+  // slow ring and a shout gets a fast bright one. The velocity constants are
+  // retuned so a full-strength ring at Wave speed x1.00 matches what a loud clap
+  // drew before, which is the speed the look was judged at.
+  function rippleRing(x,y,str,c,r0){
+    ringN++;
+    if(ringStr.length<200) ringStr.push([+str.toFixed(3),+level.toFixed(3),+lvlTarget.toFixed(3)]);  // debug
+    rings.push({x,y,r:r0||Math.max(4,canvas.height*0.012),
+      v:(0.10+0.52*str)*canvas.height*tw('speed'),
+      a:vI()*(0.30+0.55*str),c});
+  }
+  function drawRipples(W,H,dt){
+    const cx=W/2, cy=H/2;
+    // ONE SOUND, ONE RIPPLE — and nothing else makes one. There used to be a
+    // free-running emitter firing every (0.4 - 0.3*level) seconds for as long as
+    // the level was over 0.02, so the pond rippled on a clock of its own that had
+    // nothing to do with what was being played into it. Measured against seven
+    // recorded claps 1.5 s apart: 22 rings, evenly spaced 0.5 s, not one of them
+    // lining up with a clap.
+    //
+    // So it is gone. A ring is a TRANSIENT and only a transient, which is what
+    // makes the pond keep time with a person clapping. A held note has no
+    // transient in it and makes one ring as it starts; what shows a sustained
+    // sound is the glow at the centre, which breathes with the level below.
+    //
+    // AND THE SECOND GATE IS GONE TOO — see the note in TWEAKS. It never
+    // suppressed a single one of the run-together sounds it was written for, and
+    // the only thing it measurably did was throw away deliberate claps.
+    // `onset()` governs alone: it requires a transient and carries its own
+    // 0.12 s refractory, which is the whole of the rate limiting this needs.
+    //
+    // THE CENTRE GLOW IS WHAT A QUIET STUDENT HAS. A sound too soft or too smooth
+    // to make a transient makes no ring at all, so the glow is the entire
+    // response — and it was mapped linearly off `level`, which meant a hum at
+    // level 0.1 moved it by a twentieth of the screen and could not be seen to do
+    // anything. The 0.45 gamma lifts exactly that end: level 0.10 now reads 0.37
+    // and level 0.25 reads 0.54, so a quiet sound visibly opens the pond while a
+    // loud one still pins it. The user's suggestion, and the right one.
+    const g=Math.pow(Math.max(0,Math.min(1,level)),0.45)*tw('glow');
+    const glowR=Math.min(W,H)*(0.05+0.13*g+0.006*Math.sin(t*1.7));
+    if(onset())
+      // born at the glow's edge, so a ring reads as thrown OFF the pulse rather
+      // than appearing from inside it — which matters more now the glow is bigger
+      rippleRing(cx,cy,Math.min(1,lvlTarget),col.slice(),Math.max(4,glowR*0.9));
+    glowDisc(cx,cy,glowR,col,Math.min(1,vI()*(0.10+0.45*g)));
+    const maxR=Math.hypot(W,H)*0.55;
+    rings=rings.filter(gg=>{
+      gg.r+=gg.v*dt; gg.a*=Math.pow(0.5,dt);
+      if(gg.a<0.015||gg.r>maxR) return false;
+      const lw=Math.max(2,H*0.010)*tw('thick');
+      ctx.strokeStyle=rgba(gg.c,gg.a*0.35); ctx.lineWidth=lw*3;    // soft outer
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle=rgba(mix(gg.c,[255,255,255],0.18),gg.a);     // bright core
+      ctx.lineWidth=lw;
+      ctx.beginPath(); ctx.arc(gg.x,gg.y,gg.r,0,Math.PI*2); ctx.stroke();
+      return true;
+    });
+  }
+
+
+  // ── 🎆 Fireworks: quiet sounds = rising embers across the whole skyline,
+  //    sharp sounds = comet bursts that leave a lingering glow in the sky ──
+  function drawFireworks(W,H,dt){
+    const q=activeQuality(), cap=q==='high'?450:q==='med'?280:140;
+    // THE AFTERGLOW IS GONE, and deleted rather than tuned. It was a huge
+    // three-stop radial gradient stained behind each burst, and on an 8-bit
+    // canvas a gradient that wide quantises into visible concentric rings — the
+    // user's screenshot is a green banded disc filling half the screen with the
+    // fireworks barely visible through it. This project has been here before:
+    // Soundscape's `glow` was a radial "that could not be stopped banding" and
+    // was replaced with a field of static (IMPROVEMENT-PLAN.md). Here there is
+    // nothing to replace it with — the burst itself is the event, the glow only
+    // sat on top of it — so the mechanism goes.
+    emitAcc+=dt*level*55*tw('embers');
+    while(emitAcc>=1&&parts.length<cap){
+      emitAcc--;
+      parts.push({x:W*Math.random(),y:H*0.98,
+        vx:(Math.random()-0.5)*W*0.06,
+        vy:-(0.18+0.45*level)*H*(0.7+Math.random()*0.5),
+        size:(1+Math.random()*2)*(H/800)*tw('psize'),c:col.slice(),life:1,trail:false,px:0,py:0,h:null});
+    }
+    emitAcc=Math.min(emitAcc,3);
+    if(onset()&&parts.length<cap-30){
+      const bx=W*(0.15+0.7*Math.random()), by=voiceY(H);
+      fwBx=bx; fwBy=by; fwAt=t; fwId++;   // for probes/phase-11/fireworks.js — see _dbg
+      // HOW BIG AN EXPLOSION IS. `_dbg().fw` reports how far a burst's OWN
+      // particles get from their origin, as a fraction of min(W,H), measured at
+      // a known age (`probes/phase-11/fireworks.js`).
+      //
+      // THE FIRST VERSION OF THAT PROBE WAS WRONG AND SAID THE OLD BURST REACHED
+      // 0.077 — a 62-pixel puff. It did not: it reached 0.245 at +0.9 s. The
+      // probe was splitting bursts on every frame with age<0.05 rather than on
+      // the transition into it, so each burst contributed one real sample and
+      // two newborn ones and every figure was a third of the truth. The
+      // explosions were never tiny; the SLIDER was the problem.
+      //
+      // `Burst size` scaled the count linearly but the speed by SQRT, so its
+      // whole range moved the reach from 0.180 to 0.315 — a factor of 1.75, and
+      // no setting made a firework that filled the screen. It scales the speed
+      // linearly now and the range is 0.158..0.564, a factor of 3.6. The base
+      // speed is up too, so the default is 0.245 -> 0.318.
+      //
+      // The bottom of the slider is deliberately BELOW the old default, so a
+      // therapist who liked the smaller burst can still have it — the courtesy
+      // travelling Waves did not offer, which is part of why that one had to be
+      // dropped whole rather than dialled back.
+      const n=Math.min(cap-parts.length,((24+level*56)*tw('burst'))|0);
+      const sp=(0.30+0.62*level)*Math.min(W,H)*tw('burst');
+      for(let i=0;i<n;i++){
+        const a=Math.random()*Math.PI*2, s=sp*(0.3+0.7*Math.random());
+        const c=SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],Math.random()*0.4);
+        parts.push({x:bx,y:by,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+          size:(1.2+Math.random()*2.2)*(H/800)*tw('psize'),c,life:1+Math.random()*0.4,
+          trail:true,px:bx,py:by,h:[bx,by],bi:fwId});
+      }
+    }
+    parts=parts.filter(p=>{
+      p.px=p.x; p.py=p.y;
+      // Gentler drag, 0.30 -> 0.45 per second. A/B'd rather than asserted: it is
+      // worth about half the extra reach at the default (p90 at +0.9 s went
+      // 0.245 -> 0.280 on the speed change alone, then 0.318 with this), and
+      // about a tenth of it at the slider's top, where the linear scaling does
+      // the work.
+      const drag=p.trail?Math.pow(0.45,dt):1;
+      // A GRAVITY RAMP WAS BUILT HERE AND DELETED. The hypothesis was that
+      // gravity at full strength from a particle's first frame cancels the
+      // upward half of the sphere before it can open, so it was faded in over
+      // 0.4 s to let the shell expand ballistically first. Measured, it moved
+      // the reach by nothing: p90 at +0.9 s was 0.314 with it and 0.318
+      // without, and at the slider's bottom it was slightly WORSE. A mechanism
+      // that cannot be measured doing what it was added for does not stay.
+      p.vx*=drag; p.vy=p.vy*drag+(p.trail?H*0.28:H*0.05)*dt*tw('fall');
+      p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt*(p.trail?0.8:0.45);
+      if(p.life<=0||p.y>H+30) return false;
+      const a=Math.min(1,p.life)*0.7;
+      if(p.trail){
+        // the comet tail, from the particle's own path rather than from what the
+        // canvas failed to erase. Ten points is about the length the 0.10 fade
+        // used to leave, minus the part of it that never went away.
+        if(p.h){
+          p.h.push(p.x,p.y);
+          if(p.h.length>20) p.h.splice(0,p.h.length-20);
+        }
+        ctx.lineCap='round'; ctx.lineJoin='round';
+        ctx.strokeStyle=rgba(p.c,a*0.55); ctx.lineWidth=p.size;
+        const h=p.h;
+        ctx.beginPath(); ctx.moveTo(h[0],h[1]);
+        for(let k=2;k<h.length;k+=2) ctx.lineTo(h[k],h[k+1]);
+        ctx.stroke();
+        ctx.strokeStyle=rgba(mix(p.c,[255,255,255],0.3),a); ctx.lineWidth=p.size*0.8;
+        ctx.beginPath(); ctx.moveTo(p.px,p.py); ctx.lineTo(p.x,p.y); ctx.stroke();
+      } else {
+        ctx.fillStyle=rgba(p.c,a);
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+      }
+      return true;
+    });
+  }
+
+  // ── ⭐ Starfield: calm twinkling sky; the voice lights a band of stars at its
+  //    pitch height, sharp sounds send a shooting star ──
+  function starCount(){
+    const q=activeQuality();
+    // Raised with the coverage fix: a field that fills the screen needs more of
+    // them than a knot in the middle did. The slider's own range went up too.
+    return Math.round((q==='high'?300:q==='med'?190:110)*tw('count'));
+  }
+  // A STAR HAS A DEPTH NOW. It used to be a fixed (x,y) that twinkled, so a
+  // student holding a note watched a still picture brighten — the same fault
+  // §11.6 fixed for sustained sound with rising sparks, one layer further in.
+  // `dx,dy` are the star's offset from the vanishing point AT z=1, in units of
+  // min(W,H); the drawn position is that offset divided by z, so a star sweeps
+  // outward and accelerates as it comes past. z runs 1 (far) to STAR_ZMIN.
+  //
+  // `Travel speed` reaches 0, and at 0 this is EXACTLY the old still sky. That
+  // is deliberate: travelling Waves changed what a style was with no way to dial
+  // it back, and had to be dropped whole rather than turned down (§13.2).
+  // WHY THE FIRST VERSION DREW A CLUMP. Stars were seeded in a small disc around
+  // the vanishing point and their offset divided by z, so at z near 1 — where a
+  // star spends most of its life — every one of them sat within 0.085 of the
+  // centre. The user's photograph is a tight knot of stars in the middle of an
+  // empty screen, and the arithmetic says it could not have been anything else:
+  // with a constant dz, the density per unit area goes as 1/R³.
+  //
+  // No value of the spread fixes that, because the problem is WHERE STARS ARE
+  // BORN. They are born anywhere on the screen now — offsets uniform over a
+  // screen-sized rectangle at z=1 — and sweep outward from there. Steady-state
+  // coverage is then uniform by construction rather than by tuning. Offsets are
+  // held per axis, in fractions of W and H, so a wide screen fills its corners
+  // instead of a square's worth of sky sitting in the middle of it.
+  // 0.5 is exactly the half-screen: a star seeded at the limit is born ON the
+  // edge. At 0.58 roughly a sixth of every seed landed OUTSIDE the frame and was
+  // respawned on its first frame — measured as 931 stars/s passing the camera
+  // with only 300 stars in the sky, which is a third of a second each and mostly
+  // waste rather than flight.
+  const STAR_ZMIN=0.09, STAR_SPREAD=0.5;
+  function starSeed(){
+    return {dx:(Math.random()-0.5)*2*STAR_SPREAD, dy:(Math.random()-0.5)*2*STAR_SPREAD,
+            z:STAR_ZMIN+Math.random()*(1-STAR_ZMIN)};
+  }
+  function buildStars(W,H){
+    const n=starCount();
+    stars=[];
+    for(let i=0;i<n;i++)
+      stars.push(Object.assign(starSeed(),
+        {x:Math.random()*W,y:Math.random()*H,
+         r:(0.6+Math.random()*1.6)*(H/800),ph:Math.random()*Math.PI*2,sp:0.3+Math.random()*1.2,
+         hue:Math.random()}));
+    // THE NEBULA HAZE IS DELETED, and deleted rather than tuned. It was three
+    // `glowDisc` radial gradients a quarter of the screen across at alpha 0.035,
+    // and the user photographed exactly what that becomes on an 8-bit canvas:
+    // three enormous dim discs with visible concentric rings. This is the fourth
+    // time this project has answered a banding radial gradient by removing the
+    // mechanism — Soundscape's glow, §11.3's firework afterglow, §12.3's frame
+    // fade, now this. The harness cannot see a compositing fault at all (it is a
+    // software rasteriser), so there was never a number to tune it against.
+  }
+  function drawStars(W,H,dt){
+    if(stars.length!==starCount()) buildStars(W,H);
+    const mCap=40;
+    const m=Math.min(W,H), cx=W/2, trav=tw('travel');
+    // THE POINT YOU FLY TOWARD DOES NOT MOVE ANY MORE. It used to sit at the
+    // pitch height, followed with a 0.7 s lag, so a rising voice lifted the
+    // horizon. The user: "the stars moving at you move up and down very quickly
+    // with high and low sounds… it may be disorientating and actually sometimes
+    // it moves so much part of the screen is blank."
+    //
+    // The blank is the part that was a FAULT rather than a preference, and it
+    // follows from the geometry: every star is born as an offset from this
+    // point, so moving the point moves the whole field's origin — and the region
+    // it has vacated has no stars in it until enough have been born to refill
+    // it, which at these speeds never happens. A lag cannot fix that; only the
+    // field's origin holding still can.
+    //
+    // Pitch has not lost its height: the VOICE BAND still lights the stars at
+    // the pitch height (`bandY` below), which shows the same thing without
+    // moving the geometry underneath it.
+    const cy=H/2;
+    // Silence still drifts, slowly. Loudness is the throttle.
+    const dz=(0.045+0.55*level)*trav*dt;
+    for(const s of stars){
+      s.z-=dz;
+      if(s.z<=STAR_ZMIN){ Object.assign(s,starSeed(),{z:1}); starResp++; }
+      s.x=cx+s.dx*W/s.z; s.y=cy+s.dy*H/s.z;
+      // gone past the camera rather than into the distance: same respawn
+      if(s.x<-40||s.x>W+40||s.y<-40||s.y>H+40){
+        Object.assign(s,starSeed(),{z:1}); starResp++;
+        s.x=cx+s.dx*W/s.z; s.y=cy+s.dy*H/s.z;
+      }
+    }
+    for(const s of memStars){
+      s.z-=dz;
+      if(s.z<=STAR_ZMIN||s.x<-40||s.x>W+40||s.y<-40||s.y>H+40){ s.dead=true; continue; }
+      s.x=cx+s.dx*W/s.z; s.y=cy+s.dy*H/s.z;
+    }
+    if(memStars.some(s=>s.dead)) memStars=memStars.filter(s=>!s.dead);
+    const bandY=voiceY(H), bandW=H*0.22*tw('band'), twAmp=0.12*tw('twinkle');
+    // Depth reads as size and brightness.
+    //
+    // A CLAIM WAS WRITTEN HERE AND MEASURED FALSE. The Flow look reported that
+    // Starfield's ink share fell from 51.1% to 35.7% on a 4x canvas, and this
+    // comment said depth scaling fixed it. Neither part survived: that figure
+    // counted every non-black pixel, which in this style is mostly the nebula
+    // haze, whose discs are placed at random and vary more between RUNS than
+    // between canvas sizes. Counting only pixels bright enough to be a star, the
+    // falloff is 0.84 before and 0.82 after — unchanged.
+    //
+    // What the depth scaling DID do is worth more anyway: star ink roughly
+    // DOUBLED at both sizes, 0.44% -> 0.91%, because a near star is large. The
+    // sky is fuller, not less prone to emptying.
+    const depth=s=>s.z?Math.min(3.4,0.34/s.z+0.22):1;
+    const star=(s,base,c0)=>{
+      const tw=base+twAmp*Math.sin(t*s.sp+s.ph);
+      const d=Math.abs(s.y-bandY)/bandW;
+      const lit=level*Math.max(0,1-d*d);            // gaussian-ish band at pitch height
+      const c=lit>0.02?mix(c0,col,Math.min(1,lit*1.5)):c0;
+      const dp=depth(s);
+      const a=Math.min(1,vI()*(tw+lit*0.9)*Math.min(1,0.45+0.55*dp));
+      const r=s.r*(1+lit*1.6)*dp;
+      ctx.fillStyle=rgba(c,a);
+      ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fill();
+      if(lit>0.25||(s.mem&&a>0.4)){                  // cross-sparkle on bright stars
+        ctx.strokeStyle=rgba(c,a*0.5); ctx.lineWidth=1;
+        ctx.beginPath();
+        ctx.moveTo(s.x-r*3,s.y); ctx.lineTo(s.x+r*3,s.y);
+        ctx.moveTo(s.x,s.y-r*3); ctx.lineTo(s.x,s.y+r*3);
+        ctx.stroke();
+      }
+    };
+    // A STAR TAKES ITS COLOUR FROM THE THEME. They were drawn white and only
+    // mixed toward the palette where the voice band lit them, so changing theme
+    // moved almost nothing — the user: "the changes in colour themes are very
+    // subtle". Each star now keeps its own place in the palette, still pale
+    // enough to read as a star rather than a coloured dot.
+    for(const s of stars)
+      star(s,0.14,SETTINGS.colorMode==='theme'
+        ?mix(palAt(s.hue===undefined?0.5:s.hue),[255,255,255],0.45)
+        :mix(col,[255,255,255],0.45));
+    // memory stars: every sharp sound adds NEW coloured stars — the session
+    // literally builds this student's sky
+    for(const s of memStars) star(s,0.30,s.c);
+    const hit=onset();
+
+    // ── PASSING DUST ──
+    // These used to be RISING SPARKS: particles that drifted up from the floor
+    // of the sky while there was sound. They were added in UAT round 1 because a
+    // sustained note had nothing to do here — and once the sky started flying,
+    // they were the only things in it moving the wrong way. The user: "the
+    // rising sparks coming from below are not needed, maybe they could be
+    // incorporated into the flying through space."
+    //
+    // So they are the same idea inside the same geometry: a sound throws coloured
+    // dust into the field, and it flies past with everything else. Same slider,
+    // renamed to what it now is — the KEY stays `sparks`, so a therapist who had
+    // already turned this down keeps their setting rather than silently getting
+    // it back at full.
+    // "I can't really see the passing dust." It was emitted at 16/s, at a
+    // star's size, and born at z 0.55..1 — far away, small and dim, in a field
+    // that had just gained 300 stars to hide it among. It is 3x the rate, twice
+    // the size, drawn at full brightness rather than 0.7, and born NEAR
+    // (z 0.30..0.75) so it is already large when it appears and sweeps past
+    // quickly. It is the one thing here that is purely the student's own sound.
+    emitAcc+=dt*level*48*tw('sparks');
+    while(emitAcc>=1&&sparks.length<260){
+      emitAcc--;
+      const sd=starSeed();
+      sparks.push({dust:true, dx:sd.dx*0.75, dy:sd.dy*0.75, z:0.30+Math.random()*0.45,
+        x:0, y:0,
+        size:(1.8+Math.random()*2.6)*(H/800),
+        c:SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],0.3),
+        life:1+Math.random()*0.7, keep:false});
+    }
+    emitAcc=Math.min(emitAcc,4);
+
+    // ── A LOUD SOUND SCATTERS SKY THAT STAYS ──
+    // The user's idea of crossing Fireworks with Starfield, done the way round
+    // that suits this style: the burst does not fall and burn out, it slows to a
+    // stop and about a third of it BECOMES stars. So a shout leaves something
+    // behind, which is what the memory-star comment above always claimed and
+    // what one star per sound never really showed.
+    if(hit&&sparks.length<180){
+      const bx=W*(0.1+0.8*Math.random()), by=voiceY(H);
+      const n=(7+level*11)|0, sp=Math.min(W,H)*(0.05+0.14*level);
+      for(let i=0;i<n;i++){
+        const ang=Math.random()*Math.PI*2, v=sp*(0.25+0.75*Math.random());
+        sparks.push({x:bx,y:by,vx:Math.cos(ang)*v,vy:Math.sin(ang)*v,
+          size:(1.0+Math.random()*1.8)*(H/800),
+          c:SETTINGS.colorMode==='theme'?palAt(Math.random()):mix(col,[255,255,255],Math.random()*0.4),
+          life:1, keep:Math.random()<0.35, burst:true});
+      }
+    }
+    const slow=Math.min(W,H)*0.012;
+    sparks=sparks.filter(s=>{
+      if(s.dust){                       // dust rides the field, like a star
+        s.z-=dz;
+        s.life-=dt*0.30;
+        if(s.life<=0||s.z<=STAR_ZMIN) return false;
+        s.x=cx+s.dx*W/s.z; s.y=cy+s.dy*H/s.z;
+        if(s.x<-30||s.x>W+30||s.y<-30||s.y>H+30) return false;
+        const dp=Math.min(3.4,0.34/s.z+0.22);
+        ctx.fillStyle=rgba(s.c,Math.min(1,vI()*Math.min(1,s.life*1.25)));
+        ctx.beginPath(); ctx.arc(s.x,s.y,s.size*dp,0,Math.PI*2); ctx.fill();
+        return true;
+      }
+      const drag=s.burst?Math.pow(0.05,dt):Math.pow(0.9,dt);
+      s.vx*=drag; s.vy*=drag;
+      s.x+=s.vx*dt; s.y+=s.vy*dt;
+      s.life-=dt*(s.burst?0.45:0.3);
+      if(s.burst&&Math.hypot(s.vx,s.vy)<slow){
+        if(s.keep){                                  // it has come to rest as a star
+          // Join the field WHERE IT IS: solve the projection backwards so the
+          // star does not jump on the frame it is created. Without this a burst
+          // settled and then leapt to wherever z=0.55 happened to put it.
+          const zz=0.55;
+          memStars.push({x:s.x,y:s.y,r:s.size*0.9,ph:Math.random()*Math.PI*2,
+            sp:0.3+Math.random()*1.2,c:s.c,mem:true,z:zz,
+            dx:(s.x-cx)/W*zz, dy:(s.y-cy)/H*zz});
+          while(memStars.length>mCap) memStars.shift();
+          return false;
+        }
+        s.burst=false;                               // the rest drift off as sparks
+        s.vy=-H*0.02;
+      }
+      if(s.life<=0||s.y<-20||s.y>H+30) return false;
+      ctx.fillStyle=rgba(s.c,Math.min(1,vI()*s.life*0.7));
+      ctx.beginPath(); ctx.arc(s.x,s.y,s.size,0,Math.PI*2); ctx.fill();
+      return true;
+    });
+
+    // shooting stars: the cap was 3, which on a talkative student meant most
+    // sounds produced none at all
+    if(hit&&shoots.length<6){
+      const fromLeft=Math.random()<0.5;
+      shoots.push({x:fromLeft?-40:W+40,y:H*(0.05+0.45*Math.random()),
+        vx:(fromLeft?1:-1)*W*(0.6+0.5*Math.random()),vy:H*(0.06+0.10*Math.random()),
+        life:1,c:col.slice()});
+    }
+    shoots=shoots.filter(s=>{
+      const px=s.x,py=s.y;
+      s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt*0.7;
+      if(s.life<=0||s.x<-80||s.x>W+80) return false;
+      const grad=ctx.createLinearGradient(px-s.vx*0.12,py-s.vy*0.12,s.x,s.y);
+      grad.addColorStop(0,rgba(s.c,0)); grad.addColorStop(1,rgba(mix(s.c,[255,255,255],0.6),s.life*0.9));
+      ctx.strokeStyle=grad; ctx.lineWidth=Math.max(1.5,H*0.003); ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(px-s.vx*0.12,py-s.vy*0.12); ctx.lineTo(s.x,s.y); ctx.stroke();
+      return true;
+    });
+  }
+
+  // ── 🟩 Pixels: the whole screen is a coarse pixel grid (count set by the
+  //    "Pixels across" slider) running a heat simulation. The voice is a heat
+  //    source — loudness sets intensity, pitch sets height — and heat blooms
+  //    outward cell by cell, then cools. In silence the grid idles as a faint
+  //    breathing mosaic of the theme; heat slides each cell's colour up the
+  //    palette towards the hot end, white-hot at the core. Flat rects — cheap. ──
+  function pixCols(){ return Math.max(8,Math.round(30*tw('px'))); }
+  function initPix(W,H){
+    const cols=pixCols(), s=W/cols, rows=Math.max(2,Math.ceil(H/s));
+    pix={W,H,cols,rows,s,heat:new Float32Array(cols*rows),
+      tmp:new Float32Array(cols*rows),sx:cols/2,hot:false};
+  }
+  // Pour heat into the grid around cell (cx,cy) with a soft gaussian edge.
+  function pixHeat(cx,cy,rad,amt){
+    const P=pix, r2=rad*rad;
+    const x0=Math.max(0,(cx-rad)|0), x1=Math.min(P.cols-1,Math.ceil(cx+rad));
+    const y0=Math.max(0,(cy-rad)|0), y1=Math.min(P.rows-1,Math.ceil(cy+rad));
+    for(let y=y0;y<=y1;y++) for(let x=x0;x<=x1;x++){
+      const d2=(x-cx)*(x-cx)+(y-cy)*(y-cy);
+      if(d2>r2) continue;
+      const i=y*P.cols+x;
+      P.heat[i]=Math.min(1.25,P.heat[i]+amt*Math.exp(-d2/(r2*0.35)));
+    }
+  }
+  function drawPixels(W,H,dt){
+    if(!pix||pix.W!==W||pix.H!==H||pix.cols!==pixCols()) initPix(W,H);
+    const P=pix, C=P.cols, R=P.rows, s=P.s, sc=Math.sqrt(C/30);
+    // the source wanders slowly left-right so a session paints the whole screen
+    const wx=C*(0.5+0.30*Math.sin(t*0.11)+0.14*Math.sin(t*0.043+2));
+    P.sx+=(wx-P.sx)*(1-Math.exp(-dt/1.5));
+    if(level>0.02)
+      pixHeat(P.sx,voiceY(H)/s,(1.2+3.4*level)*sc,dt*(3+24*level));
+    if(onset()) pixHeat(P.sx,voiceY(H)/s,(2.6+2.5*level)*sc,0.55);  // pop = splash
+    // diffuse to the four neighbours, then cool (afterglow = how long heat lives)
+    const heat=P.heat, tmp=P.tmp;
+    const k=Math.min(0.42,dt*5.5*tw('spread'));
+    const cool=Math.exp(-dt/(6.5*tw('linger')));
+    for(let y=0;y<R;y++) for(let x=0;x<C;x++){
+      const i=y*C+x, h=heat[i];
+      const nb=heat[i-(x>0?1:0)]+heat[i+(x<C-1?1:0)]+heat[i-(y>0?C:0)]+heat[i+(y<R-1?C:0)];
+      let v=(h+k*(nb*0.25-h))*cool-dt*0.012;
+      tmp[i]=v>0?v:0;
+    }
+    P.heat=tmp; P.tmp=heat;
+    // render: every cell, every frame — the screen IS the grid
+    const themeMode=SETTINGS.colorMode==='theme';
+    const gap=Math.max(1,s*0.06), tri=v=>{ v%=2; return v<1?v:2-v; };
+    let mx=0;
+    for(let y=0;y<R;y++) for(let x=0;x<C;x++){
+      const h=tmp[y*C+x]; if(h>mx) mx=h;
+      const hv=Math.min(1,h);
+      // resting palette position: slow diagonal sweep so silence still shows
+      // the full theme as a breathing mosaic
+      const g0=tri(x*0.6/(C-1)+y*0.4/(R-1)+t*0.008);
+      let c;
+      if(themeMode){
+        // thermal-camera reading of the theme: as a cell heats up its colour
+        // sweeps THROUGH the palette towards the hot end, so every bloom wears
+        // the full theme as rings; only overdriven cores flash white below
+        const w=Math.pow(hv,0.7);
+        c=palAt(g0+(hv-g0)*w);
+      } else c=mix(col,[255,255,255],hv*0.4);
+      if(h>1) c=mix(c,[255,255,255],Math.min(0.4,(h-1)*1.6));  // white-hot core
+      const idle=0.05*(0.75+0.25*Math.sin(t*0.6+(x+y)*0.7));
+      ctx.fillStyle=rgba(c,Math.min(1,vI()*(idle+0.92*Math.pow(hv,0.9))));
+      ctx.fillRect(x*s+gap*0.5,y*s+gap*0.5,s-gap,s-gap);
+    }
+    P.hot=mx>0.015;
+  }
+
+  // ── 💡 LEDs: the sensory-room LED wall, in software. The WHOLE SCREEN is a
+  //    grid of LEDs; the chase runs around the outer rectangle and around every
+  //    rectangle inside it, working toward the centre. ──
+  //
+  // THIS REPLACES SIX SEPARATE PATTERNS, and the user is right that it is better:
+  // "I don't like the mixture of styles. What about a full grid of LEDs that
+  // cover the whole screen and the chase around the outside, is on every
+  // internal rectangle as you move to the centre." Six unrelated effects behind
+  // a slider is a menu; this is one idea with controls that all act on it.
+  //
+  // Every LED belongs to exactly one concentric rectangle — its RING, the
+  // distance to the nearest edge in grid steps — and to one position around that
+  // ring's perimeter. The chase is a hotspot travelling around each ring at
+  // once; `Spiral` offsets each ring's phase from the one outside it, so at 0
+  // the hotspots line up into a pulse breathing inward and at 2 they trail into
+  // a spiral. Each ring also carries one frequency band, low at the edge and
+  // high at the centre, so a voice lights the wall from the outside in.
+  function drawLeds(W,H,dt){
+    const m=Math.min(W,H);
+    const sp=Math.max(14,(m/30*tw('size'))|0);
+    const cols=Math.max(5,Math.round(W/sp)), rows=Math.max(5,Math.round(H/sp));
+    const cw=W/cols, ch=H/rows, rad=Math.min(cw,ch)*0.30;
+    const nRings=Math.max(1,Math.ceil(Math.min(cols,rows)/2));
+    updateBands(nRings,dt);
+    ledChase=(ledChase+dt*(0.12+0.85*level)*tw('chase'))%1;
+    // a transient is a wave that runs inward across the rings
+    if(onset()&&ledPulses.length<5) ledPulses.push({r:-0.6,life:1});
+    ledPulses=ledPulses.filter(p=>{ p.r+=dt*nRings*1.5; p.life-=dt*0.65;
+      return p.life>0&&p.r<nRings+1.5; });
+    // AT `Chase speed` 0 THE CHASE IS OFF, not frozen. It used to stop advancing
+    // and keep lighting, so the bottom of the slider left a ring of stationary
+    // bright dots on every rectangle — which is not what a speed of zero means,
+    // and not what the other sliders that reach 0 in this app do (`Sound spread`,
+    // `Passing dust`, the old `Equalizer height`). Zero is off.
+    const chaseAmt=tw('chase');
+    const spiral=tw('spiral')*0.10, spread=tw('spectrum');
+    for(let gy=0;gy<rows;gy++) for(let gx=0;gx<cols;gx++){
+      const ring=Math.min(gx,gy,cols-1-gx,rows-1-gy);
+      const w=cols-2*ring, h=rows-2*ring;
+      const per=Math.max(1,2*(w+h)-4);          // LEDs around this rectangle
+      // where this LED sits around its own rectangle, clockwise from top-left
+      let u;
+      if(gy===ring)                u=gx-ring;
+      else if(gx===cols-1-ring)    u=(w-1)+(gy-ring);
+      else if(gy===rows-1-ring)    u=(w-1)+(h-1)+(cols-1-ring-gx);
+      else                         u=(w-1)+(h-1)+(w-1)+(rows-1-ring-gy);
+      const t01=per>1?u/per:0;
+      const head=((ledChase-ring*spiral)%1+1)%1;
+      let d=Math.abs(t01-head); d=Math.min(d,1-d);
+      let b=0.045;                              // the wall is visible at rest
+      if(chaseAmt>0.001) b+=0.85*Math.max(0,1-d*per/3.0);   // hotspot, ~3 LEDs wide
+      const v=bands?bands[Math.min(nRings-1,ring)]:0;
+      b+=0.8*Math.pow(v,0.8)*spread;            // this ring's own band
+      for(const pu of ledPulses) b+=pu.life*Math.max(0,1-Math.abs(ring-pu.r)/1.4);
+      b=Math.min(1,b)*vI();
+      const c=SETTINGS.colorMode==='theme'?palAt(nRings>1?ring/(nRings-1):0.5):col;
+      ctx.fillStyle=rgba(b>0.75?mix(c,[255,255,255],(b-0.75)*1.6):c,0.10+0.88*b);
+      ctx.beginPath();
+      ctx.arc((gx+0.5)*cw,(gy+0.5)*ch,rad*(1+0.5*b),0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function drawTouchRings(W,H,dt){
+    touchRings=touchRings.filter(g=>{
+      g.r+=g.v*dt; g.a*=Math.pow(0.2,dt);
+      if(g.a<0.01) return false;
+      ctx.strokeStyle=rgba(g.c,g.a);
+      ctx.lineWidth=Math.max(2,H*0.006);
+      ctx.beginPath(); ctx.arc(g.x,g.y,g.r,0,Math.PI*2); ctx.stroke();
+      return true;
+    });
+  }
+
+  return {
+    sectionLabel:'Voice',
+    lockMode:'flow',
+    noVoices:true,                    // listen-only: touch never makes sound either
+    hideRail:['clear','instrument'],
+    paneLabels:{ instrument:'🎤 Voice', sound:'🎤 Voice' },
+    themes:(function(){ const o={};
+      for(const k in THEMES) o[k]={label:THEMES[k].label,
+        colors:THEMES[k].colors.map(c=>c.map(v=>v/255))};
+      return o; })(),
+    // `boost` is RETIRED and read by nothing — but it stays here at 1 rather
+    // than being deleted, because applySettingsParam() counts a key it has never
+    // heard of as junk. Removing it would make every launch link written before
+    // this phase raise "⚠ 1 setting not understood" about a setting that is
+    // merely obsolete. It can never appear in a NEW link either, since
+    // settingsDiff() only writes what differs from the default and nothing can
+    // change it. PHASE-11-LISTENING.md §4.2.
+    defaults:{ theme:'prism', sensitivity:'talk', boost:1, visMode:'mandala',
+      micTrim:0, voiceRange:'wide',
+      visIntensity:1,
+      mode:'flow', paint:true, yAxis:'none', colorMode:'theme', showLabels:false },
+    schema:[],
+    railButtons:[
+      { id:'vvmic', label:'Mic', icon:()=>micOn()?'🎤':'🎙️',
+        title:()=>micOn()?'Microphone is on — tap to turn it off':'Turn the microphone on',
+        active:()=>micOn(),
+        onClick(){ if(micOn()) disableMic(); else enableMic(); } },
+    ],
+    // expose read-only internals for automated verification (no UI)
+    _dbg(){ return {mic:micState, level:+level.toFixed(3), pitch:+pitch01.toFixed(3),
+      meter:+meterLvl.toFixed(3), polls:pollCount, mode:SETTINGS.visMode,
+      // the listening path, for the Phase 11 probes
+      dbfs:+lastDbfs.toFixed(1), floorDb:+floorDb().toFixed(1), ceilDb:+ceilDb().toFixed(1),
+      rangeDb:+availDb().toFixed(1), gate:gateOpen, seeding:seedLeft>0,
+      f0:+f0Hz.toFixed(1), conf:+conf.toFixed(3), bright:+bright.toFixed(3),
+      defn:+defn('texture').toFixed(3),
+      rate:+lvlRate.toFixed(2), range:pitchRange().map(v=>Math.round(v)),
+      onsetN, frameN, ringN, ringStr,
+      bands:bands?Array.from(bands,v=>+v.toFixed(3)):null,
+      parts:parts.length, rings:rings.length, stars:stars.length,
+      sparks:sparks.length, memStars:memStars.length, shoots:shoots.length,
+      fast:+fastLvl.toFixed(3),
+      mandMax:+(mandBoost?Math.max.apply(null,mandBoost):0).toFixed(3),
+      mandReach:mandReach?Math.round(Math.max.apply(null,mandReach)):0,
+      // Mandala: the longest spoke actually drawn, and the ceiling it is drawn
+      // against, both as fractions of min(W,H). `use` is what share of the
+      // available reach the picture is taking — the question behind "a stronger
+      // Mandala at full loudness".
+      mand:{len:+mandLenMax.toFixed(4), rmax:+mandRmax.toFixed(4),
+            use:+(mandRmax?mandLenMax/mandRmax:0).toFixed(3),
+            bmax:bands?+Math.max.apply(null,Array.from(bands)).toFixed(3):0},
+      // Starfield: how many stars have swept past the camera. A screenshot diff
+      // SATURATES — a star that moves further than its own width reads as
+      // "changed" whatever its speed, so it cannot tell travel x1 from x2 — and
+      // the slider is the therapist's control, so its effect has to be countable.
+      starResp, starZ:stars.length?+(stars.reduce((a,b)=>a+(b.z||1),0)/stars.length).toFixed(3):0,
+      mandHot:mandHot(), pluckLive,
+      pluckMax:pluckU?Math.round(Math.max.apply(null,Array.from(pluckU,Math.abs))):0,
+      // Fireworks: how far a burst actually REACHES, which is the thing the user
+      // asked to be bigger. Distances are fractions of min(W,H) from the burst's
+      // own origin, so they do not depend on the window size.
+      fw:(()=>{ const m=Math.min(canvas.width,canvas.height);
+        // ONLY THE NEWEST BURST. Measuring every trail particle from the newest
+        // burst's origin mixed in the survivors of the one before it, which are
+        // far away by then: it reported p90 0.30 beside p50 0.02, a shape no
+        // burst ever had, and the p90 was the PREVIOUS explosion.
+        const d=parts.filter(p=>p.trail&&p.bi===fwId).map(p=>Math.hypot(p.x-fwBx,p.y-fwBy)/m).sort((a,b)=>a-b);
+        const off=parts.filter(p=>p.x<0||p.x>canvas.width||p.y<0||p.y>canvas.height).length;
+        return {n:parts.length, trail:d.length, age:+(t-fwAt).toFixed(2),
+          p50:d.length?+d[d.length>>1].toFixed(3):0,
+          p90:d.length?+d[Math.min(d.length-1,Math.floor(d.length*0.9))].toFixed(3):0,
+          max:d.length?+d[d.length-1].toFixed(3):0, off,
+          size:+((1.2)*(canvas.height/800)).toFixed(2)}; })(),
+      lava:{n:blobs.length, rad:blobs.map(b=>+(b.R||0).toFixed(2)),
+        lum:blobs.map(b=>+(b.L||0).toFixed(4)),
+        pos:blobs.map(b=>[+(b.x/canvas.width).toFixed(5),+(b.y/canvas.height).toFixed(5)]),
+        out:blobs.filter(b=>b.x<0||b.x>canvas.width||b.y<0||b.y>canvas.height).length,
+        spd:Math.round(blobs.reduce((s,b)=>Math.max(s,Math.hypot(b.vx,b.vy)),0))}}; },
+    // NOTHING here any more. The microphone settings moved to the Sound tab in
+    // UAT round 1: this app is listen-only, so its Sound tab held one paragraph
+    // saying there was nothing to set, while Setup -> Access had the whole
+    // microphone on top of the controller, dwell and reach-area rows. CLAUDE.md
+    // puts per-student INPUT settings here, and the reason that rule exists is
+    // so a therapist finds things in the same place every time - which an empty
+    // Sound tab beside an overloaded Setup tab defeats more than the move does.
+    // For an app whose only sound is the one coming IN, the microphone IS the
+    // Sound tab.
+    // 🎤 Voice tab — the microphone, which for a listen-only app IS the sound.
+    // Everything from the mic switch down to Voice range lives here after UAT
+    // round 1, and the block of comments above says why.
+    buildSound(el){
+      const note=document.createElement('div');
+      note.className='hint'; note.style.cssText+='line-height:1.6;padding:4px 0 10px';
+      note.textContent='Voice Visuals only listens — the microphone is never played through the '+
+        'speakers, so there is no feedback howl. Loudness controls the size and brightness of '+
+        'the visuals; the pitch of the voice sets the height and colour. Nothing is recorded: '+
+        'the app holds a fraction of a second of sound to measure it, and nothing is written down.';
+      el.appendChild(note);
+
+      const row=document.createElement('div'); row.className='chips';
+      const mb=document.createElement('div'); mb.className='chip'+(micOn()?' active':'');
+      mb.textContent=micOn()?'🎤 Microphone is ON — tap to turn off'
+                    :micState==='seeding'?'🎧 Listening to the room…':'🎙️ Turn the microphone on';
+      mb.addEventListener('click',e=>{ e.stopPropagation(); if(micOn()) disableMic(); else enableMic(); });
+      row.appendChild(mb);
+      // Re-measure the room. A therapist needs this after the projector goes on,
+      // a window opens, or a different microphone is plugged in — the floor
+      // tracks all three on its own, but "now, while it is quiet" is faster and
+      // is the one moment they can guarantee silence.
+      const cal=document.createElement('div'); cal.className='chip';
+      cal.textContent='🎧 Listen to the room';
+      cal.addEventListener('click',e=>{ e.stopPropagation();
+        if(!micOn()&&micState!=='seeding') return;
+        seedFloor(); micState='seeding'; updateMicUI(); });
+      row.appendChild(cal);
+      el.appendChild(row);
+      // Say the condition out loud. Tapping this while someone is talking sets
+      // the floor to the talking, and the app is then deaf until the room goes
+      // quiet — which it recovers from on its own, but only once it does.
+      const ch=document.createElement('div'); ch.className='hint';
+      ch.textContent='Tap “Listen to the room” while the room is quiet. It also '+
+        're-measures on its own whenever the room gets quieter.';
+      el.appendChild(ch);
+      const meter=document.createElement('div'); meter.id='vvMeter';
+      const fill=document.createElement('div'); fill.id='vvMeterFill'; meter.appendChild(fill);
+      el.appendChild(meter);
+      const read=document.createElement('div'); read.id='vvRead'; el.appendChild(read);
+      const warn=document.createElement('div'); warn.id='vvWarn'; el.appendChild(warn);
+      updateVoiceRead();
+      el.appendChild(makeChips('Sensitivity — how big a range of loudness fills the screen',
+        'sensitivity',SENS,buildSoundPanel));   // the Range slider below reads off this
+      // "Fine trim" showing "+8 dB" read like MORE and did the opposite: a wider
+      // range means a student has to be LOUDER to fill the screen. Renamed in
+      // UAT round 1 and, more to the point, it now shows the RESULT rather than
+      // the offset — so the number under this slider is the same number the
+      // readout above prints, and there is no direction left to get wrong.
+      el.appendChild(makeSlider({key:'micTrim',label:'Range',min:-10,max:10,step:1,
+        fmt:v=>Math.max(RANGE_MIN,Math.min(RANGE_MAX,
+          (SENS[SETTINGS.sensitivity]||SENS.talk).range+v))+' dB',
+        onChange:updateVoiceRead}));
+      // A student's voice, so it belongs beside the microphone rather than on
+      // Visuals: an adult male lives in the bottom third of an 80-1200 Hz map
+      // and a child in the top half, so neither ever sees the whole palette.
+      el.appendChild(makeChips('Voice range — which colours this student can reach',
+        'voiceRange',VRANGE,()=>{ autoLo=0; autoHi=0; pokeSim(); }));
+      const h=document.createElement('div'); h.className='hint';
+      h.style.cssText+='line-height:1.5';
+      h.textContent='Auto follows this student’s own voice, so they always reach the whole '+
+        'palette — but the same note gives a different colour in a different session. '+
+        'Wide is the one to keep if a student is learning that high means violet.';
+      el.appendChild(h);
+    },
+    // ✨ Visuals tab
+    buildVisuals(el){
+      el.appendChild(makeChips('Style','visMode',VISMODES,()=>{ pokeSim(); buildVisualsPanel(); }));
+      el.appendChild(makeSlider({key:'visIntensity',label:'Visual intensity',
+        min:0.4,max:1.5,step:0.05,dp:2,onChange:pokeSim}));
+      // fine-tune sliders for the current style
+      const defs=TWEAKS[SETTINGS.visMode];
+      if(defs){
+        const h=document.createElement('div'); h.className='sectn';
+        h.textContent=(VISMODES[SETTINGS.visMode]||{}).label; el.appendChild(h);
+        defs.forEach(d=>{
+          const [p,label,min,max,fmt,step]=d, mode=SETTINGS.visMode;
+          const row=document.createElement('div'); row.className='row';
+          const head=document.createElement('div'); head.className='rowhead';
+          const lab=document.createElement('label'); lab.textContent=label;
+          const val=document.createElement('span'); val.className='val';
+          const get=()=>{ const o=SETTINGS.tw&&SETTINGS.tw[mode]; const v=o?o[p]:null; return v==null?1:v; };
+          const show=()=>{ val.textContent=fmt?fmt(get()):'×'+get().toFixed(2); };
+          show();
+          head.appendChild(lab); head.appendChild(val);
+          const inp=document.createElement('input');
+          inp.type='range'; inp.min=min; inp.max=max; inp.step=step||0.05; inp.value=get();
+          inp.addEventListener('input',()=>{
+            if(!SETTINGS.tw) SETTINGS.tw={};
+            if(!SETTINGS.tw[mode]) SETTINGS.tw[mode]={};
+            SETTINGS.tw[mode][p]=parseFloat(inp.value);
+            show();
+            saveSettings(); pokeSim();
+          });
+          row.appendChild(head); row.appendChild(inp); el.appendChild(row);
+        });
+        const rc=document.createElement('div'); rc.className='chips';
+        const r=document.createElement('div'); r.className='chip'; r.textContent='↺ Reset this style';
+        r.addEventListener('click',e=>{ e.stopPropagation();
+          if(SETTINGS.tw) delete SETTINGS.tw[SETTINGS.visMode];
+          saveSettings(); pokeSim(); buildVisualsPanel(); });
+        rc.appendChild(r); el.appendChild(rc);
+      }
+      el.appendChild(makeChips('Colour','colorMode',
+        {theme:{label:'🎨 Theme colours'},single:{label:'⬤ One colour'}},
+        buildVisualsPanel));
+      if(SETTINGS.colorMode==='theme'){
+        const tc=document.createElement('div'); tc.className='chips';
+        for(const k in THEMES){
+          const c=document.createElement('div'); c.className='chip'+(SETTINGS.theme===k?' active':'');
+          c.textContent=THEMES[k].label;
+          c.addEventListener('click',e=>{ e.stopPropagation(); setTheme(k); pokeSim(); buildVisualsPanel(); });
+          tc.appendChild(c);
+        }
+        el.appendChild(tc);
+      }
+      if(SETTINGS.colorMode==='single'){
+        const row=document.createElement('div'); row.className='swrow';
+        STANDARD_SWATCHES.forEach(c=>{
+          const sw=document.createElement('div'); sw.className='swatch'; sw.style.background=rgbCss(c);
+          const lk=SETTINGS.lockedColor;
+          if(lk) sw.classList.toggle('active',Math.abs(c[0]-lk[0])<0.05&&Math.abs(c[1]-lk[1])<0.05&&Math.abs(c[2]-lk[2])<0.05);
+          sw.addEventListener('click',e=>{ e.stopPropagation();
+            SETTINGS.lockedColor=c.slice(); saveSettings(); buildVisualsPanel(); });
+          row.appendChild(sw);
+        });
+        el.appendChild(row);
+      }
+      appendBgControl(el);
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      if(!VISMODES[SETTINGS.visMode]) SETTINGS.visMode='mandala';
+      if(!document.getElementById('vvGate')){
+        const g=document.createElement('div'); g.id='vvGate';
+        const b=document.createElement('button');
+        b.addEventListener('click',e=>{ e.stopPropagation(); enableMic(); });
+        const m=document.createElement('div'); m.className='msg';
+        g.appendChild(b); g.appendChild(m); stageEl.appendChild(g);
+      }
+      updateMicUI();
+      this.reset();
+    },
+    resize(w,h){ stars=[]; blobs=[]; this.reset(); },
+    // Touch behaves like the voice for the current style (silent, but the same
+    // visual language): seed a pixel colony, stir the lava, pour particles…
+    // Styles where position has no meaning fall back to a soft touch ring.
+    // A TAP IS WORTH A SHOUT. Every one of these was quietly weaker than what
+    // the voice produces at level 1 — Fireworks gave a tap 18 particles at
+    // 0.30m against the voice's 80 at 0.72m, Ripples 0.55 against 1.0, Mandala
+    // 0.7, Lava 0.6, Starfield a single star against a whole scatter. A student
+    // who cannot vocalise yet, or a therapist demonstrating what a sound will
+    // do, was being shown a smaller version of the activity. There is no reason
+    // for that: the tap IS the deliberate act. Reported in UAT round 3 as
+    // "clicking explosions should be the same strength as the settings/voice".
+    splat(x,y,dx,dy,color){
+      const W=canvas.width, H=canvas.height, m=Math.min(W,H);
+      const X=x*W, Y=(1-y)*H, mode=SETTINGS.visMode, now=performance.now();
+      const c=color.map(v=>Math.min(1,v)*255);
+      const act=ms=>{ if(now-lastTouchAct<ms) return false; lastTouchAct=now; return true; };
+      if(mode==='mandala'){    // pour energy into the spectrum bars at the finger's angle
+        const cx=W/2, cy=H/2, r0=m*0.13, d=Math.hypot(X-cx,Y-cy);
+        if(d<r0*1.05){ if(act(180)) mandBurst(1); }          // centre → the whole ring flares out
+        else mandTouch(Math.atan2(Y-cy,X-cx),1,2,Math.max(0,d-r0));    // finger → beam stretches out to the touch
+        pokeSim();
+        return;
+      }
+      if(mode==='lava'){       // snooker strike: a crisp hit sends the blob away,
+        for(const b of blobs){ // friction (in drawLava) rolls it back to a drift
+          const d=Math.hypot(b.x-X,b.y-Y);
+          if(d<m*0.25&&now-(b.lp||0)>150){
+            b.lp=now; b.hot=1;
+            b.vx+=(b.x-X)/(d+1)*m*0.18; b.vy+=(b.y-Y)/(d+1)*m*0.18;
+          }
+        }
+        pokeSim();
+        return;
+      }
+      if(mode==='pixels'){     // the finger is a heat source: drag to paint warmth
+        if(pix) pixHeat(X/pix.s,Y/pix.s,2.2*Math.sqrt(pix.cols/30),0.4);
+        return;
+      }
+      if(mode==='leds'&&act(250)){   // fire pulses along the strip from the nearest edge
+        const dEdge=[Y,H-Y,X,W-X];   // top, bottom, left, right
+        const e=dEdge.indexOf(Math.min.apply(null,dEdge));
+        const L=2*(W+H);
+        const s=e===1?X : e===3?W+(H-Y) : e===0?W+H+(W-X) : W+H+W+Y;
+        ledPulses.push({s,v:L*0.45,life:1});
+        ledPulses.push({s,v:-L*0.45,life:1});
+        return;
+      }
+      if(mode==='ripples'){     // tap the pond: a drop lands right at the finger
+        if(act(150)) rippleRing(X,Y,1,c);   // full strength, and born small at the finger
+        return;
+      }
+      if(mode==='waves'){      // grab the line: drag it and it springs back in ripples
+        if(pluckU){
+          const N=pluckU.length, idx=Math.max(1,Math.min(N-2,Math.round(x*(N-1))));
+          const disp=Math.max(-H*0.35,Math.min(H*0.35,Y-H/2));
+          for(const o of [-1,0,1]){        // hold the string at the finger
+            const j=idx+o;
+            if(j>0&&j<N-1){ pluckU[j]=disp*(o?0.7:1); pluckV[j]=0; }
+          }
+          pluckLive=true; pokeSim();
+        }
+        return;
+      }
+      if(mode==='fountain'){
+        if(act(250)&&parts.length<400){
+          // the same two expressions the voice uses at level 1, so a tap and a
+          // shout make the same explosion
+          const n=Math.min(400-parts.length,(80*tw('burst'))|0);
+          const sp2=0.72*m*Math.sqrt(tw('burst'));
+          for(let i=0;i<n;i++){
+            const a=Math.random()*Math.PI*2, sv=sp2*(0.3+0.7*Math.random());
+            parts.push({x:X,y:Y,vx:Math.cos(a)*sv,vy:Math.sin(a)*sv,
+              size:(1.2+Math.random()*2.2)*(H/800),c:c.slice(),
+              life:1+Math.random()*0.4,trail:true,px:X,py:Y,h:[X,Y]});
+          }
+        }
+        return;
+      }
+      if(mode==='stars'){      // touch the sky and it scatters, as a shout does
+        if(act(250)){
+          const n=18, sp2=m*0.19;      // the voice's own (7+level*11) and 0.05+0.14*level
+          for(let i=0;i<n&&sparks.length<200;i++){
+            const ang=Math.random()*Math.PI*2, v=sp2*(0.25+0.75*Math.random());
+            sparks.push({x:X,y:Y,vx:Math.cos(ang)*v,vy:Math.sin(ang)*v,
+              size:(1.0+Math.random()*1.8)*(H/800),c:c.slice(),
+              life:1,keep:Math.random()<0.35,burst:true});
+          }
+          pokeSim();
+          return;
+        }
+      }
+      // fallback (rapid taps on stars): soft ring
+      if(touchRings.length>=24) return;
+      touchRings.push({x:X,y:Y,r:4,v:0.18*m,a:0.35,c});
+    },
+    frame(dt){
+      analyse(dt);
+      frameN++;
+      if(!ctx) return;
+      t+=dt;
+      // A retired style can arrive AFTER init - a preset, or a settings restore -
+      // and init's clamp has already run by then. Clamping here means every
+      // route agrees on one answer: `flow` was deleted on 2026-09-05 and a
+      // student's saved setup falls back to Mandala rather than to whatever the
+      // dispatch chain happens to end with.
+      if(!VISMODES[SETTINGS.visMode]) SETTINGS.visMode='mandala';
+      const W=canvas.width,H=canvas.height,mode=SETTINGS.visMode;
+      // THE FRAME IS CLEARED, NOT FADED, AND THAT IS THE WHOLE GHOSTING FIX.
+      //
+      // Every style used to paint rgba(background, fade) over the canvas, which
+      // on an 8-bit surface is dst = round(dst * (1 - fade)). A pixel stops
+      // moving the moment dst * fade <= 0.5, so the fade leaves a PERMANENT
+      // residue of floor(0.5/fade) — and no value below 0.5 can ever reach zero.
+      // Tuning the number cannot fix it; only 0.5 or more can, and that erases
+      // the trail it exists to draw.
+      //
+      // Measured off screenshots (probes/phase-11/ghost.js), dim-but-not-black
+      // pixels at rest and after ten seconds of silence:
+      //
+      //   ripples  0.30    6.96% -> 90.49%, still 90.49% at 25 s
+      //   leds     0.40   10.24% -> 20.49%
+      //   waves    0.30    7.16% -> 19.95%
+      //   flow     0.045   6.58% -> 17.40%, STILL climbing at 25 s  [style deleted]
+      //   fountain 0.10    6.55% -> 10.91%
+      //   lava     1       7.64% ->  7.13%   <- hard clear, nothing left
+      //   pixels   1      88.21% -> 88.16%   <- hard clear, nothing left
+      //
+      // The two that already cleared were the two that were clean, which is the
+      // measurement that decided this. Ripples was the worst by a distance: 84%
+      // of the screen holding a stalled 1/255 ghost of every ring ever drawn,
+      // which is also the likeliest reason it "stopped recognising" claps — the
+      // onsets were all firing (40 of 40, measured), the new ring just landed in
+      // a wash of old ones.
+      //
+      // Seven of the nine styles redraw themselves from state every frame and so
+      // need nothing but the clear. The two whose trail WAS the residue — Flow's
+      // ribbons and Fireworks' comet tails — now carry their own path in `h` and
+      // draw it. (Flow was DELETED at the user's request on 2026-09-05. The
+      // sentence stays because it is the record of what the measurement found,
+      // and Fireworks still carries the fix.) This project has been here before: PHASE-11 §11.3 deleted the
+      // firework glow rather than tune a gradient that banded, and Soundscape
+      // deleted its radial glow before that. Same answer, third time.
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,W,H);
+      ctx.globalCompositeOperation='lighter';
+      if(mode==='mandala') drawMandala(W,H,dt);
+      else if(mode==='lava') drawLava(W,H,dt);
+      else if(mode==='waves') drawWaves(W,H,dt);
+      else if(mode==='pixels') drawPixels(W,H,dt);
+      else if(mode==='leds') drawLeds(W,H,dt);
+      else if(mode==='ripples') drawRipples(W,H,dt);
+      else if(mode==='fountain') drawFireworks(W,H,dt);
+      else drawStars(W,H,dt);
+      drawTouchRings(W,H,dt);
+      ctx.globalCompositeOperation='source-over';
+      // keep a ~20 s animated tail after the last activity, then let the sim
+      // sleep (the last frame stays on screen as a calm still)
+      if(level>0.01||rings.length||parts.length||shoots.length||touchRings.length||
+         sparks.length||mandHot()||(mode==='waves'&&pluckLive)||
+         (pix&&pix.hot)||ledPulses.length) lastActive=t;
+      if(t-lastActive<20) pokeSim();
+    },
+    reset(){
+      if(!ctx) return;
+      rings=[]; parts=[]; touchRings=[]; shoots=[]; stars=[]; blobs=[]; sparks=[]; waxLvl=0;
+      mandBoost=null; mandReach=null; mandN=0;
+      memStars=[]; wave=null; wave2=null;
+      pluckU=null; pluckV=null; pluckLive=false;
+      pix=null; ledPulses=[]; ledChase=0;
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

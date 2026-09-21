@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Game of Life – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Conway's Game of Life — paint live cells by touch, watch patterns evolve.
+   Cell column → musical pitch; oscillators create repeating phrases, gliders make
+   traveling melodies. Supports 5 themes, colour inheritance on birth, and ghost trails.
+*/
+const Anim = (() => {
+  let ctx, W, H;
+  // Two SMALL offscreen buffers for the halo. A blur is low-frequency by
+  // definition, so there is no reason to pay full resolution for one: at a third
+  // linear it is a ninth of the pixels to fill and a third of the blur radius,
+  // and the upscale on the way back smooths it further. Invisible in the result,
+  // and it takes glow off the critical path so it can never drive the frame rate.
+  let glowA = null, glowACtx = null, glowB = null, glowBCtx = null;
+  // Both sliders ran to 20 and the top half of each bought almost nothing, so
+  // 2026-08-27 they were trimmed to 10 on the user's call. Measured: Ghost Trail
+  // 0->10 takes the trail from nothing to 0.42 s, while 10->20 only reaches
+  // 0.67 s; and Glow multiplies into a blur that is capped at GLOW_BLUR_CAP, so
+  // at Cell Size 50 anything past about 12 was already identical.
+  const TRAIL_MAX     = 10;
+  const GLOW_MAX      = 10;
+  const GLOW_SCALE    = 1 / 3;             // linear scale of the halo buffers...
+  const GLOW_MAX_PX   = 640;               // ...but never bigger than this on the long side,
+                                           // so the halo costs the same on a 4K wall as on a laptop
+  const GLOW_BLUR_CAP = 60;                // px: past this the halo only costs, it does not read
+  let cols = 0, rows = 0;
+  let grid, next, colors, nextColors;
+  let visFades, visColors; // per-cell smooth fade for birth/death transitions
+  let genAccum = 0;
+  let audioBudget = 1; // notes per generation (1 = single melodic note)
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  function packRGB(r, g, b) {
+    return ((Math.min(255, r * 255) | 0) << 16) |
+           ((Math.min(255, g * 255) | 0) << 8)  |
+            (Math.min(255, b * 255) | 0);
+  }
+
+  function unpackRGB(p) {
+    return [(p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff];
+  }
+
+  function cellCSS(packed, alpha) {
+    const [r, g, b] = unpackRGB(packed);
+    return alpha < 1
+      ? `rgba(${r},${g},${b},${alpha.toFixed(2)})`
+      : `rgb(${r},${g},${b})`;
+  }
+
+  // HSL → packed RGB (for age-based colouring)
+  function hslPack(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s /= 100; l /= 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h < 60)       { r=c; g=x; }
+    else if (h < 120) { r=x; g=c; }
+    else if (h < 180) { g=c; b=x; }
+    else if (h < 240) { g=x; b=c; }
+    else if (h < 300) { r=x; b=c; }
+    else              { r=c; b=x; }
+    return packRGB(r + m, g + m, b + m);
+  }
+
+  // Blend two packed colours equally
+  function blendPacked(a, b) {
+    const [ar, ag, ab_] = unpackRGB(a);
+    const [br, bg, bb]  = unpackRGB(b);
+    return packRGB((ar + br) / 510, (ag + bg) / 510, (ab_ + bb) / 510);
+  }
+
+  function blendThree(a, b, c) { return blendPacked(blendPacked(a, b), c); }
+
+  // ── Grid ─────────────────────────────────────────────────────────────────────
+
+  function allocGrid(c, r) {
+    cols = c; rows = r;
+    grid       = new Uint8Array(c * r);
+    next       = new Uint8Array(c * r);
+    colors     = new Uint32Array(c * r);
+    nextColors = new Uint32Array(c * r);
+    visFades   = new Float32Array(c * r);
+    visColors  = new Uint32Array(c * r);
+    genAccum   = 0;
+  }
+
+  // Reallocate the grid if the current cell size implies a different resolution.
+  // Called every frame so a cellSize change (slider or Style chip) takes effect
+  // immediately, consistent with every other setting. Reallocation clears the board.
+  function syncGridToCellSize() {
+    const cs = SETTINGS.cellSize | 0;
+    if (Math.floor(W / cs) !== cols) allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+  }
+
+  function idx(c, r) { return r * cols + c; }
+
+  function paintCell(col, row, packed) {
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return;
+    const i = idx(col, row);
+    grid[i]   = 1;
+    colors[i] = packed;
+  }
+
+  // Colour a cell purely from its position (column → hue, row → lightness).
+  // Mirrors the position-mode logic in step(); used when painting in that mode so
+  // freshly touched cells already match, instead of snapping colour on the next gen.
+  function positionColor(c, r) {
+    const th = Anim.themes[currentTheme];
+    const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+    const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+    return hslPack(hue, th.ageSat, th.ageLit + litOff);
+  }
+
+  // ── Generation step ───────────────────────────────────────────────────────────
+
+  function step() {
+    const th = Anim.themes[currentTheme];
+    // cellColor, not colorMode — the framework owns SETTINGS.colorMode (paint colours)
+    const colorMode = SETTINGS.cellColor;
+    const birthNotes = [];
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // Count live neighbours (toroidal wrap)
+        let live = 0;
+        let c0 = 0, c1 = 0, c2 = 0; // up to 3 live-neighbour colours for blending
+        let nc = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nr = (r + dr + rows) % rows;
+            const nc2 = (c + dc + cols) % cols;
+            if (grid[idx(nc2, nr)]) {
+              live++;
+              if (nc < 3) {
+                if (nc === 0) c0 = colors[idx(nc2, nr)];
+                else if (nc === 1) c1 = colors[idx(nc2, nr)];
+                else c2 = colors[idx(nc2, nr)];
+                nc++;
+              }
+            }
+          }
+        }
+
+        const i = idx(c, r);
+        const alive = grid[i] > 0;
+        let survives = false;
+
+        if (alive) {
+          survives = live === 2 || live === 3;
+        } else {
+          survives = live === 3; // birth
+        }
+
+        if (survives) {
+          next[i] = Math.min(255, (grid[i] || 0) + 1);
+          if (!alive) {
+            // Newly born cell
+            if (colorMode === 'touch' || colorMode === 'mixed') {
+              // Inherit blended colour from live parents
+              nextColors[i] = nc >= 3 ? blendThree(c0, c1, c2) :
+                              nc === 2 ? blendPacked(c0, c1) : (c0 || colors[i]);
+            } else {
+              // Two-axis: column → hue, row → lightness offset
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              nextColors[i] = hslPack(hue, th.ageSat, th.ageLit + litOff);
+            }
+            if (birthNotes.length < audioBudget) {
+              birthNotes.push([c, r]);
+            }
+          } else {
+            // Survivor: re-derive by position each gen so colour stays stable
+            if (colorMode === 'age') {
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              nextColors[i] = hslPack(hue, th.ageSat, th.ageLit + litOff);
+            } else if (colorMode === 'mixed') {
+              // Gradually shift from inherited touch colour toward position colour as cell ages
+              const t = Math.min(1, next[i] / 80);
+              const hue = th.ageHue0 + (c / cols) * (th.ageHue1 - th.ageHue0);
+              const litOff = (th.ageLitRange || 0) * (0.5 - r / rows);
+              const posCol = hslPack(hue, th.ageSat, th.ageLit + litOff);
+              const [pr, pg, pb] = unpackRGB(colors[i]);
+              const [tr, tg, tb] = unpackRGB(posCol);
+              nextColors[i] = packRGB(
+                (pr / 255 * (1 - t) + tr / 255 * t),
+                (pg / 255 * (1 - t) + tg / 255 * t),
+                (pb / 255 * (1 - t) + tb / 255 * t)
+              );
+            } else {
+              nextColors[i] = colors[i];
+            }
+          }
+        } else {
+          next[i] = 0;
+          nextColors[i] = 0;
+        }
+      }
+    }
+
+    // Swap buffers
+    const tmpG = grid; grid = next; next = tmpG;
+    const tmpC = colors; colors = nextColors; nextColors = tmpC;
+
+    // Single birth note per generation — sparse, melodic, not cluttered
+    if (SETTINGS.birthSound && birthNotes.length > 0 && audioBudget > 0) {
+      // Pick the birth nearest screen centre for a musically central note
+      const midCol = cols / 2, midRow = rows / 2;
+      birthNotes.sort((a, b) =>
+        Math.hypot(a[0] - midCol, a[1] - midRow) - Math.hypot(b[0] - midCol, b[1] - midRow)
+      );
+      const [bc, br] = birthNotes[0];
+      // Birth notes sit quieter than touch so your interaction stays in the foreground
+      pluckNote(bc / cols, 1 - br / rows, 0.5);
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+
+  // `bleed` grows the shape by a pixel, and is used ONLY when filling the glow
+  // buffer. Cells are drawn a pixel inside their square so a grid of them reads
+  // as cells rather than a solid block; the old per-cell shadow happened to fill
+  // those seams, and without the bleed the single-pass halo leaves them visible
+  // as a faint grid under the cores.
+  function drawCell(g, shape, px, py, cs, halfCS, bleed) {
+    const b = bleed || 0;
+    if (shape === 'circle') {
+      g.beginPath(); g.arc(px + halfCS, py + halfCS, halfCS * 0.9 + b, 0, Math.PI * 2); g.fill();
+    } else if (shape === 'dot') {
+      g.beginPath(); g.arc(px + halfCS, py + halfCS, halfCS * 0.44 + b, 0, Math.PI * 2); g.fill();
+    } else {
+      g.fillRect(px + 0.5 - b, py + 0.5 - b, cs - 1 + b * 2, cs - 1 + b * 2);
+    }
+  }
+
+  function glowScale() {
+    return Math.max(0.05, Math.min(GLOW_SCALE, GLOW_MAX_PX / Math.max(1, Math.max(W, H))));
+  }
+  function sizeGlowBuffer() {
+    const S = glowScale();
+    const w = Math.max(1, Math.ceil(W * S)), h = Math.max(1, Math.ceil(H * S));
+    if (!glowA) {
+      glowA = document.createElement('canvas'); glowACtx = glowA.getContext('2d');
+      glowB = document.createElement('canvas'); glowBCtx = glowB.getContext('2d');
+    }
+    if (glowA.width !== w || glowA.height !== h) {
+      glowA.width = w; glowA.height = h; glowB.width = w; glowB.height = h;
+    }
+  }
+
+  function render(dt) {
+    if (!ctx) return;
+    const cs = SETTINGS.cellSize | 0;
+
+    // Trail fade: composite semi-transparent background over previous frame.
+    //
+    // Ghost Trail keeps the curve it always had - 1/(1+trail*0.5) is already
+    // linear in DURATION, which is the right thing for a trail slider - but it
+    // is now driven from dt rather than counted in frames. It was frame-counted,
+    // so the trail lengthened in seconds whenever the frame rate dropped, and
+    // quality:auto drops a loaded room PC to 30 fps. a60 is exactly what the old
+    // code produced at 60 fps, so nothing changes at 60 fps and only the drop
+    // case is corrected.
+    // A preset or a saved blob from before the trim still holds up to 20, and a
+    // value past the slider's max renders at that value while the slider shows
+    // its end - the control would look broken and stuck. Clamp, so old presets
+    // land on the new top of the range instead.
+    if (SETTINGS.trail > TRAIL_MAX) SETTINGS.trail = TRAIL_MAX;
+    if (SETTINGS.glow  > GLOW_MAX)  SETTINGS.glow  = GLOW_MAX;
+
+    const trail = SETTINGS.trail | 0;
+    const a60 = trail === 0 ? 1 : Math.max(0.05, 1 / (1 + trail * 0.5));
+    const tau = a60 >= 1 ? 0 : -(1 / 60) / Math.log(1 - a60);
+    const alpha = tau > 0 ? Math.min(1, 1 - Math.exp(-(dt || 1 / 60) / tau)) : 1;
+    const br = bgRGB[0]*255|0, bg2 = bgRGB[1]*255|0, bb = bgRGB[2]*255|0;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(${br},${bg2},${bb},${alpha.toFixed(4)})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // ...and the fade alone never arrives. Compositing is 8-bit and an
+    // accelerated canvas ROUNDS, so once a channel is low enough that
+    // old*alpha < 0.5, old*(1-alpha) rounds straight back to old and stalls
+    // there for good - leaving everywhere the cells have been a few levels
+    // above the background for ever. Same fault, same fix, as flock.html:
+    // color-burn subtracts about one level across the range, then lighten
+    // clamps back up because burn heads for 0 rather than for the background.
+    ctx.globalCompositeOperation = 'color-burn';
+    ctx.fillStyle = 'rgb(254,254,254)';
+    ctx.fillRect(0, 0, W, H);
+    if (br || bg2 || bb) {
+      ctx.globalCompositeOperation = 'lighten';
+      ctx.fillStyle = `rgb(${br},${bg2},${bb})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    // Draw cells using visFades for smooth birth/death transitions.
+    //
+    // Glow is DECOUPLED from auto-quality, deliberately.
+    //
+    // Tying it to activeQuality() on 2026-08-27 produced a hunting loop, and the
+    // user saw exactly that: frame rate drops, glow switches off, frame rate
+    // recovers, glow switches back on, frame rate drops. The thing being measured
+    // was also the thing doing the controlling, with no hysteresis. A loop that
+    // hunts is worse than either of the states it hunts between, so the coupling
+    // is gone rather than damped.
+    //
+    // Instead the halo is made cheap enough that it never drives the frame rate:
+    // cells go once into a buffer at a third linear resolution, that buffer is
+    // blurred ONCE at that size, and the result is scaled back up. A ninth of the
+    // fills, a third of the blur radius, and the upscale smooths it further.
+    // Before this it was ctx.shadowBlur per cell with each cell drawn twice, which
+    // is the most expensive thing Canvas2D offers.
+    const shape = SETTINGS.cellShape;
+    const glowAmt = SETTINGS.glow | 0;
+    const glowBlur = glowAmt > 0 ? Math.min(GLOW_BLUR_CAP, cs * glowAmt * 0.1) : 0;
+    const halfCS = cs * 0.5;
+
+    if (glowBlur > 0) {
+      sizeGlowBuffer();
+      const S = glowScale();
+      const bw = glowA.width, bh = glowA.height;
+      glowACtx.setTransform(1, 0, 0, 1, 0, 0);
+      glowACtx.clearRect(0, 0, bw, bh);
+      glowACtx.setTransform(S, 0, 0, S, 0, 0);
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const i = idx(c, r);
+          const fade = visFades[i];
+          if (fade < 0.01) continue;
+          glowACtx.globalAlpha = fade;
+          glowACtx.fillStyle = cellCSS(visColors[i], 1);
+          // bleed a pixel of BUFFER space, so the halo covers the seams that the
+          // cores leave and a grid does not read as a grid of outlines
+          drawCell(glowACtx, shape, c * cs, r * cs, cs, halfCS, 1 / S);
+        }
+      }
+      glowACtx.setTransform(1, 0, 0, 1, 0, 0);
+      glowACtx.globalAlpha = 1;
+
+      // one blur, at buffer size
+      glowBCtx.setTransform(1, 0, 0, 1, 0, 0);
+      glowBCtx.clearRect(0, 0, bw, bh);
+      glowBCtx.filter = `blur(${Math.max(1, glowBlur * 0.5 * S) | 0}px)`;
+      glowBCtx.drawImage(glowA, 0, 0);
+      glowBCtx.filter = 'none';
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.drawImage(glowB, 0, 0, W, H);
+      ctx.restore();
+    }
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = idx(c, r);
+        const fade = visFades[i];
+        if (fade < 0.01) continue;
+        ctx.globalAlpha = fade;
+        ctx.fillStyle = cellCSS(visColors[i], 1);
+        drawCell(ctx, shape, c * cs, r * cs, cs, halfCS);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.filter = 'none';
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Public Anim object ────────────────────────────────────────────────────────
+
+  return {
+    sectionLabel: 'Life',
+    lockMode:'flow',   // an interactive animation, not an instrument — no Keys grid
+
+    themes: {
+      crystalCave: {
+        label: '💎 Crystal Cave',
+        colors: [[0, 0.9, 1], [0.4, 0.8, 1], [0.6, 1, 0.9], [0.2, 0.6, 1], [0.8, 0.5, 1]],
+        ageHue0: 170, ageHue1: 290, ageSat: 90, ageLit: 65, ageLitRange: 18,
+      },
+      coralReef: {
+        label: '🪸 Coral Reef',
+        colors: [[1, 0.35, 0.2], [1, 0.75, 0.1], [1, 0.45, 0.65], [0.2, 0.8, 0.7], [1, 0.6, 0.3]],
+        ageHue0: 0, ageHue1: 80, ageSat: 85, ageLit: 58, ageLitRange: 15,
+      },
+      emberForge: {
+        label: '🔥 Ember Forge',
+        colors: [[1, 0.1, 0], [1, 0.4, 0], [1, 0.7, 0], [1, 0.9, 0.2], [0.9, 0.05, 0.05]],
+        ageHue0: 0, ageHue1: 65, ageSat: 100, ageLit: 52, ageLitRange: 20,
+      },
+      gossamer: {
+        label: '🕸️ Gossamer',
+        colors: [[0.8, 0.6, 1], [0.6, 0.85, 1], [1, 0.7, 0.85], [0.7, 1, 0.8], [1, 0.9, 0.6]],
+        ageHue0: 230, ageHue1: 350, ageSat: 65, ageLit: 72, ageLitRange: 12,
+      },
+      neonGrid: {
+        label: '🟩 Neon Grid',
+        colors: [[0, 1, 0.3], [1, 0, 0.8], [0, 0.9, 1], [1, 0.9, 0], [0.5, 0, 1]],
+        ageHue0: 90, ageHue1: 330, ageSat: 100, ageLit: 55, ageLitRange: 15,
+      },
+      prism: {
+        label: '🌈 Prism',
+        colors: [[1, 0, 0.2], [1, 0.6, 0], [0.2, 1, 0.2], [0, 0.8, 1], [0.7, 0.2, 1]],
+        ageHue0: 0, ageHue1: 360, ageSat: 100, ageLit: 58, ageLitRange: 20,
+      },
+    },
+
+    defaults: {
+      mode:       'flow',   // sensory-first: free Flow by default, Keys grid via the rail toggle
+      theme:      'crystalCave',
+      speed:      3,
+      cellSize:   20,
+      playing:    false,
+      brush:      'single',
+      cellColor:  'age',
+      cellShape:  'square',
+      trail:      3,
+      glow:       0,
+      birthSound: true,
+      voice:      'bell',
+    },
+
+    railButtons: [{
+      id: 'play',
+      icon:  () => SETTINGS.playing ? '⏸' : '▶',
+      title: () => SETTINGS.playing ? 'Pause (Space)' : 'Play (Space)',
+      active: () => SETTINGS.playing,
+      key: ' ',
+      onClick() { SETTINGS.playing = !SETTINGS.playing; saveSettings(); },
+    }],
+
+    // Visual-only presets — sound is configured in the shared Instrument/Notes
+    // panels (and per-student presets), the same in every Music Room app.
+    styles: {
+      classic:    { label:'Classic',    speed:3,  cellSize:20, cellShape:'square', trail:3,  glow:0,  brush:'single', cellColor:'touch' },
+      microscope: { label:'Microscope', speed:5,  cellSize:8,  cellShape:'circle', trail:2,  glow:0,  brush:'large',  cellColor:'age'   },
+      pixel:      { label:'Pixel',      speed:2,  cellSize:36, cellShape:'square', trail:1,  glow:0,  brush:'single', cellColor:'mixed' },
+      stardust:   { label:'Stardust',   speed:8,  cellSize:14, cellShape:'dot',    trail:8,  glow:10, brush:'small',  cellColor:'age'   },
+    },
+
+    schema: [
+      { key: 'speed',      label: 'Speed',       min: 0.5, max: 20,  step: 0.5, dp: 1 },
+      { key: 'cellSize',   label: 'Cell Size',   min: 6,   max: 80,  step: 2,   dp: 0 },
+      { key: 'brush',      label: 'Brush Size',  type: 'preset-chips',
+        options: { single: {label:'1 cell'}, small: {label:'3×3'}, large: {label:'5×5'} } },
+      { key: 'cellColor',  label: 'Colour Mode', type: 'preset-chips',
+        options: { touch: {label:'Touch'}, age: {label:'Position'}, mixed: {label:'Mixed'} } },
+      { key: 'cellShape',  label: 'Shape',       type: 'preset-chips',
+        options: { square: {label:'■ Square'}, circle: {label:'● Circle'}, dot: {label:'· Dot'} } },
+      { key: 'trail',      label: 'Ghost Trail', min: 0,   max: TRAIL_MAX, step: 1, dp: 0 },
+      { key: 'glow',       label: 'Glow',        min: 0,   max: GLOW_MAX,  step: 1, dp: 0 },
+      { key: 'birthSound', label: 'Birth Notes', type: 'toggle' },
+    ],
+
+    init(cv) {
+      ctx = cv.getContext('2d');
+      W = cv.width; H = cv.height;
+      const cs = SETTINGS.cellSize | 0;
+      allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+      this.reset();
+      // Play/Pause is a framework rail button — see `railButtons` below.
+    },
+
+    resize(w, h) {
+      W = w; H = h;
+      sizeGlowBuffer();
+      const cs = SETTINGS.cellSize | 0;
+      allocGrid(Math.floor(W / cs), Math.floor(H / cs));
+      // Clear on resize — unavoidable with typed array realloc
+      this.reset();
+    },
+
+    splat(x, y, dx, dy, color) {
+      if (!ctx) return;
+      syncGridToCellSize();
+      const cs = SETTINGS.cellSize | 0;
+      // Direct pixel→cell: avoids double-flooring error that grows toward edges
+      const col = Math.max(0, Math.min(cols - 1, Math.floor(x * W / cs)));
+      const row = Math.max(0, Math.min(rows - 1, Math.floor((1 - y) * H / cs)));
+      const packed = packRGB(
+        Math.min(1, color[0]),
+        Math.min(1, color[1]),
+        Math.min(1, color[2])
+      );
+      const brushR = SETTINGS.brush === 'large' ? 2 : SETTINGS.brush === 'small' ? 1 : 0;
+      // In position mode, paint each cell in its own position colour so touched cells
+      // don't flash the finger colour then snap to position on the next generation.
+      const posMode = SETTINGS.cellColor === 'age';
+      for (let dr = -brushR; dr <= brushR; dr++) {
+        for (let dc = -brushR; dc <= brushR; dc++) {
+          const cc = col + dc, rr = row + dr;
+          paintCell(cc, rr, posMode ? positionColor(cc, rr) : packed);
+        }
+      }
+    },
+
+    frame(dt) {
+      if (!ctx) return;
+      syncGridToCellSize();
+
+      // While the game is playing it must keep evolving (and singing) even with
+      // no touches — opt out of the framework's 12 s idle sleep for that state.
+      if (SETTINGS.playing) pokeSim();
+
+      // Advance generation if playing
+      if (SETTINGS.playing) {
+        genAccum += dt;
+        const interval = 1 / Math.max(0.5, SETTINGS.speed);
+        while (genAccum >= interval) {
+          genAccum -= interval;
+          step();
+        }
+      }
+
+      // Smooth per-cell fade — alive cells fade in, dead cells fade out
+      const fadeRate = 6; // reaches full opacity in ~0.17 s
+      const n = cols * rows;
+      for (let i = 0; i < n; i++) {
+        if (grid[i]) {
+          visFades[i] = Math.min(1, visFades[i] + dt * fadeRate);
+          visColors[i] = colors[i];
+        } else {
+          visFades[i] = Math.max(0, visFades[i] - dt * fadeRate);
+        }
+      }
+
+      render(dt);
+    },
+
+    reset() {
+      if (!ctx) return;
+      if (grid) grid.fill(0);
+      if (colors) colors.fill(0);
+      if (visFades) visFades.fill(0);
+      if (visColors) visColors.fill(0);
+      genAccum = 0;
+      SETTINGS.playing = false;
+      refreshRailButtons();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = `rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
+      ctx.fillRect(0, 0, W, H);
+    },
+
+    setQuality(level) {
+      // Never zero: one pluck per generation is negligible audio load, and a
+      // zero budget silently mutes birth notes when auto-quality drops to low.
+      //
+      // Audio only, deliberately. Glow was briefly wired in here and it made the
+      // frame rate hunt - see the note in render(). Anything auto-quality scales
+      // must not be a large part of what auto-quality is measuring.
+      audioBudget = level === 'high' ? 4 : level === 'med' ? 2 : 1;
+    },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MIDI bench — what is plugged in, and what is it saying</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  /* A bench, not an app — the equivalent of fx_lab. It answers three questions
+     before anyone designs anything on top of MIDI: does the browser let us in
+     from file://, does it see the device, and can we tell WHAT the device is. */
+  html,body{height:100%;overflow:hidden;background:#0b0b0d}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink);display:flex}
+
+  #side{width:calc(430px * var(--ui-scale));background:#111114;height:100vh;overflow:auto;
+        padding:calc(18px * var(--ui-scale));box-sizing:border-box;border-right:1px solid #26262c;
+        flex:0 0 auto}
+  #main{flex:1 1 auto;display:flex;flex-direction:column;min-width:0}
+  #verdict{padding:calc(16px * var(--ui-scale)) calc(22px * var(--ui-scale));
+           border-bottom:1px solid #26262c;background:#0e0e12}
+  #vtitle{font-size:calc(30px * var(--ui-scale));font-weight:800;letter-spacing:-0.01em}
+  #vwhy{color:var(--ink-quiet);font-size:var(--font-s);line-height:1.5;
+        margin-top:calc(6px * var(--ui-scale))}
+  #keys{height:calc(150px * var(--ui-scale));position:relative;border-bottom:1px solid #26262c;
+        background:#08080a;overflow:hidden}
+  #log{flex:1 1 auto;overflow:auto;font:calc(13px * var(--ui-scale))/1.55 ui-monospace,Consolas,monospace;
+       padding:calc(10px * var(--ui-scale)) calc(18px * var(--ui-scale));color:#cfd2da}
+  #log div{white-space:pre}
+  #log .no{color:#7dffb0} #log .off{color:#5a6472} #log .cc{color:#8fb4ff}
+  #log .bend{color:#ffbe78} #log .other{color:#c0a0ff}
+
+  .lbl{font-size:var(--font-xs);letter-spacing:.08em;text-transform:uppercase;
+       color:rgba(255,255,255,0.45);font-weight:600;margin:calc(16px * var(--ui-scale)) 0 calc(6px * var(--ui-scale))}
+  .dev{border:1px solid var(--line);border-radius:var(--radius);padding:calc(10px * var(--ui-scale));
+       margin-bottom:calc(8px * var(--ui-scale));background:var(--surface)}
+  .dev b{display:block;font-size:var(--font-m)}
+  .dev span{color:var(--ink-quiet);font-size:var(--font-s)}
+  .note{color:var(--ink-quiet);font-size:var(--font-s);line-height:1.55}
+  .note b{color:var(--ink)}
+  #go{width:100%;height:var(--target);font-size:var(--font-m)}
+  .bad{color:#ff9b9b}
+  .key{position:absolute;bottom:0;border-radius:calc(6px * var(--ui-scale)) calc(6px * var(--ui-scale)) 0 0}
+</style>
+</head>
+<body>
+
+<div id="side">
+  <div class="sectn" style="margin-top:0">🎹 MIDI bench</div>
+  <button class="btn" id="go">🔌 Connect to MIDI</button>
+  <div class="note" id="status" style="margin-top:10px">Not connected yet.</div>
+
+  <div class="lbl">Devices</div>
+  <div id="devs"><div class="note">—</div></div>
+
+  <div class="lbl">What it looks like</div>
+  <div id="eviq" class="note">Play something and this fills in.</div>
+
+  <div class="lbl">Why this page exists</div>
+  <div class="note">
+    <b>Nothing tells you what a MIDI device IS.</b> A port gives you a name, a
+    manufacturer and an id — there is no field that says "drum pad". So the only
+    honest way to know is to watch what it plays and adapt, which has the happy
+    side effect of working for a device nobody has heard of.<br><br>
+    This bench does that classification out loud so the rule can be judged before
+    anything is built on top of it.
+  </div>
+</div>
+
+<div id="main">
+  <div id="verdict">
+    <div id="vtitle">Waiting</div>
+    <div id="vwhy">Press Connect, then play a few notes or hit a few pads.</div>
+  </div>
+  <div id="keys"></div>
+  <div id="log"><div class="off">— no messages yet —</div></div>
+</div>
+
+<script>
+'use strict';
+
+const $ = s => document.querySelector(s);
+const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+// The suite's Boomwhacker colours, so anything built on this bench already
+// agrees with every other app about what a C looks like.
+const BOOM = {0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],
+              7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+const rgb = pc => (BOOM[pc] || (BOOM[(pc+11)%12]||[200,200,200]).map(v=>Math.round(v*0.7))).join(',');
+
+let access = null;
+const seen = { notes:[], ccs:new Set(), chans:new Set(), noteCount:0, ccCount:0, bend:0,
+               byChan:{}, ccByChan:{} };
+
+/* ── Connecting ───────────────────────────────────────────────────────────────
+   requestMIDIAccess needs a permission the user grants, so it hangs off a
+   button rather than running at load: a prompt that appears on its own, in a
+   room, with a student already at the screen, is a prompt nobody reads.        */
+$('#go').addEventListener('click', async () => {
+  if (!navigator.requestMIDIAccess) {
+    $('#status').innerHTML = '<span class="bad">This browser has no Web MIDI at all.</span> ' +
+      'Edge and Chrome have it; Firefox needs it turned on; Safari does not have it.';
+    return;
+  }
+  $('#status').textContent = 'Asking for permission…';
+  try {
+    access = await navigator.requestMIDIAccess({ sysex:false });
+  } catch (e) {
+    $('#status').innerHTML = '<span class="bad">Refused: ' + e.name + '.</span> ' +
+      'If no prompt appeared, permission was remembered as blocked — the padlock ' +
+      'in the address bar clears it.';
+    return;
+  }
+  $('#status').innerHTML = 'Connected. <b>Hot-plugging works</b> — unplug and replug ' +
+    'and this list follows it.';
+  access.onstatechange = listDevices;
+  listDevices();
+});
+
+function listDevices() {
+  const ins = [...access.inputs.values()];
+  ins.forEach(i => { i.onmidimessage = onMessage; });
+  const el = $('#devs');
+  if (!ins.length) {
+    el.innerHTML = '<div class="note"><span class="bad">No MIDI inputs.</span> ' +
+      'Plug the instrument in — this list updates by itself, nothing needs reloading.</div>';
+    return;
+  }
+  el.innerHTML = ins.map(i =>
+    '<div class="dev"><b>' + esc(i.name || '(unnamed)') + '</b>' +
+    '<span>' + esc(i.manufacturer || 'unknown maker') + ' · ' + i.state + ' · ' + i.connection + '</span></div>'
+  ).join('');
+}
+const esc = s => String(s).replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;');
+
+/* ── Reading it ─────────────────────────────────────────────────────────────
+   Every message is [status, d1, d2]. The high nibble is what kind, the low
+   nibble is the channel — and channel 10 (index 9) is General MIDI percussion,
+   which is the single strongest clue a device is a drum.                      */
+function onMessage(ev) {
+  const [st, d1, d2] = ev.data;
+  const kind = st & 0xF0, ch = st & 0x0F;
+  seen.chans.add(ch);
+  let cls = 'other', text;
+
+  if (kind === 0x90 && d2 > 0) {
+    cls = 'no'; text = 'note on   ' + pad(NAMES[d1%12] + (Math.floor(d1/12)-1), 5) +
+      ' (' + pad(d1,3) + ')  velocity ' + pad(d2,3);
+    seen.noteCount++; seen.notes.push(d1); if (seen.notes.length > 400) seen.notes.shift();
+    (seen.byChan[ch] = seen.byChan[ch] || []).push(d1);
+    if (seen.byChan[ch].length > 400) seen.byChan[ch].shift();
+    flash(d1, d2, ch);
+  } else if (kind === 0x80 || (kind === 0x90 && d2 === 0)) {
+    cls = 'off'; text = 'note off  ' + pad(NAMES[d1%12] + (Math.floor(d1/12)-1), 5) + ' (' + pad(d1,3) + ')';
+  } else if (kind === 0xB0) {
+    cls = 'cc'; text = 'control   ' + pad(d1,3) + ' = ' + pad(d2,3) +
+      (d1 === 64 ? '   (sustain pedal)' : d1 === 1 ? '   (mod wheel)' : '');
+    seen.ccs.add(d1); seen.ccCount++;
+    (seen.ccByChan[ch] = seen.ccByChan[ch] || new Set()).add(d1);
+  } else if (kind === 0xE0) {
+    cls = 'bend'; text = 'pitch bend ' + (((d2<<7)|d1) - 8192); seen.bend++;
+  } else if (kind === 0xD0) { text = 'aftertouch ' + d1; }
+  else if (kind === 0xA0) { text = 'key pressure ' + d1 + ' = ' + d2; }
+  else if (kind === 0xC0) { text = 'program change ' + d1; }
+  else { text = 'raw ' + [...ev.data].join(' '); }
+
+  addLog(cls, 'ch' + pad(ch+1,2) + '  ' + text);
+  classify();
+}
+const pad = (v,n) => String(v).padStart(n,' ');
+
+function addLog(cls, s) {
+  const l = $('#log');
+  if (l.firstChild && l.firstChild.textContent.startsWith('—')) l.innerHTML = '';
+  const d = document.createElement('div'); d.className = cls; d.textContent = s;
+  l.appendChild(d);
+  while (l.childNodes.length > 300) l.removeChild(l.firstChild);
+  l.scrollTop = l.scrollHeight;
+}
+
+/* ── The visual, so a note is not only a line of text ─────────────────────── */
+function flash(note, vel, ch) {
+  const host = $('#keys'), W = host.clientWidth, H = host.clientHeight;
+  // 21..108 is the widest a full piano goes; a pad's notes land in it too
+  const x = Math.max(0, Math.min(1, (note - 21) / 87));
+  const el = document.createElement('div');
+  el.className = 'key';
+  const w = Math.max(6, W/88);
+  el.style.cssText = 'left:' + (x*(W-w)) + 'px;width:' + w + 'px;height:' +
+    (H*(0.18 + 0.82*(vel/127))) + 'px;background:rgb(' + rgb(note%12) + ')';
+  host.appendChild(el);
+  el.animate([{opacity:1},{opacity:0}], {duration:900, easing:'ease-out'})
+    .onfinish = () => el.remove();
+}
+
+/* ── What surfaces is it showing me? ───────────────────────────────────────
+   NOT "what is this device". The first thing plugged into this bench was an
+   Akai MPK Mini IV, which is 25 keys AND 8 pads AND 8 knobs on one cable — so a
+   single verdict per device is the wrong shape entirely. Every real controller
+   of that kind will do the same thing.
+
+   So the unit is a SURFACE, found per channel, and a device can show several at
+   once. An app then reacts to the message rather than to the box: a note off
+   the keys becomes a pitch, a note off the pads becomes a hit, a knob becomes a
+   control — and none of that needs to know what the device is called.
+
+   Stated with its evidence, because the rule should be arguable.             */
+function classify() {
+  const rows = [];
+  for (const ch of [...seen.chans].sort((a,b)=>a-b)) {
+    const n = seen.byChan[ch] || [];
+    const cc = seen.ccByChan[ch];
+    if (!n.length && !(cc && cc.size)) continue;
+    const uniq = [...new Set(n)].sort((a,b)=>a-b);
+    const span = uniq.length ? uniq[uniq.length-1] - uniq[0] : 0;
+    const repeat = uniq.length ? n.length / uniq.length : 0;
+    const inMap = n.length ? n.filter(v => v>=35 && v<=81).length / n.length : 0;
+    const neighbour = uniq.some((v,i) => i && v - uniq[i-1] === 1);
+
+    if (n.length) {
+      // Channel 10 is General MIDI percussion and settles it on its own.
+      // Otherwise: a handful of notes, each struck repeatedly, none of them
+      // next to each other, all inside the drum map — that is a pad being hit,
+      // not a scale being played.
+      const pad = ch === 9 || (inMap > 0.9 && uniq.length <= 16 && repeat >= 1.5 && !neighbour);
+      rows.push({ kind: pad ? 'pads' : 'keys', ch,
+        why: (pad
+          ? (ch === 9 ? 'channel 10 is GM percussion' :
+             uniq.length + ' notes struck ' + n.length + ' times, none adjacent, all in the drum map')
+          : uniq.length + ' notes over ' + span + ' semitones' +
+            (neighbour ? ', including adjacent ones' : '')),
+        range: NAMES[uniq[0]%12] + (Math.floor(uniq[0]/12)-1) + '–' +
+               NAMES[uniq[uniq.length-1]%12] + (Math.floor(uniq[uniq.length-1]/12)-1),
+        notes: uniq.join(' ') });
+    }
+    if (cc && cc.size)
+      rows.push({ kind:'knobs', ch, why: cc.size + ' control number(s)', range:'CC ' + [...cc].sort((a,b)=>a-b).join(', '), notes:'' });
+  }
+
+  const ICON = { keys:'🎹', pads:'🥁', knobs:'🎛️' };
+  const WORD = { keys:'Keys', pads:'Pads', knobs:'Knobs' };
+  if (!rows.length) {
+    $('#vtitle').textContent = 'Listening…';
+    $('#vwhy').textContent = 'Play the keys, hit the pads, turn a knob — each one appears here as it is used.';
+  } else {
+    const kinds = [...new Set(rows.map(r => r.kind))];
+    $('#vtitle').textContent = kinds.map(k => ICON[k] + ' ' + WORD[k]).join('   ');
+    $('#vwhy').textContent = kinds.length > 1
+      ? 'One device, ' + kinds.length + ' surfaces. An app should react to the MESSAGE, not to the box.'
+      : rows[0].why;
+  }
+  $('#eviq').innerHTML = rows.length
+    ? rows.map(r => '<b>' + ICON[r.kind] + ' ' + WORD[r.kind] + '</b> on channel ' + (r.ch+1) +
+        '<br><span style="opacity:.75">' + esc(r.range) + ' — ' + esc(r.why) + '</span>' +
+        (r.notes ? '<br><span style="opacity:.5;font-size:12px">notes ' + esc(r.notes) + '</span>' : ''))
+        .join('<br><br>')
+    : 'Play something and this fills in.';
+}
+</script>
+</body>
+</html>

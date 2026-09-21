@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Loop Garden – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="midi.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Loop Garden — play a few notes and stop, and it keeps going.
+   Design: PHASE-9-MIDI.md. Shares midi.js with the other MIDI apps.
+
+   THE IDEA: a note played is planted on a wheel of TIME and comes round again,
+   fading a little on each pass. Two things follow that are worth having in a
+   room. A student's contribution outlives the moment they made it — and the room
+   does not fall silent the instant a hand comes off, which is usually when
+   regulation breaks. Nobody has to keep playing for it to sound like music.
+
+   WHERE A SEED SITS IS **WHEN** IT WAS PLAYED, never which key made it, so it
+   works with any instrument ever plugged in. A TOUCH plants one at the moment it
+   touches: a pattern can be laid round the wheel by hand, and this is the only
+   place in the suite where a finger picks a point in time.
+
+   The canvas is cleared and redrawn every frame, never faded toward the
+   background — a fade does not converge on an accelerated canvas and leaves a
+   ghost of everything ever drawn. See APPS.md on Soundscape.
+*/
+const Anim = (function(){
+
+  let screen=null, W=0, H=0;
+  const seeds=[];
+  const BLEND=MIDIIN.BLEND;
+  const paint=MIDIIN.makePaint();
+  let phase=0, paused=false;
+
+  const LEN = { '4':{label:'4 seconds'}, '6':{label:'6 seconds'},
+                '8':{label:'8 seconds'}, '12':{label:'12 seconds'},
+                '20':{label:'20 seconds'}, '32':{label:'32 seconds'} };
+  // IN PASSES, not seconds - and small ones. At 4/10/25 passes a seed took 48
+  // seconds to fade at the fastest setting and two minutes at the default, so
+  // the control was real but nobody would ever see it work.
+  const MEM = { '2':{label:'Fades fast'}, '4':{label:'Fades'},
+                '8':{label:'Fades slowly'}, '9999':{label:'Never fades'} };
+
+  // Four ways to see the same loop. `ring` is how the layout is arranged;
+  // everything else is how a seed is drawn.
+  const SHAPE = {
+    wheel:  {label:'🎡 Wheel',  ring:true,  params:[
+      ['spread','Spread',0.2,1.4,1], ['dot','Note size',0.3,2.5,1], ['glow','Glow',0.2,3,1]]},
+    orbit:  {label:'🪐 Orbit',  ring:true,  params:[
+      ['spread','Spread',0.2,1.4,1], ['dot','Note size',0.3,2.5,1], ['tail','Tails',0.2,3,1]]},
+    bloom:  {label:'🌼 Bloom',  ring:true,  params:[
+      ['spread','Spread',0.2,1.4,1], ['petal','Petals',3,10,6], ['open','Opening',0.3,2.5,1]]},
+    // Ribbon's third slider was Height, which only squashed the timeline into
+    // less of the screen - it fought Size and Glow rather than contrasting with
+    // them. Lean tilts the whole ribbon instead, so the three sliders now do
+    // three different things: how big, how bright, and what shape.
+    ribbon: {label:'🎗️ Ribbon', ring:false, params:[
+      ['lean','Lean',-1,1,0], ['dot','Note size',0.3,2.5,1], ['glow','Glow',0.2,3,1]]},
+  };
+
+  const len   = () => +SETTINGS.loopLen || 12;
+  const mem   = () => +SETTINGS.loopMem || 10;
+  const shape = () => SHAPE[SETTINGS.shape] || SHAPE.wheel;
+  const BR    = () => 0.35+0.9*(+SETTINGS.bright);
+  const SZ    = () => 0.45+1.5*(+SETTINGS.size);
+
+  function pv(key){
+    const o=SETTINGS.sp && SETTINGS.sp[SETTINGS.shape], v=o?o[key]:null;
+    if(v!=null) return +v;
+    const d=(shape().params||[]).find(p=>p[0]===key);
+    return d?d[4]:1;
+  }
+  function setPv(key,val){
+    SETTINGS.sp=SETTINGS.sp||{};
+    SETTINGS.sp[SETTINGS.shape]=Object.assign({},SETTINGS.sp[SETTINGS.shape],{[key]:val});
+    saveSettings();
+  }
+  // How far out a radial seed sits / how high a ribbon one does. Kept apart from
+  // the drawing so a touch can be planted back through it exactly.
+  const spread = () => shape().ring ? Math.max(0.2, pv('spread')) : 1;
+  // HOW FAR OUT ANYTHING MAY SIT. It used to be a flat 1.08 of the wheel radius,
+  // which did two wrong things at once: at a large Spread the guide rings were
+  // drawn past it so the outer ones could never hold a seed, and a touch outside
+  // the circle snapped to the rim instead of landing under the finger. The only
+  // real limit is the canvas, so that is what it is now. See §3.1/3.5.
+  const rmax = () => Math.hypot(W,H)/2/(Math.min(W,H)*0.42);
+  // The radii a played NOTE actually takes (ring = 0.20 + 0.75x), which is what
+  // the guide rings must show - they are a promise about where notes go.
+  const RINGS = [0.20, 0.3875, 0.575, 0.7625, 0.95];
+
+  /* ── A note becomes a seed ──────────────────────────────────────────────
+     A touch chooses WHEN as well as what: the angle it lands at is the moment
+     in the loop it will sound. The sum is inverted through `place()` — in
+     PIXELS, not in the 0..1 the framework hands over, because the wheel is round
+     on the screen and a fraction of the width is not a fraction of the height.
+     Read in fractions it landed a tenth of a screen from the finger.         */
+  function sow(ev){
+    let at, ring;
+    if(ev.fx!=null){
+      const Wp=canvas.width, Hp=canvas.height;
+      if(shape().ring){
+        const R=Math.min(Wp,Hp)*0.42;
+        const dx=(ev.fx-0.5)*Wp, dy=((1-ev.fy)-0.5)*Hp;  // fy is y UP; screens count down
+        at=((Math.atan2(dy,dx)+Math.PI/2)/(Math.PI*2)+1)%1;
+        // ORBIT turns under a fixed marker, so its angle is measured from NOW.
+        // Without this the seed is planted correctly and then drawn rotated by
+        // the current phase - it appears somewhere else the moment you let go,
+        // which is the same "not under the finger" fault in a new place.
+        if(SETTINGS.shape==='orbit') at=(at+phase)%1;
+        ring=(Math.hypot(dx,dy)/R)/spread();      // no clamp: land under the finger
+      } else { at=ev.fx; ring=(ev.fy-0.06)/(0.80*spread()); }
+    } else {
+      // HOW HARD IT WAS PLAYED decides how far out it sits - the same answer the
+      // rest of the suite gives, through the same shared PY(). It used to be the
+      // NOTE's place in the learned range, so a run up the keyboard climbed the
+      // screen while an auto-range was still settling underneath it, which is
+      // what made a played phrase look unrelated to anything. The pitch is still
+      // there: it is the colour.
+      at=phase; ring=0.16+0.82*MIDIIN.PY(ev);
+    }
+    paused=false; refreshRailButtons();
+    seeds.push({ at, ring:Math.max(0.06,ring), col:ev.col, note:ev.note, ch:ev.ch,
+                 hue:ev.hue, vel:ev.force, life:1, flash:1, smear:0, wob:Math.random()*6.3 });
+    if(seeds.length>140) seeds.shift();
+    MIDIIN.pluck(ev.col, MIDIIN.level(ev.force));
+  }
+
+  /* ── Where a seed is on screen ──────────────────────────────────────────*/
+  function place(s){
+    if(shape().ring){
+      const cx=W/2, cy=H/2, R=Math.min(W,H)*0.42;
+      // ORBIT TURNS, so a seed's angle is how far it is from NOW - `at - phase`,
+      // which puts it under the top marker at the instant it sounds. It used to
+      // add a `spin` that advanced at exactly the same rate as `phase`, so a
+      // seed sounded at angle -PI/2 + 2*phase*2PI: anywhere on the circle, and
+      // level with the marker only twice a loop. The marker was right and the
+      // seeds disagreed with it. See PHASE-9D-MIDI-POLISH.md §3.7.
+      const a=-Math.PI/2+(s.at-(SETTINGS.shape==='orbit'?phase:0))*Math.PI*2;
+      const rr=R*Math.min(rmax(), s.ring*spread());
+      return {x:cx+Math.cos(a)*rr, y:cy+Math.sin(a)*rr, a:a, r:rr};
+    }
+    const lean=pv('lean');
+    return {x:s.at*W,
+            y:H*(0.94-0.84*Math.min(1.05,s.ring)) + (s.at-0.5)*H*0.30*lean,
+            a:0, r:0};
+  }
+
+  return {
+    appLabel:'🌱 Loop',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    onCell(){},
+    themes:{ dark:{label:'🎵 Notes', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                             [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    defaults:Object.assign({}, MIDIIN.DEFAULTS, {
+      theme:'dark', shape:'wheel', loopLen:8, loopMem:4, persist:0, linger:1,
+      bright:0.7, size:0.55, track:0.5,
+    }),
+    schema:[],
+
+    railButtons:[
+      // SILENCE HAS TO STOP THE LOOP. Nothing here sustains, so silence() alone
+      // was inaudible - and a fraction of a second later the wheel came round and
+      // plucked every seed again. It pauses instead, and the next note played
+      // starts it moving again, so it is a hush rather than a mode to get stuck in.
+      { id:'lgsil', icon:()=>paused?'▶️':'🔇', label:()=>paused?'Go on':'Silence',
+        title:()=>paused?'Let the loop go round again':'Hush the loop where it is',
+        onClick(){ paused=!paused; MIDIIN.silence(); refreshRailButtons(); } },
+      { id:'lgwipe', icon:()=>'🧽', label:'Wipe', title:()=>'Clear the painted picture',
+        show:()=>MIDIIN.PERSIST()>0.01,
+        onClick(){ paint.clear(); } },
+      { id:'lgclr', icon:()=>'🧹', label:'Empty', title:()=>'Take everything off the loop',
+        show:()=>seeds.length>0,
+        onClick(){ seeds.length=0; refreshRailButtons(); } },
+    ],
+
+    buildApp(el){
+      MIDIIN.buildConnect(el);
+      const labels={}; for(const k in SHAPE) labels[k]={label:SHAPE[k].label};
+      // A shape change clears the picture. The seeds are laid out completely
+      // differently in each one, so what is already painted has nothing to do
+      // with where anything is now - it just leaves debris on the canvas.
+      el.appendChild(makeChips('Shape','shape',labels,()=>{
+        paint.clear();
+        if(currentQuickMode==='visuals') buildVisualsPanel(); }));
+      el.appendChild(makeChips('Once round takes','loopLen',LEN,null));
+      el.appendChild(makeChips('A note lasts','loopMem',MEM,null));
+      MIDIIN.snapChips(el);
+      el.appendChild(MIDIIN.note('Play a few notes and stop — they keep coming round. Touching the screen plants '
+        + 'one at that point in the loop.'));
+    },
+
+    buildInstrument(el){ MIDIIN.buildNotesPane(el); },
+
+    buildVisuals(el){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Colour';
+      el.appendChild(h); MIDIIN.paletteChips(el);
+
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Light';
+      el.appendChild(h2);
+      el.appendChild(makeSlider({key:'bright',label:'Brightness',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeSlider({key:'size',label:'Size',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      // NO LINGER HERE EITHER, for the same reason: "A note lasts" on the first
+      // tab is this app's lifetime control, and the slider was never read.
+      MIDIIN.persistSlider(el, ()=>refreshRailButtons());
+      el.appendChild(MIDIIN.note('Persistence smears each note as the sweep goes over it, so the '
+        + 'loop paints itself. The rings and the hand are never painted. 🧽 Wipe clears it.'));
+      el.appendChild(makeSlider({key:'track',label:'The track',min:0,max:1,step:0.05,dp:2,
+        fmt:v=>v<0.01?'hidden':Math.round(v*100)+'%'}));
+      el.appendChild(MIDIIN.note('The rings and the moving hand. Turn it down for a room that only wants the lights.'));
+
+      const h3=document.createElement('div'); h3.className='sectn';
+      h3.textContent=shape().label; el.appendChild(h3);
+      for(const p of shape().params) el.appendChild(styleSlider(p[0],p[1],p[2],p[3],p[4]));
+      el.appendChild(MIDIIN.note('These belong to this shape alone — every shape has its own three.'));
+    },
+
+    init(cv){
+      screen=cv.getContext('2d');
+      MIDIIN.setKnobs([{key:'bright',label:'Brightness'},{key:'size',label:'Size'}]);
+      MIDIIN.attach({ onHit:sow });
+      this.reset();
+    },
+
+    resize(){ this.reset(); },
+
+    // A touch plants a seed, so it is never a dead screen with no instrument.
+    splat(x,y,dx,dy,color,opts){
+      if(MIDIIN.splatTouch(x,y,opts,260)) refreshRailButtons();
+    },
+
+    frame(dt){
+      if(!screen) return;
+      W=canvas.width; H=canvas.height;
+      MIDIIN.ease(dt);
+      const prev=phase;
+      if(!paused) phase=(phase+dt/len())%1;
+      const wrapped=phase<prev;
+
+      // ONLY THE SMEARS ARE PAINTED - not the seeds, and not the furniture.
+      // A seed's own mark is a large soft glow, and depositing it every frame it
+      // exists buried the picture under fuzzy blobs with the strokes lost inside
+      // them. The picture should be the marks the sweep MAKES. So the live layer
+      // takes the smears, is stamped, and only then are the seeds, the rings and
+      // the hand drawn over the top of it.
+      const real=screen;
+      const pctx=paint.begin(W,H);
+      pctx.globalCompositeOperation=BLEND;
+
+      const cx=W/2, cy=H/2, R=Math.min(W,H)*0.42, tk=+SETTINGS.track;
+      const mode=SETTINGS.shape, ring=shape().ring;
+
+      screen.globalCompositeOperation=BLEND;
+      for(let i=seeds.length-1;i>=0;i--){
+        const s=seeds[i];
+        const passed = wrapped ? (s.at>prev || s.at<=phase) : (s.at>prev && s.at<=phase);
+        if(passed){
+          MIDIIN.pluck(s.col, MIDIIN.level(s.vel, 0.62*s.life));
+          s.flash=1;
+          // ONLY THE SWEEP SMEARS. `flash` is also set to 1 when a seed is
+          // PLANTED, so the smear was firing the instant a note was played
+          // rather than when the arm went over it - which is why it looked like
+          // it happened on the click. `smear` is set here and nowhere else.
+          s.smear=1;
+          s.life -= 1/Math.max(1,mem());
+          if(s.life<=0.04){ seeds.splice(i,1); continue; }
+        }
+        // THE SMEAR. As the sweep passes a seed it flashes, and while it is
+        // flashing it drags a short tail back along the loop. With Persistence up
+        // that tail is what gets left on the canvas, so the picture is made of
+        // the notes being played rather than of the hand that played them.
+        // ORBIT'S STROKE TRAVELS. In Wheel, Bloom and Ribbon the seeds sit still
+        // and the ARM moves, so a stroke laid where a seed sits is spread around
+        // the loop already. Orbit is the other way round: the marker is fixed at
+        // the top and the seeds turn past it, so every note sounds at the SAME
+        // PLACE ON SCREEN and every stroke was laid into the same spot - 93% of
+        // the paint in two sectors of eight, measured. Letting the smear live
+        // several times longer means it is still being drawn as the seed carries
+        // on round, so each note paints an ARC rather than a blot.
+        // Tied to the LOOP LENGTH, not to a fixed number of seconds: the stroke
+        // should last most of one revolution whatever tempo the room has chosen,
+        // so a note paints most of the way round rather than a fixed-length arc
+        // that shrinks as the loop is slowed down.
+        // LONGER THAN ONE REVOLUTION, on purpose. At 0.85 of a loop each note
+        // painted an arc with a gap in it; past 1.0 the stroke is still alive
+        // when the seed comes round to the marker again and is reset, so it
+        // paints CONTINUOUSLY and the ring closes. The stroke still fades as it
+        // goes, so the far side of the circle is the faint end of it.
+        s.smear=Math.max(0,(s.smear||0)-dt*(mode==='orbit'?1/(len()*1.9):1.9));
+        if(s.smear>0.02 && MIDIIN.PERSIST()>0.01){   // only when it is painting
+          const c0=MIDIIN.colourOf(s.note,s.ch,s.hue).join(',');
+          const b0=Math.min(W,H)*(0.010+0.028*s.vel)*SZ()*(0.55+0.55*s.life);
+          const a0=Math.min(1,(0.30+0.70*s.life)*BR()*s.smear);
+          // SMEAR THE CORE, NOT THE GLOW. Faded copies of the whole mark are
+          // mostly copies of its soft halo, and a halo dragged a little way just
+          // reads as the glow changing shape - which is exactly what it looked
+          // like. The core is the small bright dot in the middle, so the streak
+          // is drawn as a stroked line at the core's own width and near its own
+          // brightness: a hard line with a bright head, not a smudge.
+          // FORWARDS, the way a brush drags paint - the arm travels toward
+          // increasing `at` and pulls the paint along with it.
+          //
+          // A BRUSH STROKE, NOT A HAIRLINE. One polyline at one width drew a
+          // dead-straight thread, which in Ribbon is a horizontal line and reads
+          // as a scratch. It is stroked segment by segment instead: broad at the
+          // head, tapering away to nothing, and bending off the line by a little
+          // - most in the middle of the stroke, and keyed to the seed's own
+          // `wob`, so two notes in the same place do not lay the same stroke.
+          const steps=18, span=(mode==='orbit'?0.16:0.10)*s.smear;
+          const core=Math.max(1.2, b0*pv('dot')*0.9);
+          pctx.lineCap='round'; pctx.lineJoin='round';
+          const pts=[];
+          for(let q=0;q<=steps;q++){
+            const t=q/steps;
+            const qq=place({at:(s.at+span*t)%1, ring:s.ring});
+            const bend=Math.sin(t*Math.PI)*Math.sin(s.wob*1.7+t*2.6)*core*2.2;
+            const nx=ring? (qq.x-cx) : 0, ny=ring? (qq.y-cy) : 1;
+            const nl=Math.hypot(nx,ny)||1;
+            pts.push({ x:qq.x+(nx/nl)*bend, y:qq.y+(ny/nl)*bend, t });
+          }
+          for(let q=0;q<steps;q++){
+            const t=pts[q].t, taper=Math.pow(1-t,0.75);
+            pctx.lineWidth=Math.max(0.6, core*(0.35+2.3*taper));
+            pctx.strokeStyle='rgba('+c0+','+Math.min(1,a0*(0.30+0.70*taper)).toFixed(3)+')';
+            pctx.beginPath();
+            pctx.moveTo(pts[q].x,pts[q].y); pctx.lineTo(pts[q+1].x,pts[q+1].y);
+            pctx.stroke();
+          }
+        }
+        s.flash=Math.max(0,s.flash-dt*2.2);
+        s.wob+=dt*(0.6+0.8*s.vel);
+
+      }
+      // the smears become the picture...
+      paint.stamp(dt);
+      screen=real;
+      // BACK TO source-over BEFORE THE BACKGROUND FILL. The smear pass leaves the
+      // blend mode set, and a background painted through `screen` blend does not
+      // clear anything - the canvas simply accumulates every frame for ever.
+      screen.globalCompositeOperation='source-over';
+      screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      screen.fillRect(0,0,W,H);
+      paint.show(screen);
+
+      // ...and the seeds are drawn OVER it, never into it
+      screen.globalCompositeOperation=BLEND;
+      for(let i=seeds.length-1;i>=0;i--){
+        const s=seeds[i];
+        const p=place(s);
+        const c=MIDIIN.colourOf(s.note,s.ch,s.hue).join(',');
+        const base=Math.min(W,H)*(0.010+0.028*s.vel)*SZ()*(0.55+0.55*s.life);
+        const a1=Math.min(1,(0.22+0.62*s.life)*BR()*(0.45+0.55*s.flash));
+
+        if(mode==='orbit'){
+          // a comet tail along the arc it has just come through
+          const t=pv('tail'), steps=Math.round(6+10*t);
+          for(let k=steps;k>0;k--){
+            const q=place({at:s.at-k*0.006*t, ring:s.ring});
+            const f=1-k/steps;
+            screen.fillStyle='rgba('+c+','+(a1*f*f*0.32).toFixed(3)+')';
+            screen.beginPath(); screen.arc(q.x,q.y,base*pv('dot')*f*0.8,0,Math.PI*2); screen.fill();
+          }
+        }
+
+        if(mode==='bloom'){
+          // BLOOM HAS A SHAPE. It used to be n soft radial gradients around the
+          // point - the same soft blob the Wheel draws, only more of them, on an
+          // identical layout, so at any modest Opening the two looks were the
+          // same picture. Petals are now drawn: solid, tapered, pointing OUT
+          // from the hub, and they open with how hard the note was played.
+          const n=Math.round(pv('petal')), open=pv('open')*(0.5+0.85*s.flash);
+          const len=base*2.6*open, wide=base*0.85*open;
+          screen.save();
+          screen.translate(p.x,p.y);
+          screen.rotate(p.a + s.wob*0.35);
+          for(let k=0;k<n;k++){
+            screen.rotate(Math.PI*2/n);
+            screen.fillStyle='rgba('+c+','+(a1*0.55).toFixed(3)+')';
+            screen.beginPath();
+            screen.moveTo(0,0);
+            screen.quadraticCurveTo(wide, len*0.42, 0, len);
+            screen.quadraticCurveTo(-wide, len*0.42, 0, 0);
+            screen.fill();
+          }
+          screen.restore();
+          screen.fillStyle='rgba('+c+','+Math.min(1,a1*1.1).toFixed(3)+')';
+          screen.beginPath(); screen.arc(p.x,p.y,base*0.42,0,Math.PI*2); screen.fill();
+        } else {
+          const glow=(mode==='orbit'?1:pv('glow'));
+          const rad=base*pv('dot')*(1+2.2*s.flash), out=rad*(1.8+glow);
+          const g=screen.createRadialGradient(p.x,p.y,0,p.x,p.y,out);
+          g.addColorStop(0,'rgba('+c+','+a1.toFixed(3)+')');
+          g.addColorStop(0.28,'rgba('+c+','+(a1*0.38).toFixed(3)+')');
+          g.addColorStop(1,'rgba('+c+',0)');
+          screen.fillStyle=g; screen.beginPath(); screen.arc(p.x,p.y,out,0,Math.PI*2); screen.fill();
+          screen.fillStyle='rgba('+c+','+Math.min(1,a1*1.35).toFixed(3)+')';
+          screen.beginPath(); screen.arc(p.x,p.y,rad*0.45,0,Math.PI*2); screen.fill();
+        }
+      }
+      screen.globalCompositeOperation='source-over';
+
+      /* the track — where in the loop it has got to */
+      if(tk>0.01){
+        screen.lineWidth=Math.max(1,H*0.0012);
+        if(!ring){
+          screen.strokeStyle='rgba(255,255,255,'+(0.10*tk).toFixed(3)+')';
+          screen.beginPath(); screen.moveTo(0,H*0.94); screen.lineTo(W,H*0.94); screen.stroke();
+          const px=phase*W;
+          const g=screen.createLinearGradient(px,H,px,0);
+          g.addColorStop(0,'rgba(255,255,255,'+(0.34*tk).toFixed(3)+')');
+          g.addColorStop(1,'rgba(255,255,255,'+(0.02*tk).toFixed(3)+')');
+          screen.strokeStyle=g; screen.lineWidth=Math.max(1.5,H*0.002);
+          screen.beginPath(); screen.moveTo(px,H); screen.lineTo(px,0); screen.stroke();
+        } else {
+          screen.strokeStyle='rgba(255,255,255,'+(0.09*tk).toFixed(3)+')';
+          for(const r of RINGS){
+            const rr=R*Math.min(rmax(), r*spread());
+            screen.beginPath(); screen.arc(cx,cy,rr,0,Math.PI*2); screen.stroke(); }
+          if(mode!=='orbit'){
+            // TO THE EDGE OF THE SCREEN, not to the rim of the wheel: the arm is
+            // the clock and the room should see it sweep the whole picture.
+            const far=Math.hypot(W,H)/2;
+            const a0=-Math.PI/2+phase*Math.PI*2;
+            const ex=cx+Math.cos(a0)*far, ey=cy+Math.sin(a0)*far;
+            const g=screen.createLinearGradient(cx,cy,ex,ey);
+            g.addColorStop(0,'rgba(255,255,255,'+(0.03*tk).toFixed(3)+')');
+            g.addColorStop(1,'rgba(255,255,255,'+(0.34*tk).toFixed(3)+')');
+            screen.strokeStyle=g; screen.lineWidth=Math.max(1.5,H*0.002);
+            screen.beginPath(); screen.moveTo(cx,cy); screen.lineTo(ex,ey); screen.stroke();
+          } else {
+            // Orbit turns instead of being swept, so the moment is a mark at the top.
+            screen.strokeStyle='rgba(255,255,255,'+(0.30*tk).toFixed(3)+')';
+            screen.lineWidth=Math.max(1.5,H*0.002);
+            screen.beginPath(); screen.moveTo(cx,cy-R*1.14); screen.lineTo(cx,cy-R*0.98); screen.stroke();
+          }
+        }
+      }
+      pokeSim();
+    },
+
+    reset(){
+      seeds.length=0; phase=0; paused=false; paint.clear();
+      if(screen){
+        screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        screen.fillRect(0,0,canvas.width,canvas.height);
+      }
+    },
+  };
+
+  function styleSlider(key,label,min,max,def){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    const whole=(key==='petal');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=whole?1:(max-min)/40; inp.value=pv(key);
+    const show=v=>whole?String(Math.round(v)):Math.round(v/def*100)+'%';
+    val.textContent=show(inp.value);
+    inp.addEventListener('input',()=>{ const v=parseFloat(inp.value); setPv(key,v); val.textContent=show(v); });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
+  }
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

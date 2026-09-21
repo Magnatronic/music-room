@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Access pane — prototype for PHASE-5C</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  /* Only what the prototype needs to stand on its own outside the shell. */
+  html,body{height:auto;overflow:auto;background:#0b0b0d}
+  body{margin:0;font:14px system-ui,sans-serif;color:#fff;display:flex;gap:0;align-items:flex-start}
+  #fake{width:calc(430px * var(--ui-scale));background:#111114;min-height:100vh;
+        padding:calc(18px * var(--ui-scale));box-sizing:border-box;border-right:1px solid #26262c}
+  #notes{padding:22px 26px;max-width:520px;color:#b9b2c4;line-height:1.6;font-size:14px}
+  #notes h1{font-size:19px;margin:0 0 4px;color:#fff}
+  #notes h2{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:#8c8598;margin:22px 0 6px}
+  #notes code{background:#1c1c22;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  #notes .k{color:#fff;font-weight:600}
+  #padsim{margin-top:16px;padding:14px;border:1px solid #2c2c34;border-radius:10px;background:#141418}
+  #padsim b{display:block;margin-bottom:8px;color:#fff;font-size:13px}
+  #padsim button{margin:3px;padding:7px 11px;border-radius:8px;border:1px solid #3a3a44;
+                 background:#1e1e25;color:#ddd;font:600 12px system-ui;cursor:pointer}
+  #padsim button:hover{background:#2a2a33}
+  .padstat{display:flex;align-items:baseline;gap:8px}
+  .padstat::before{content:"";flex:none;width:8px;height:8px;border-radius:50%;
+                   background:rgba(255,255,255,.25);transform:translateY(-1px)}
+  .padstat.live::before{background:#3bb54a;box-shadow:0 0 6px rgba(59,181,74,.9)}
+  .chip.listening{border-color:rgba(255,255,255,.85);animation:cl 1.1s ease-in-out infinite}
+  @keyframes cl{0%,100%{background:rgba(255,255,255,.06)}50%{background:rgba(255,255,255,.22)}}
+  /* Chips that act as TABS have to look attached to what they control, or the
+     settings below read as unrelated. The active one shares the panel's colour
+     and loses its bottom corners, so chip + panel read as one object. */
+  .tabs{display:flex;gap:6px;margin:14px 0 0;position:relative;z-index:2}
+  .tabs .chip{border-bottom-left-radius:0;border-bottom-right-radius:0;margin-bottom:-1px}
+  .tabs .chip.active{background:#191920;border-color:#33333d;border-bottom-color:#191920}
+  .tabpanel{border:1px solid #33333d;border-radius:0 12px 12px 12px;background:#191920;
+            padding:calc(12px * var(--ui-scale)) calc(14px * var(--ui-scale));position:relative;z-index:1}
+  .keyrow .chips{margin:0}
+  .keyrow{align-items:center}
+  .xchip{min-width:auto;padding-left:12px;padding-right:12px}
+</style>
+</head>
+<body>
+
+<div id="fake"><div class="pane active" style="position:static"><div id="setupContent"></div></div></div>
+
+<div id="notes">
+  <h1>Access pane — throwaway</h1>
+  <p>Not the real app. This is the proposed shape, wired up so you can click it. Nothing here is saved.</p>
+
+  <h2>Try</h2>
+  <p>
+    Switch between <span class="k">Playing</span> and <span class="k">Buttons</span>.<br>
+    In <span class="k">Buttons</span>, press <span class="k">Set</span> on a row, then
+    <b>press a key</b> or <b>a button on a real controller</b> — whichever comes first wins.<br>
+    Use <span class="k">✕</span> to clear a binding and see the default come off.
+  </p>
+  <p>If you have the Xbox pad plugged in it drives the live line at the top for real —
+     the button names come from the standard mapping.</p>
+
+  <div id="padsim">
+    <b>No controller to hand? Fake one:</b>
+    <div id="simbtns"></div>
+  </div>
+
+  <h2>What to judge</h2>
+  <p>
+    Does splitting into two chips actually help, or is one list better?<br>
+    Is <span class="k">Stick moves a pointer</span> the right name now that buttons do actions too?<br>
+    Are <span class="k">X → Clear</span> and <span class="k">Y → Play</span> the right defaults?<br>
+    Is it obvious that a bound button stops playing notes?
+  </p>
+  <p id="log" style="color:#7ad7ff;font:12px ui-monospace,monospace;white-space:pre-wrap"></p>
+</div>
+
+<script>
+// ── stand-in state, thrown away on reload ────────────────────────────────────
+const S = {
+  padOn:true, padButton:null, padSpeed:0.6, padDead:0.25, padAuto:false,
+  dwellPad:false, dwellPadMs:900, dwellMouse:false, dwellMouseMs:900, bigPointer:false,
+  // the agreed defaults: X clears, Y does the app's main action
+  bind:{ clear:{type:'pad', code:2}, play:{type:'pad', code:3} },
+  view:'playing',
+};
+// pretend this app is Song Grid: the actions are its rail buttons
+const ACTIONS = [ {id:'clear', label:'Clear'}, {id:'play', label:'Play'}, {id:'mode', label:'Keys / Flow'} ];
+
+const PAD_BTN = ['A','B','X','Y','Left bumper','Right bumper','Left trigger','Right trigger',
+  'Back','Start','Left stick','Right stick','D-pad up','D-pad down','D-pad left','D-pad right','Guide'];
+const btnName = i => PAD_BTN[i] || ('Button ' + i);
+const keyName = k => k===' ' ? 'Space' : (k.length===1 ? k.toUpperCase() : k);
+const bindLabel = b => b.type==='pad' ? btnName(b.code) : keyName(b.code);
+
+let learnFor = null;
+let padName = null, lastPress = null, simPressed = null;
+
+const el = document.getElementById('setupContent');
+const log = m => { document.getElementById('log').textContent = m; };
+
+function boundTo(code, type){
+  return Object.keys(S.bind).find(id => S.bind[id] && S.bind[id].type===type && S.bind[id].code===code);
+}
+
+function statusText(){
+  if(!padName) return 'No controller found. Plug one in, or switch it on.';
+  const fresh = lastPress && (Date.now()-lastPress.at) < 1500;
+  return padName + (fresh ? '  —  ' + btnName(lastPress.code) + ' pressed' : '');
+}
+
+function build(){
+  el.innerHTML = '';
+  const h = document.createElement('div'); h.className='sectn'; h.textContent='Access'; el.appendChild(h);
+
+  const st = document.createElement('div'); st.className='hint padstat'; st.id='st';
+  st.textContent = statusText(); st.classList.toggle('live', !!padName); el.appendChild(st);
+
+  // the two chips: a VIEW, not a mode. Both halves stay live whichever is shown.
+  const cw = document.createElement('div'); cw.className='chips tabs';
+  [['playing','Controller'],['mouse','Mouse'],['buttons','Buttons']].forEach(([k,lab])=>{
+    const c=document.createElement('div'); c.className='chip'+(S.view===k?' active':'');
+    c.textContent=lab; c.onclick=()=>{ S.view=k; learnFor=null; build(); }; cw.appendChild(c);
+  });
+  el.appendChild(cw);
+
+  const panel=document.createElement('div'); panel.className='tabpanel'; el.appendChild(panel);
+  const outer=el; window.__el=panel;
+  ({playing:buildPlaying, mouse:buildMouse, buttons:buildButtons})[S.view](panel);
+  window.__el=outer;
+}
+
+function toggle(label, key, after){
+  const row=document.createElement('div'); row.className='toggle';
+  const l=document.createElement('label'); l.textContent=label;
+  const sw=document.createElement('div'); sw.className='switch'+(S[key]?' on':'');
+  row.onclick=()=>{ S[key]=!S[key]; build(); if(after) after(); };
+  row.appendChild(l); row.appendChild(sw); return row;
+}
+function slider(label, key, min, max, step, fmt){
+  const row=document.createElement('div'); row.className='row';
+  const head=document.createElement('div'); head.className='rowhead';
+  const l=document.createElement('label'); l.textContent=label;
+  const v=document.createElement('span'); v.className='val'; v.textContent=fmt(S[key]);
+  head.appendChild(l); head.appendChild(v);
+  const i=document.createElement('input'); i.type='range'; i.min=min; i.max=max; i.step=step; i.value=S[key];
+  i.oninput=()=>{ S[key]=parseFloat(i.value); v.textContent=fmt(S[key]); };
+  row.appendChild(head); row.appendChild(i); return row;
+}
+
+// Dwell is PER DEVICE, not shared, and the reason is who is holding what.
+//
+// The therapist works the mouse while the student works the controller - the
+// framework keeps both pointers alive at once on purpose. One shared dwell would
+// mean switching it on for the student's stick also made the therapist's own
+// mouse fire every time they paused over the activity. Two people, two devices,
+// two setups.
+function dwellBlock(el, where){
+  const hint=t=>{ const h=document.createElement('div'); h.className='hint'; h.textContent=t; el.appendChild(h); };
+  const onKey  = where==='pad' ? 'dwellPad'   : 'dwellMouse';
+  const msKey  = where==='pad' ? 'dwellPadMs' : 'dwellMouseMs';
+
+  // With the stick already playing as it moves, dwell has nothing left to wait
+  // for: the pointer is down the whole way and released the instant it stops.
+  if(where==='pad' && S.padAuto){
+    const h=document.createElement('div'); h.className='ctlh'; h.textContent='Dwell'; el.appendChild(h);
+    hint('Not used while "Pushing the stick plays" is on — that already presses.');
+    return;
+  }
+  el.appendChild(toggle('Dwell',onKey));
+  hint(S[onKey]
+    ? (where==='pad' ? 'Rest the stick and it presses. The mouse is unaffected.'
+                     : 'Hold the pointer still and it presses. Never on a touchscreen.')
+    : 'Presses by holding still, for someone who can aim but cannot press.');
+  if(S[onKey]) el.appendChild(slider('Hold for',msKey,300,2500,100, v=>(v/1000).toFixed(1)+' s'));
+}
+
+function buildPlaying(el){
+  const hint=t=>{ const h=document.createElement('div'); h.className='hint'; h.textContent=t; el.appendChild(h); };
+  el.appendChild(toggle('Stick moves a pointer','padOn'));
+  if(!S.padOn) return;
+
+  const wh=document.createElement('div'); wh.className='ctlh'; wh.textContent='Which button plays'; el.appendChild(wh);
+  const cw=document.createElement('div'); cw.className='chips';
+  const any=document.createElement('div');
+  any.className='chip'+(S.padButton==null?' active':''); any.textContent='Any button';
+  any.onclick=()=>{ S.padButton=null; build(); };
+  const one=document.createElement('div');
+  one.className='chip'+(S.padButton!=null?' active':'');
+  one.textContent = S.padButton!=null ? btnName(S.padButton) : 'Just one switch…';
+  one.onclick=()=>{ learnFor={kind:'play'}; build(); };
+  if(learnFor && learnFor.kind==='play'){ one.className='chip listening'; one.textContent='Press it now…'; }
+  cw.appendChild(any); cw.appendChild(one); el.appendChild(cw);
+
+  const bound = Object.values(S.bind).filter(b=>b&&b.type==='pad').map(b=>btnName(b.code));
+  if(bound.length) hint('All except ' + bound.join(' and ') + ', which have jobs on Buttons.');
+
+  el.appendChild(toggle('Pushing the stick plays','padAuto'));
+
+  const SP=[[0.3,'Very slow'],[0.5,'Slow'],[0.8,'Medium'],[1.1,'Fast']];
+  el.appendChild(slider('Pointer speed','padSpeed',0.15,1.5,0.05,
+    v=>{ for(const [t,n] of SP) if(v<t) return n; return 'Very fast'; }));
+  el.appendChild(slider('Ignore small movements','padDead',0,0.6,0.05,
+    v=>v<0.025?'Off':Math.round(v*100)+'%'));
+
+  dwellBlock(el,'pad');
+}
+
+// The Mouse tab exists mostly to SAY THE MOUSE WORKS. A mouse needs no setting,
+// so without a tab named for it the pane is silent about it, and silence reads as
+// "not supported". Dwell lives here rather than under Controller: a student who
+// can push a stick has "Pushing the stick plays" and does not need it.
+function buildMouse(el){
+  const hint=t=>{ const h=document.createElement('div'); h.className='hint'; h.textContent=t; el.appendChild(h); };
+  hint('A mouse, head-pointer or eye-gaze already moves and clicks here. Nothing to switch on.');
+  dwellBlock(el,'mouse');
+  el.appendChild(toggle('Big pointer','bigPointer'));
+  hint('A large high-contrast ring instead of the small arrow, for a screen across the room.');
+}
+
+function buildButtons(el){
+  const hint=document.createElement('div'); hint.className='hint';
+  hint.textContent = learnFor && learnFor.kind==='action'
+    ? 'Press a key or a controller button.'
+    : 'A key or a controller button for each. A button used here stops playing.';
+  el.appendChild(hint);
+
+  ACTIONS.forEach(a=>{
+    const row=document.createElement('div'); row.className='toggle keyrow';
+    const l=document.createElement('label'); l.textContent=a.label; row.appendChild(l);
+    const cw=document.createElement('div'); cw.className='chips';
+
+    const listening = learnFor && learnFor.kind==='action' && learnFor.id===a.id;
+    const b = S.bind[a.id];
+    const c=document.createElement('div');
+    c.className='chip'+(listening?' listening':(b?' active':''));
+    c.textContent = listening ? 'Press a key or button…' : (b ? bindLabel(b) : 'Set');
+    c.onclick=()=>{ learnFor={kind:'action', id:a.id}; build(); };
+    cw.appendChild(c);
+
+    if(b && !listening){
+      const x=document.createElement('div'); x.className='chip xchip'; x.textContent='✕';
+      x.title='Remove'; x.onclick=e=>{ e.stopPropagation(); delete S.bind[a.id]; build(); };
+      cw.appendChild(x);
+    }
+    row.appendChild(cw); el.appendChild(row);
+  });
+}
+
+// ── learning, from a real key or a real (or faked) pad button ────────────────
+function learn(type, code){
+  if(!learnFor) return false;
+  if(learnFor.kind==='play'){
+    if(type!=='pad') { log('That one is a controller button only — the pointer is pressed by a button, not a key.'); return true; }
+    S.padButton=code; learnFor=null; build(); log('Play button set to ' + btnName(code)); return true;
+  }
+  // one key/button, one action: taking one that is in use moves it
+  for(const id of Object.keys(S.bind)){
+    const bb=S.bind[id];
+    if(bb && bb.type===type && bb.code===code) delete S.bind[id];
+  }
+  S.bind[learnFor.id]={type,code};
+  log((type==='pad'?btnName(code):keyName(code)) + ' → ' + ACTIONS.find(a=>a.id===learnFor.id).label);
+  learnFor=null; build(); return true;
+}
+
+addEventListener('keydown', e=>{
+  if(e.repeat) return;
+  const t=e.target;
+  if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA')) return;
+  if(learn('key', e.key)){ e.preventDefault(); return; }
+  const id = Object.keys(S.bind).find(k=>S.bind[k] && S.bind[k].type==='key' && S.bind[k].code===e.key);
+  if(id){ e.preventDefault(); log('Fired: ' + ACTIONS.find(a=>a.id===id).label + '  (key ' + keyName(e.key) + ')'); }
+});
+
+// fake pad buttons, for when there is no controller to hand
+const sim=document.getElementById('simbtns');
+[0,1,2,3,6,7].forEach(i=>{
+  const b=document.createElement('button'); b.textContent=btnName(i);
+  b.onclick=()=>{ padName = padName || 'Fake controller'; lastPress={code:i, at:Date.now()}; press(i); };
+  sim.appendChild(b);
+});
+
+function press(code){
+  if(learn('pad', code)) return;
+  const id = boundTo(code,'pad');
+  if(id) log('Fired: ' + ACTIONS.find(a=>a.id===id).label + '  (' + btnName(code) + ')');
+  else if(S.padOn && (S.padButton==null || S.padButton===code)) log('Played a note  (' + btnName(code) + ')');
+  else log(btnName(code) + ' — nothing bound to it');
+  build();
+}
+
+// a real controller, if one is plugged in
+const prev=[];
+(function poll(){
+  let list=[]; try{ list=navigator.getGamepads?navigator.getGamepads():[]; }catch(e){}
+  const gp=[...list].find(g=>g&&g.connected);
+  if(gp){
+    padName = (gp.id||'').replace(/\s*\([^)]*\)\s*$/,'').replace(/^x?input$/i,'') || 'Controller 1';
+    (gp.buttons||[]).forEach((b,i)=>{
+      const on=!!(b&&b.pressed);
+      if(on && !prev[i]){ lastPress={code:i, at:Date.now()}; press(i); }
+      prev[i]=on;
+    });
+  }
+  const st=document.getElementById('st');
+  if(st){ const t=statusText(); if(st.textContent!==t) st.textContent=t; st.classList.toggle('live', !!padName); }
+  requestAnimationFrame(poll);
+})();
+
+build();
+</script>
+</body>
+</html>

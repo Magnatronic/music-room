@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Creatures — every note hatches something that sings</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#02040a}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(9px * var(--ui-scale)) calc(14px * var(--ui-scale));flex-wrap:wrap;
+       background:linear-gradient(#000e,#0000);z-index:3}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);flex:1 1 auto;min-width:0}
+  #go,#clr{height:calc(44px * var(--ui-scale));white-space:nowrap}
+  #hint{position:fixed;left:0;right:0;bottom:0;text-align:center;z-index:3;
+        padding:calc(10px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000e);color:var(--ink-quiet);font-size:var(--font-s);line-height:1.5}
+  #hint b{color:var(--ink)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cVoice"></div>
+  <div class="chips" id="cLive"></div>
+  <div class="chips" id="cLife"></div>
+  <button class="btn" id="clr">🧹 Empty the tank</button>
+  <div id="who"></div>
+</div>
+<div id="hint"><b>Every note hatches a creature</b>, and each one sings its own note
+as it swims. Hold a key and yours keeps growing. They are somebody to look at
+together — which is the point.</div>
+
+<script src="midi-core.js"></script>
+<script>
+'use strict';
+/* ── Creatures ────────────────────────────────────────────────────────────────
+   A sound that is a THING is easier to attend to than a sound that is an event.
+   Joint attention is a named goal in this work, and it is far easier to share
+   attention on a creature — "look at yours, it's the big blue one" — than on a
+   note that has already gone. So each press hatches something that lives on the
+   screen and sings the note it was born with, at its own pace, for as long as it
+   is alive.
+
+   It is generative in the same way Loop Garden is, but the music comes from a
+   population rather than a wheel: they drift out of step with each other, so a
+   handful of notes turns into a slowly shifting texture on its own.
+
+   Holding a key GROWS yours — which gives sustained pressure something to do,
+   and makes a bigger creature that sings a little lower and louder.            */
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const LIVE={ '4.5':{label:'Calm'}, '2.6':{label:'Chatty'}, '1.4':{label:'Busy'} };
+const LIFE={ '25':{label:'Short lives'}, '60':{label:'Long lives'}, '99999':{label:'Forever'} };
+let liveliness=2.6, lifespan=60;
+
+const pond=[];
+const held=new Map();               // key → the creature still being grown
+
+MIDI.init({
+  canvas:cv,
+  connectBtn:document.getElementById('go'),
+  statusEl:document.getElementById('who'),
+  onHit(e){
+    const W=cv.clientWidth||1280, H=cv.clientHeight||720;
+    const c={ note:MIDI.snap(e.note), rgb:e.rgb, vel:e.vel,
+              x:e.x*W, y:H*(0.28+0.5*Math.random()),
+              vx:(Math.random()-0.5)*40, vy:(Math.random()-0.5)*28,
+              size:8+22*e.vel, grow:true, age:0, next:0.4+Math.random()*liveliness,
+              wob:Math.random()*6.3, fins:3+Math.floor(Math.random()*3) };
+    pond.push(c); held.set(e.key,c);
+    if(pond.length>60) pond.shift();
+    MIDI.play(e.note,{gain:0.09+0.11*e.vel});
+  },
+  onRelease(e){ const c=held.get(e.key); if(c){ c.grow=false; held.delete(e.key); } },
+});
+document.getElementById('clr').addEventListener('click',()=>{ pond.length=0; held.clear(); });
+
+MIDI.chips('#cScale', MIDI.SCALES, ()=>MIDI.scale, k=>MIDI.setScale(k));
+MIDI.chips('#cVoice', MIDI.VOICES, ()=>MIDI.voice, k=>MIDI.setVoice(k));
+MIDI.chips('#cLive',  LIVE, ()=>String(liveliness), k=>{ liveliness=+k; });
+MIDI.chips('#cLife',  LIFE, ()=>String(lifespan),   k=>{ lifespan=+k; });
+
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  const W=cv.width=cv.clientWidth, H=cv.height=cv.clientHeight;
+  ctx.fillStyle='#02040a'; ctx.fillRect(0,0,W,H);
+
+  ctx.globalCompositeOperation='lighter';
+  for(let i=pond.length-1;i>=0;i--){
+    const c=pond[i];
+    c.age+=dt;
+    const left=1-c.age/lifespan;
+    if(left<=0){ pond.splice(i,1); continue; }
+
+    if(c.grow) c.size=Math.min(64, c.size+dt*26);
+
+    // drift, and turn away from the walls rather than bouncing off them
+    c.wob+=dt*1.7;
+    c.vx+=Math.sin(c.wob*0.7)*10*dt; c.vy+=Math.cos(c.wob)*8*dt;
+    if(c.x<c.size*2) c.vx+=60*dt; if(c.x>W-c.size*2) c.vx-=60*dt;
+    if(c.y<H*0.16+c.size*2) c.vy+=60*dt; if(c.y>H*0.9-c.size*2) c.vy-=60*dt;
+    c.vx*=0.995; c.vy*=0.995;
+    c.x+=c.vx*dt; c.y+=c.vy*dt;
+
+    // it sings, in its own time, so a population drifts out of step by itself
+    c.next-=dt;
+    if(c.next<=0){
+      c.next=liveliness*(0.6+Math.random()*0.9);
+      // a bigger creature sings lower — sustained pressure earns depth
+      const drop=Math.round((c.size-8)/26);
+      MIDI.play(MIDI.fromDegree(MIDI.degree(c.note)-drop),
+                {gain:(0.04+0.09*c.vel)*Math.max(0.25,left), raw:true});
+      c.sing=1;
+    }
+    c.sing=Math.max(0,(c.sing||0)-dt*1.8);
+
+    const col=c.rgb.join(','), a=Math.max(0.12,left)*(0.55+0.45*c.sing);
+    const r=c.size*(1+0.28*c.sing);
+    // fins first, so the body sits on top of them
+    for(let f=0;f<c.fins;f++){
+      const ang=c.wob*0.9+f*Math.PI*2/c.fins;
+      const fx=c.x+Math.cos(ang)*r*1.5, fy=c.y+Math.sin(ang)*r*1.5;
+      const fg=ctx.createRadialGradient(fx,fy,0,fx,fy,r*0.85);
+      fg.addColorStop(0,'rgba('+col+','+(a*0.42).toFixed(3)+')');
+      fg.addColorStop(1,'rgba('+col+',0)');
+      ctx.fillStyle=fg; ctx.beginPath(); ctx.arc(fx,fy,r*0.85,0,Math.PI*2); ctx.fill();
+    }
+    const bg=ctx.createRadialGradient(c.x,c.y,0,c.x,c.y,r*2.1);
+    bg.addColorStop(0,'rgba('+col+','+Math.min(1,a*1.15).toFixed(3)+')');
+    bg.addColorStop(0.34,'rgba('+col+','+(a*0.5).toFixed(3)+')');
+    bg.addColorStop(1,'rgba('+col+',0)');
+    ctx.fillStyle=bg; ctx.beginPath(); ctx.arc(c.x,c.y,r*2.1,0,Math.PI*2); ctx.fill();
+    // an eye, because a thing with an eye is somebody
+    ctx.fillStyle='rgba(255,255,255,'+(a*0.85).toFixed(3)+')';
+    ctx.beginPath(); ctx.arc(c.x+Math.cos(c.wob*0.6)*r*0.3, c.y-r*0.2, Math.max(1.5,r*0.16), 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalCompositeOperation='source-over';
+
+  if(!pond.length){
+    ctx.fillStyle='rgba(255,255,255,0.28)';
+    ctx.font=Math.round(Math.min(W,H)*0.035)+'px system-ui,sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('play something to hatch one', W/2, H/2);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

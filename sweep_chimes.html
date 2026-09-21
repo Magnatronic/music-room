@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sweep Chimes – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Sweep Chimes — a row (or hanging arc) of wind-chime bars. Dragging through
+   them rings them with physics: bars swing on their pivots, knock into their
+   neighbours, and set each other ringing. Long/low bars on the left, short/high
+   on the right — pitch is spatial and visible in the bar lengths. Bars are
+   tuned to the current scale/root/register; materials (bamboo/metal/crystal)
+   change both the look and the strike sound.
+
+   Canvas app: the framework's splat() path (normally paint) is the sweep hook —
+   every interpolated pointer step is tested against the bars. noVoices: strikes
+   are the app's own additive-partial chimes through masterGain (so volume,
+   effects, limiter and the auto-mixer all apply as usual).
+*/
+const Anim = (() => {
+
+  // shade drives the bar's paint style; knock the neighbour-collision tick tone
+  const MATERIALS={
+    metal:  {label:'🔔 Metal',   type:'sine', shade:'metal', knock:2400,
+      partials:[[1,1,2.0],[2.76,0.5,1.2],[5.4,0.25,0.7],[8.9,0.10,0.35]]},
+    bamboo: {label:'🎋 Bamboo',  type:'triangle', shade:'wood', knock:900,
+      partials:[[1,1,0.30],[2.8,0.45,0.12],[5.1,0.18,0.06]]},
+    crystal:{label:'💎 Crystal', type:'sine', shade:'glass', knock:2400,
+      partials:[[1,1,1.0],[3.0,0.5,0.7],[4.2,0.28,0.45],[6.8,0.12,0.25]]},
+    bowl:   {label:'🥣 Singing bowl', type:'sine', shade:'glass', knock:1400,
+      // near-unison pair beats slowly — the bowl's characteristic wobble
+      partials:[[1,1,6.0],[1.006,0.55,5.5],[2.36,0.30,3.0],[3.45,0.12,1.6]]},
+    wood:   {label:'🪵 Woodblock', type:'triangle', shade:'wood', knock:700,
+      partials:[[1,1,0.09],[2.1,0.5,0.05],[3.8,0.22,0.03]]},
+  };
+  const LAYOUTS={row:{label:'▬ Straight rail'},arc:{label:'◠ Hanging arc'}};
+
+  let ctx=null, bars=[], sig='', time=0, noiseBuf=null;
+  let W=0,H=0, spacing=0, barW=0, brushR=12;
+  let ripples=[], trail=[], sweep=null, sweepDir=-1;
+
+  // ── tuning: our own scale build (bar count goes to 15, past NOTES' 8-max) ──
+  function buildChimes(){
+    const steps=(SCALES[SETTINGS.scale]||SCALES.major).steps;
+    const rootPc=ROOT_PC[SETTINGS.rootNote]!==undefined?ROOT_PC[SETTINGS.rootNote]:0;
+    const octv=parseInt(SETTINGS.octave,10)||4;
+    const baseMidi=12*(octv+1)+rootPc;
+    const n=Math.max(3,Math.min(15,Math.round(SETTINGS.barCount)||8));
+    const names=noteNames();
+    bars=[];
+    for(let i=0;i<n;i++){
+      const midi=baseMidi+steps[i%steps.length]+12*Math.floor(i/steps.length);
+      bars.push({ freq:noteFreq(midi), pc:midi%12, label:names[midi%12],
+        th:0, om:0, glow:0, cool:0, L:0, px:0, py:0, nx:0,
+        ring:0, ringTc:1, live:[], wind:0, windT:0, kc:0, thMax:0.6 });
+    }
+    layout();
+  }
+  function barColor(b){
+    if(BOOMWHACKER[b.pc]) return BOOMWHACKER[b.pc];
+    return (BOOMWHACKER[(b.pc+11)%12]||[200,200,200]).map(v=>Math.round(v*0.7));
+  }
+  function layout(){
+    W=canvas.width; H=canvas.height;
+    const n=bars.length; if(!n||!W) return;
+    const margin=W*0.07;
+    spacing=(W-2*margin)/n;
+    // few bars = giant targets (gross-motor / cause-effect play); many = a full rack
+    barW=Math.min(spacing*0.52, W*0.12);
+    // touch forgiveness scales with the BAR, not the gap — a pad that grew with
+    // spacing rang chimes when the touch was clearly between them
+    brushR=Math.max(8, barW*0.18);
+    const f0=bars[0].freq, Lmax=H*0.78, Lmin=H*0.26;
+    for(let i=0;i<n;i++){
+      const b=bars[i], t=n>1?i/(n-1):0;
+      b.px=margin+spacing*(i+0.5);
+      // arc: a properly slung curve, not a shallow bow — bars clamp above the floor
+      b.py=SETTINGS.layout==='arc' ? H*(0.08+0.24*Math.sin(Math.PI*t)) : H*0.12;
+      b.L=Math.max(Lmin, Math.min(Lmax, Lmax*Math.sqrt(f0/b.freq)));
+      b.L=Math.min(b.L, H*0.93-b.py);
+      // realistic swing limit: a bar can reach into its neighbour's space (the
+      // collision pass handles that) but never PAST it — long heavy bars sway
+      // less, like real chimes
+      b.thMax=Math.min(0.6, Math.asin(Math.min(1, spacing*1.35/b.L)));
+      b.nx=b.px/W;
+    }
+  }
+
+
+  // ── sound: additive-partial strike through the shared master chain ──
+  function chimeStrike(b, vel){
+    try{
+      const ac=getAudio(); if(!ac||!masterGain) return;
+      const M=MATERIALS[SETTINGS.material]||MATERIALS.metal;
+      const t=ac.currentTime+0.012;
+      const out=ac.createGain(); out.gain.value=1;
+      const pan=ac.createStereoPanner(); pan.pan.value=(b.nx*2-1)*0.7;
+      out.connect(pan); pan.connect(masterGain);
+      // higher bars ring shorter, like real chimes
+      const decScale=Math.sqrt(Math.min(2,262/b.freq));
+      // "Shape the sound" (Sound pane) reaches the chimes through the SAME three
+      // settings keys the voice engine uses - tone/attack/ring - so nothing new
+      // is stored and a preset carries them across apps. Every mapping is
+      // NEUTRAL AT THE 0.5 DEFAULT, so no existing setup sounds different:
+      //   toneMul()=1, ringMul()=1, attackTime()=0.02 at 0.5.
+      // Ring is clamped to x0.25..x3 rather than the engine's x1/8..x8: metal
+      // already rings 6-8 s, and x8 would leave a minute of oscillators alive
+      // per bar on a sweep.
+      const bright=toneMul();
+      const ringK=Math.min(3,Math.max(0.25,ringMul()));
+      // the strike ramp scaled by the SAME ratio the engine uses, so 0.5 keeps
+      // the 5 ms transient this app was tuned with (attackTime()/0.02 === 1)
+      const atk=0.005*(attackTime()/0.02);
+      let maxDec=0; const oscs=[];
+      M.partials.forEach((p,i)=>{
+        const o=ac.createOscillator(); o.type=M.type; o.frequency.value=b.freq*p[0];
+        const g=ac.createGain(); const dec=p[2]*decScale*ringK; maxDec=Math.max(maxDec,dec);
+        // velocity shapes timbre, not just volume: a gentle sweep keeps mostly
+        // the fundamental, a vigorous one excites the upper partials too.
+        // Brightness rides on the UPPER partials only - the fundamental is left
+        // alone so the chime gets brighter or darker without getting louder.
+        g.gain.setValueAtTime(0.0001,t);
+        g.gain.linearRampToValueAtTime(0.16*vel*p[1]*(i?(0.30+0.70*vel)*bright:1),t+atk);
+        g.gain.setTargetAtTime(0.0001,t+atk,dec);
+        o.connect(g); g.connect(out); o.start(t);
+        oscs.push({o,dec});
+      });
+      const stopAt=t+Math.min(maxDec*3,14)+0.3;
+      oscs.forEach(x=>x.o.stop(stopAt));
+      // halo in draw() fades with the true ring time; live outs let grab-to-damp
+      // silence this strike early. Glow is set HERE so it can never appear
+      // without a sound to explain it.
+      b.ring=Math.max(b.ring,vel); b.ringTc=maxDec;
+      b.glow=Math.max(b.glow,0.1+0.9*vel);   // glow tracks loudness — soft rings glow faintly
+      b.live.push(out);
+      // Count against the auto-mixer only while the strike is LOUD: a metal
+      // chime's tail rings ~6-8 s at whisper level, and holding the poly count
+      // that long made a couple of sweeps duck the whole mix.
+      soundingVoices++; updatePolyGain();
+      setTimeout(()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain(); },900);
+      oscs[0].o.onended=()=>{ const li=b.live.indexOf(out); if(li>=0) b.live.splice(li,1);
+        try{out.disconnect();pan.disconnect();}catch(e){} };
+    }catch(e){}
+  }
+  // a soft wooden/metallic "tick" when bars knock each other
+  function knockTick(nx, vel){
+    try{
+      const ac=getAudio(); if(!ac||!masterGain) return;
+      if(!noiseBuf){
+        const len=Math.floor(ac.sampleRate*0.04);
+        noiseBuf=ac.createBuffer(1,len,ac.sampleRate);
+        const d=noiseBuf.getChannelData(0);
+        // ~1 ms fade-in: keeps the tick crisp but avoids a hard first-sample
+        // edge (harsh through reverb on big speakers)
+        for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.5)*Math.min(1,i/56);
+      }
+      const t=ac.currentTime+0.012;
+      const src=ac.createBufferSource(); src.buffer=noiseBuf;
+      const bp=ac.createBiquadFilter(); bp.type='bandpass';
+      bp.frequency.value=(MATERIALS[SETTINGS.material]||MATERIALS.metal).knock; bp.Q.value=1.2;
+      const g=ac.createGain(); g.gain.value=0.16*vel;
+      const pan=ac.createStereoPanner(); pan.pan.value=(nx*2-1)*0.7;
+      src.connect(bp); bp.connect(g); g.connect(pan); pan.connect(masterGain);
+      src.start(t);
+      soundingVoices++; updatePolyGain();
+      src.onended=()=>{ soundingVoices=Math.max(0,soundingVoices-1); updatePolyGain();
+        try{g.disconnect();pan.disconnect();}catch(e){} };
+    }catch(e){}
+  }
+
+  function strike(b, dir, speed, along, sx, sy){
+    const vel=Math.min(1, 0.28+speed*22);
+    // enough momentum that a solid hit genuinely swings the bar into its
+    // neighbour's reach — anything less and knocking never actually happens
+    b.om += dir*(1.6+4.2*Math.min(1,speed*18))*(0.6+0.4*along);
+    b.om=Math.max(-6,Math.min(6,b.om));
+    b.cool=0.12; pokeSim();
+    chimeStrike(b, vel);
+    burst(sx===undefined?b.px:sx, sy===undefined?b.py+b.L*0.55:sy, vel, barColor(b));
+  }
+  // Which bars does a point touch, and should they ring? Shared by the sweep
+  // (splat) and the tap (the down listener), which differ in exactly one way.
+  //
+  // `fresh` = a finger has just landed, so ring regardless of b.cool. The
+  // cooldown exists to stop ONE sweep firing dozens of strikes on a bar as the
+  // interpolated steps cross it — it was never meant to police deliberate
+  // repeat taps, but it could not tell them apart. Measured before the fix:
+  // strikes ~90 ms apart on one bar, only 3 of 6 rang; a student drumming
+  // happily on one chime lost half their hits. A new press is a new strike.
+  // A bar is hit where it IS, and also where it HANGS.
+  //
+  // The hit test used to follow only the bar's current angle, so a bar you had
+  // just rung swung out from under your finger and the next tap fell in the gap
+  // it left. The chime is still visibly right there, swinging in its slot, so
+  // the press looks ignored. Measured, clicking one bar ten times at 60 ms:
+  // 10/10 near the pivot, 6/10 at 45% down, 5/10 near the bottom — and 10/10 at
+  // that same low point with the bars held vertical between clicks, which is
+  // what pins it on the swing rather than on any timing.
+  //
+  // So a point counts as a hit if it is on the swung bar OR inside the vertical
+  // slot the bar hangs in at rest. A student aims at a chime, not at a swinging
+  // line, and an instrument must not get harder to play the more it is played.
+  // The cost, accepted deliberately: tapping the empty slot of a bar that has
+  // swung aside still rings it.
+  //
+  // Slots cannot overlap — the tolerance is barW/2+brushR ≈ 0.35 x spacing,
+  // and bar centres are one spacing apart. Rest is th=0 in BOTH layouts: the
+  // arc moves each PIVOT, and every bar still hangs straight down from its own.
+  function hitBars(px, py, speed, dx, fresh){
+    const tol=barW/2+brushR;
+    for(const b of bars){
+      const rx=px-b.px, ry=py-b.py;
+      const s=Math.sin(b.th), c=Math.cos(b.th);
+      const along=rx*s+ry*c, perp=rx*c-ry*s;
+      const onBar  = along>=0 && along<=b.L && Math.abs(perp)<tol;   // where it is
+      const onSlot = ry>=0    && ry<=b.L    && Math.abs(rx)<tol;     // where it hangs
+      if(onBar || onSlot){
+        if(fresh || b.cool<=0){
+          // Take the geometry from whichever matched, so a slot hit still gets a
+          // sensible swing direction and leverage instead of the swung bar's.
+          const p = onBar ? perp : rx, a = onBar ? along : ry;
+          const dir=dx>0.0005?1:dx<-0.0005?-1:(p<0?1:-1);
+          strike(b, dir, speed, a/b.L, px, py);
+        }
+      }
+    }
+  }
+  // expanding colour-matched ripple from the touch point, bigger with harder hits
+  function burst(x, y, vel, col){
+    if(!SETTINGS.strikeRipples) return;
+    if(ripples.length>24) ripples.shift();
+    ripples.push({x, y, r:barW*0.8, v:(60+320*vel)*(W/1280), a:0.28+0.45*vel, col});
+  }
+  function trailPush(x,y,col){
+    if(!SETTINGS.sweepTrail) return;
+    if(trail.length>48) trail.shift();
+    trail.push({x,y,a:0.8,col:col||[160,200,255]});
+  }
+  // grab-to-damp: a held, still finger quiets a bar like grabbing a real chime
+  function dampBar(b,dt){
+    const k=Math.exp(-dt*14);
+    b.om*=k; b.th*=k; b.glow*=k; b.cool=0.2; b.ring*=Math.exp(-dt*6);
+    if(b.live.length&&audioCtx){
+      for(const o of b.live) o.gain.setTargetAtTime(0.0001,audioCtx.currentTime,0.05);
+      b.live.length=0;
+    }
+  }
+
+  // ── physics ──
+  function step(dt){
+    let moving=false;
+    for(const b of bars){
+      const k=9/Math.max(0.15,b.L/H);              // longer bar = slower swing
+      b.om += (-k*b.th - 0.65*b.om)*dt;            // light damping: swings live long enough to knock
+      b.th += b.om*dt;
+      if(b.th> b.thMax){ b.th= b.thMax; b.om*=-0.4; }
+      if(b.th<-b.thMax){ b.th=-b.thMax; b.om*=-0.4; }
+      if(b.cool>0) b.cool-=dt;
+      if(b.kc>0) b.kc-=dt;
+      b.glow*=Math.exp(-2.6*dt);
+      if(Math.abs(b.om)>0.02||Math.abs(b.th)>0.01||b.glow>0.02) moving=true;
+    }
+    // Bars are ALWAYS solid — separation and momentum exchange run regardless of
+    // the knock toggle (bars visibly passing through each other reads as broken).
+    // The chainKnock setting only gates the knock SOUNDS.
+    {
+      const gap=spacing-barW;
+      for(let i=0;i<bars.length-1;i++){
+        const a=bars[i], c=bars[i+1];
+        // Compare at a common absolute height (the lower of the two tips), not a
+        // common depth: on the arc, neighbours hang from different heights, and
+        // equal-depth testing let unequal pairs cross at the tips.
+        const yStar=Math.min(a.py+a.L, c.py+c.L)*0.98;
+        const da=Math.max(0.05*H, yStar-a.py), dc=Math.max(0.05*H, yStar-c.py);
+        const overlap=Math.sin(a.th)*da-Math.sin(c.th)*dc-gap;
+        if(overlap>0){
+          const corr=overlap/(da+dc);
+          a.th-=corr; c.th+=corr;
+          if(a.om>c.om){   // approaching: exchange momentum
+            const va=a.om, vc=c.om;
+            c.om=va*0.55+vc*0.2; a.om=vc*0.35-va*0.25;
+            const hit=Math.abs(va-vc);
+            if(SETTINGS.chainKnock){
+              // every audible-speed contact ticks (rate-limited per pair);
+              // solid hits also ring the struck bar
+              if(hit>0.15 && a.kc<=0){ a.kc=0.09;
+                knockTick((a.nx+c.nx)/2, Math.min(1,hit*0.5)); }
+              if(c.cool<=0 && hit>0.6){ c.cool=0.15; chimeStrike(c, Math.min(0.7,hit*0.2)); }
+            }
+          }
+          moving=true;
+        }
+      }
+    }
+    const bz=Math.min(1,+SETTINGS.breeze||0);
+    if(bz>0){
+      // Wind is a smooth force field: a slow sway plus gusts that build up and
+      // die away (instant velocity kicks looked jerky). Gusts also ring bars
+      // directly — like real wind chimes, the wind always has a voice, on top
+      // of whatever knocking the swinging causes. Wind pressure fades as a bar
+      // leans, so strong wind sways bars rather than pinning them at the limit.
+      for(let i=0;i<bars.length;i++){
+        const b=bars[i];
+        if(Math.random()<dt*(0.2+0.6*bz)) b.windT=(Math.random()-0.5)*(1.5+5.5*bz);
+        b.windT*=Math.exp(-dt*0.9);
+        b.wind+=(b.windT-b.wind)*Math.min(1,dt*2.5);
+        const lean=1-Math.min(1,Math.abs(b.th)/(b.thMax*0.85));
+        b.om+=(b.wind*lean+(Math.sin(time*0.5+i*1.7)+Math.sin(time*0.13+i*0.53))*(0.15+1.0*bz)*lean)*dt;
+        // gust rings are a whisper — clearly quieter than any visible knock,
+        // so contact is always the louder voice
+        if(Math.random()<dt*(0.05+0.4*bz) && b.cool<=0){
+          b.cool=0.4; chimeStrike(b, 0.06+0.08*bz*Math.random());
+        }
+      }
+      pokeSim();
+    }
+    // ring halos fade with the true acoustic decay
+    for(const b of bars){ if(b.ring>0.02){ b.ring*=Math.exp(-dt/Math.max(0.3,b.ringTc*1.2)); moving=true; } }
+    // strike ripples expand and fade
+    for(let i=ripples.length-1;i>=0;i--){ const r=ripples[i];
+      r.r+=r.v*dt; r.a-=dt*0.9; if(r.a<=0) ripples.splice(i,1); else moving=true; }
+    // sweep trail ages
+    for(let i=trail.length-1;i>=0;i--){ trail[i].a-=dt*2.4; if(trail[i].a<=0) trail.splice(i,1); else moving=true; }
+    // one-touch auto sweep: a comet crosses the rack, striking as it goes
+    if(sweep){
+      const u0=sweep.u; sweep.u+=sweep.dir*dt*0.85;
+      const x0=Math.min(u0,sweep.u), x1=Math.max(u0,sweep.u);
+      for(const b of bars) if(b.nx>=x0&&b.nx<=x1&&b.cool<=0) strike(b,sweep.dir,0.02,0.8,b.px,b.py+b.L*0.55);
+      trailPush(sweep.u*W, H*0.5, [255,255,255]);
+      if(sweep.u<-0.08||sweep.u>1.08) sweep=null;
+      moving=true;
+    }
+    // grab-to-damp: watch for held, still fingers over a bar
+    for(const p of pointers){
+      if(!p.down){ p._still=0; continue; }
+      const mv=Math.hypot(p.x-(p._lx===undefined?p.x:p._lx), p.y-(p._ly===undefined?p.y:p._ly));
+      p._lx=p.x; p._ly=p.y;
+      p._still=mv<0.0015?(p._still||0)+dt:0;
+      if(p._still>0.25){
+        const px=p.x*W, py=(1-p.y)*H;
+        for(const b of bars){
+          const rx=px-b.px, ry=py-b.py, s=Math.sin(b.th), c=Math.cos(b.th);
+          const along=rx*s+ry*c, perp=rx*c-ry*s;
+          if(along>=0&&along<=b.L&&Math.abs(perp)<barW/2+brushR){ dampBar(b,dt); moving=true; }
+        }
+      }
+    }
+    if(moving) pokeSim();
+  }
+
+  // ── drawing ──
+  function draw(){
+    ctx.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+    ctx.fillRect(0,0,W,H);
+    if(!bars.length) return;
+    const glowOk=activeQuality()!=='low';
+    // rail through the pivots
+    ctx.strokeStyle='rgba(255,255,255,0.22)'; ctx.lineWidth=Math.max(2,H*0.006);
+    ctx.beginPath();
+    ctx.moveTo(bars[0].px-spacing*0.6,bars[0].py-H*0.015);
+    for(const b of bars) ctx.lineTo(b.px,b.py-H*0.015);
+    ctx.lineTo(bars[bars.length-1].px+spacing*0.6,bars[bars.length-1].py-H*0.015);
+    ctx.stroke();
+    for(const b of bars){
+      const col=barColor(b), cs='rgb('+col.join(',')+')';
+      // string
+      ctx.strokeStyle='rgba(255,255,255,0.30)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(b.px,b.py-H*0.015); ctx.lineTo(b.px,b.py); ctx.stroke();
+      ctx.save();
+      ctx.translate(b.px,b.py); ctx.rotate(b.th);
+      if(glowOk && b.ring>0.02){
+        // resonance halo: pulses gently and fades with the bar's true ring time,
+        // so the eye sees how long the ear still hears it
+        const rr=(barW*(1.6+0.5*Math.sin(time*5+b.px))+b.ring*barW*1.6)*2.2;
+        const hg=ctx.createRadialGradient(0,b.L*0.55,0,0,b.L*0.55,rr);
+        hg.addColorStop(0,'rgba('+col.join(',')+','+(0.30*b.ring).toFixed(3)+')');
+        hg.addColorStop(1,'rgba('+col.join(',')+',0)');
+        ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(0,b.L*0.55,rr,0,Math.PI*2); ctx.fill();
+      }
+      if(glowOk && b.glow>0.03){ ctx.shadowColor=cs; ctx.shadowBlur=b.glow*barW*1.6; }
+      const grad=ctx.createLinearGradient(-barW/2,0,barW/2,0);
+      const mat=SETTINGS.material, shade=(MATERIALS[mat]||MATERIALS.metal).shade;
+      if(shade==='metal'){
+        grad.addColorStop(0,'rgba('+col.map(v=>Math.round(v*0.55)).join(',')+',1)');
+        grad.addColorStop(0.35,'rgba('+col.map(v=>Math.min(255,Math.round(v*0.9+70))).join(',')+',1)');
+        grad.addColorStop(1,'rgba('+col.map(v=>Math.round(v*0.5)).join(',')+',1)');
+      } else if(shade==='wood'){
+        grad.addColorStop(0,'rgba('+col.map(v=>Math.round(v*0.5+30)).join(',')+',1)');
+        grad.addColorStop(0.5,'rgba('+col.map(v=>Math.round(v*0.75+25)).join(',')+',1)');
+        grad.addColorStop(1,'rgba('+col.map(v=>Math.round(v*0.45+25)).join(',')+',1)');
+      } else {
+        grad.addColorStop(0,'rgba('+col.join(',')+',0.55)');
+        grad.addColorStop(0.5,'rgba('+col.map(v=>Math.min(255,v+90)).join(',')+',0.8)');
+        grad.addColorStop(1,'rgba('+col.join(',')+',0.55)');
+      }
+      ctx.fillStyle=grad;
+      const r=barW/2;
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(-barW/2,0,barW,b.L,r);
+      else ctx.rect(-barW/2,0,barW,b.L);
+      ctx.fill();
+      if(mat==='bamboo'){   // node rings
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.fillRect(-barW/2,b.L*0.33,barW,Math.max(2,b.L*0.015));
+        ctx.fillRect(-barW/2,b.L*0.66,barW,Math.max(2,b.L*0.015));
+      }
+      if(shade==='glass'){  // edge highlight
+        ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=1.5;
+        ctx.beginPath();
+        if(ctx.roundRect) ctx.roundRect(-barW/2,0,barW,b.L,r); else ctx.rect(-barW/2,0,barW,b.L);
+        ctx.stroke();
+      }
+      ctx.shadowBlur=0;
+      if(SETTINGS.showLabels){
+        // printed on the tube near its lower end, like a real Boomwhacker —
+        // tip-hung labels fell off-screen once chimes could run full height
+        const ly=b.L-barW*0.75;
+        ctx.fillStyle='rgba(0,0,0,0.38)';
+        ctx.beginPath(); ctx.arc(0,ly,barW*0.38,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba(255,255,255,0.92)';
+        ctx.font='700 '+Math.max(11,barW*0.5)+'px system-ui,sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(b.label,0,ly);
+      }
+      ctx.restore();
+    }
+    for(const r of ripples){
+      ctx.strokeStyle='rgba('+r.col.join(',')+','+Math.max(0,r.a).toFixed(3)+')';
+      ctx.lineWidth=Math.max(2,barW*0.12);
+      ctx.beginPath(); ctx.arc(r.x,r.y,r.r,0,Math.PI*2); ctx.stroke();
+    }
+    if(SETTINGS.sweepTrail){
+      for(const tp of trail){
+        const g2=ctx.createRadialGradient(tp.x,tp.y,0,tp.x,tp.y,brushR*1.6);
+        g2.addColorStop(0,'rgba('+tp.col.join(',')+','+(0.35*tp.a).toFixed(3)+')');
+        g2.addColorStop(1,'rgba('+tp.col.join(',')+',0)');
+        ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(tp.x,tp.y,brushR*1.6,0,Math.PI*2); ctx.fill();
+      }
+    }
+  }
+
+  function settingsSig(){
+    return [SETTINGS.barCount,SETTINGS.material,SETTINGS.layout,SETTINGS.scale,
+      SETTINGS.rootNote,SETTINGS.octave].join('|');
+  }
+
+  return {
+    sectionLabel:'Sweep Chimes',
+    lockMode:'flow',                 // no Keys/Flow toggle — the chimes ARE the zones
+    noVoices:true,                   // strikes are the app's own chime sounds
+    hideRail:['clear'],
+    themes:{ glow:{label:'✨ Glow', colors:[[1,0.9,0.4],[0.5,1,0.7],[0.4,0.8,1],[1,0.6,0.8],[0.8,0.7,1]]} },
+    defaults:{ theme:'glow', material:'metal', barCount:8, layout:'row', chainKnock:true,
+      breeze:0, oneTouch:false, sweepTrail:true, strikeRipples:true,
+      mode:'flow', paint:true, yAxis:'none', colorMode:'note',
+      scale:'major', showLabels:true },
+    schema:[],
+    // 🎵 Notes tab — and nothing else. It holds exactly what every other app's
+    // Notes tab holds, in the framework's running order: how many, how high,
+    // which notes, where it starts. There is no longer a section heading here
+    // because there is only one group. (The rail label was '🎐 Chimes'; with the
+    // app-specific controls gone it is a Notes tab, so it uses the default.)
+    buildInstrument(el){
+      el.appendChild(makeSlider({key:'barCount',label:'Number of chimes',min:3,max:15,step:1,dp:0,onChange:buildChimes}));
+      el.appendChild(makeChips('Register','octave',OCT_OPTS,buildChimes));
+      el.appendChild(makeChips('Scale','scale',SCALES,()=>{ buildChimes(); buildInstrumentPanel(); }));
+      el.appendChild(makeChips('Starting note','rootNote',rootOptions(),buildChimes));
+    },
+    // 🎛️ Sound tab — the framework's spine in the framework's order: the voice
+    // row, Effects, Volume, Shape the sound; then this app's own section last,
+    // which is what Fluid Keys does with Anim.sectionLabel on its Visuals pane.
+    //
+    // Material IS the voice row. It was on the Notes tab on the argument that it
+    // sets the bars' shade too — but the table is three sound properties (type,
+    // partials, knock) to one visual (shade), so that was the wrong call: this is
+    // the same control as Fluid Keys' Voice and Strummer's Strings sound, and it
+    // belongs in the same place. The label keeps "(look + sound)" so the change
+    // in appearance is not a surprise.
+    buildSound(el){
+      el.appendChild(makeChips('Material (look + sound)','material',MATERIALS));
+      const fx=document.createElement('div'); fx.className='sectn'; fx.textContent='Effects'; el.appendChild(fx);
+      el.appendChild(togglePair(makeToggle('Reverb','reverb',applyReverb),
+                                makeToggle('Echo',  'echo',  applyEcho)));
+      el.appendChild(togglePair(makeToggle('Chorus','chorus',applyChorus),
+                                makeToggle('Mute',  'mute',  applyVolume)));
+      el.appendChild(makeSlider({key:'volume',label:'Volume',min:0,max:1,step:0.01,dp:2}));
+      // Same three keys and the same labels as every other app. They were always
+      // stored here and did nothing; chimeStrike reads them now.
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Shape the sound'; el.appendChild(h);
+      el.appendChild(makeSlider({key:'tone',   label:'Brightness (dark → bright)', min:0,max:1,step:0.05,dp:2}));
+      el.appendChild(makeSlider({key:'attack', label:'Attack (soft → crisp)',      min:0,max:1,step:0.05,dp:2}));
+      el.appendChild(makeSlider({key:'ring',   label:'Ring (short → long)',        min:0,max:1,step:0.05,dp:2}));
+      // These two are on the SOUND tab, not Visuals, because both of them make
+      // noise. Breeze rings bars directly (see the gust block in frame(): "the
+      // wind always has a voice"), so it is the only control that makes this app
+      // play with nobody touching it — a therapist needs to find that where they
+      // look for sound. Knocking gates the contact SOUNDS; the bars collide
+      // either way, so turning it off changes what is heard, not what is seen.
+      const hm=document.createElement('div'); hm.className='sectn'; hm.textContent='When the chimes move'; el.appendChild(hm);
+      el.appendChild(makeToggle('Knocking sounds','chainKnock'));
+      el.appendChild(makeSlider({key:'breeze',label:'Breeze strength',min:0,max:1,step:0.05,dp:2,onChange:()=>pokeSim()}));
+    },
+    // ✨ Visuals tab. "Hanging from" is here because it is what the instrument
+    // LOOKS like — though note it also moves the bars, so it changes where a
+    // student has to reach, not only what they see.
+    buildVisuals(el){
+      el.appendChild(makeChips('Hanging from','layout',LAYOUTS,layout));
+      el.appendChild(makeToggle('Note letters on screen','showLabels'));
+      el.appendChild(togglePair(makeToggle('Sweep trail','sweepTrail'),
+                                makeToggle('Touch ripples','strikeRipples')));
+      appendBgControl(el);
+    },
+    // ⚙️ Setup → Access. One-touch is an access setting, not a sound or a look:
+    // it lets a student who cannot hold and drag a sweep still play the whole
+    // run from one tap.
+    setupExtras(el){
+      el.appendChild(makeToggle('One-touch sweep (a tap plays the run)','oneTouch'));
+    },
+    init(cv){
+      ctx=cv.getContext('2d');
+      // breeze grew from a toggle into a strength slider — migrate saved booleans
+      if(typeof SETTINGS.breeze!=='number') SETTINGS.breeze=SETTINGS.breeze?0.4:0;
+      buildChimes();
+      sig=settingsSig();
+    },
+    resize(w,h){ layout(); },
+    // The hit hook: the initial press, then every interpolated step of a sweep.
+    //
+    // velScale===0 marks the PRESS itself, delivered by onDown the instant the
+    // pointer lands (PHASE-4I). It arrives for presses no DOM event ever
+    // describes — a dwell, a parked gamepad pointer — which is why this app no
+    // longer has a mousedown listener of its own: one had made both dwell routes
+    // silent here, for exactly the students dwell exists for.
+    splat(x,y,dx,dy,color,opts){
+      if(!bars.length) return;
+      // A fresh press is a new strike by definition, so it bypasses the 0.12 s
+      // per-bar cooldown; that cooldown is only there to stop one SWEEP
+      // re-ringing a bar its interpolated steps are still crossing.
+      const fresh = !!(opts && opts.velScale===0);
+      // one-touch mode: any press plays the whole run (single-switch access).
+      // A drag must not start a second one.
+      if(SETTINGS.oneTouch){
+        if(fresh && !sweep){ sweepDir*=-1; sweep={u:sweepDir>0?-0.06:1.06, dir:sweepDir}; pokeSim(); }
+        return;
+      }
+      const px=x*W, py=(1-y)*H;
+      const speed=Math.hypot(dx,dy);
+      trailPush(px,py,color&&color.map?color.map(v=>Math.min(255,Math.round(v*255))):null);
+      hitBars(px, py, speed, dx, fresh);
+    },
+    frame(dt){
+      time+=dt;
+      const s2=settingsSig();
+      if(s2!==sig){ sig=s2; buildChimes(); }   // preset loads change settings without telling us
+      step(dt);
+      draw();
+    },
+    reset(){ for(const b of bars){ b.th=0; b.om=0; b.glow=0; b.ring=0; }
+      ripples.length=0; trail.length=0; sweep=null; },
+  };
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

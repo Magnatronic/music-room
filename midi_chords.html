@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Big Chords – Music Room</title>
+<link rel="stylesheet" href="framework.css">
+</head>
+<body>
+<script src="framework.js"></script>
+<script src="midi.js"></script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Big Chords — one finger, a whole chord.
+   Design: PHASE-9-MIDI.md. Shares midi.js with the other MIDI apps.
+
+   THE POINT IS THE RATIO, not the harmony trick: the smallest motor act a
+   student can manage — one finger, anywhere — makes the biggest musical result
+   the room can produce. Everything else in the suite gives one touch one note.
+
+   TWO IDEAS CARRY IT:
+
+   1. THE CHORD IS BUILT FROM SCALE DEGREES, never from semitone intervals. The
+      framework's notes ARE the degrees of the therapist's chosen scale, so
+      taking every other one above the note played is diatonic by construction:
+      always in key, in every scale, with no chord table and nothing that can
+      come out wrong. A chord that will not fit above the note is stacked BELOW
+      it instead, so a note near the top gives a different chord rather than the
+      same one flattened against the ceiling.
+
+   2. VELOCITY IS THE SIZE OF THE CHORD. Press gently and one note sounds; press
+      hard and the whole stack does. That gives a student something expressive to
+      DO with a skill they already have, rather than asking for a new one, and it
+      means the instrument rewards effort without ever punishing its absence.
+
+   Cleared and redrawn every frame, never faded toward the background. See
+   APPS.md on Soundscape.
+*/
+const Anim = (function(){
+
+  const BLEND=MIDIIN.BLEND;
+  let screen=null, W=0, H=0;
+  const paint=MIDIIN.makePaint();
+
+  const SIZE = { auto:{label:'How hard you press decides'}, one:{label:'Single notes'},
+                 three:{label:'Always 3'}, four:{label:'Always 4'}, five:{label:'Always 5'} };
+
+  const LOOK = {
+    towers: {label:'▮ Towers', params:[
+      ['wide','Width',0.3,2.5,1], ['tall','Height',0.3,2.5,1], ['glow','Glow',0,1.6,0.5]]},
+    panes:  {label:'🪟 Panes',  params:[
+      ['tall','Height',0.3,2.5,1], ['soft','Softness',0.1,2.5,1], ['glow','Glow',0,1.6,0.5]]},
+    bloom:  {label:'🎆 Bloom',  params:[
+      ['size','Size',0.3,2.5,1], ['gap','Spacing',0.3,2.5,1], ['glow','Glow',0,1.6,0.5]]},
+    // Arcs are gone at the user's request. Sparks replaces them because the
+    // other three are all LARGE shapes, and small actors read better than big
+    // ones - a rising cluster per note of the chord, no state of its own: the
+    // positions come from the tower's own hue and the note index, so switching
+    // look mid-chord cannot leave anything half-built.
+    sparks: {label:'✦ Sparks', params:[
+      ['count','How many',4,26,13], ['rise','How far they reach',0.3,2.5,1],
+      ['spread','Spread',0.3,2.5,1]]},
+  };
+
+  const look = () => LOOK[SETTINGS.look] || LOOK.towers;
+  // A small deterministic scatter, so Sparks needs no per-mark state.
+  const rnd = (a,b) => { const x=Math.sin(a*127.1+b*311.7)*43758.5453; return x-Math.floor(x); };
+  const BR   = () => 0.35+0.9*(+SETTINGS.bright);
+  const SZ   = () => 0.45+1.5*(+SETTINGS.size);
+
+  function pv(key){
+    const o=SETTINGS.sp && SETTINGS.sp[SETTINGS.look], v=o?o[key]:null;
+    if(v!=null) return +v;
+    const d=(look().params||[]).find(p=>p[0]===key);
+    return d?d[4]:1;
+  }
+  function setPv(key,val){
+    SETTINGS.sp=SETTINGS.sp||{};
+    SETTINGS.sp[SETTINGS.look]=Object.assign({},SETTINGS.sp[SETTINGS.look],{[key]:val});
+    saveSettings();
+  }
+
+  const towers=[];
+  const sounding=new Map();          // event id → the voices it is holding
+
+  /* ── The chord ─────────────────────────────────────────────────────────
+     Every other degree of the scale. Upward from the note played when there is
+     room, downward from it when there is not — so the played note is the bottom
+     of the chord low down and the TOP of it high up, and no two places on the
+     instrument give the same chord.                                         */
+  function chordFor(col, vel){
+    const n=Math.max(1,NOTES.length);
+    const want = SETTINGS.chordSize==='one'   ? 1
+               : SETTINGS.chordSize==='three' ? 3
+               : SETTINGS.chordSize==='four'  ? 4
+               : SETTINGS.chordSize==='five'  ? 5
+               : (vel<0.30?1 : vel<0.55?2 : vel<0.80?3 : 4);
+    const up = col + 2*(want-1) <= n-1;
+    const out=[];
+    for(let i=0;i<want;i++){
+      const c = up ? col+i*2 : col-i*2;
+      if(c>=0 && c<=n-1) out.push(c);
+    }
+    return out.length? out : [Math.max(0,Math.min(n-1,col))];
+  }
+
+  function press(ev){
+    const cols=chordFor(ev.col, ev.force);
+    const vids=[];
+    cols.forEach((c,i)=>{
+      const v=startVoice(MIDIIN.colX(c), Math.max(0.08, ev.force*(1-0.10*i)));
+      if(v) vids.push(v);
+    });
+    sounding.set(ev.id, vids);
+    // `ty` is the point a FINGER chose, and null for a note off an instrument,
+    // which has no place of its own. The chord is built from wherever that is —
+    // towers stand ON it, rings are centred ON it — so a touch always makes its
+    // light under the finger rather than at the foot of the screen.
+    towers.push({ id:ev.id, cols, hue:ev.hue, vel:ev.force,
+                  x:MIDIIN.PX(ev), ty:(ev.fy!=null ? 1-ev.fy : null),
+                  held:true, grow:0, life:0, age:0 });
+    if(towers.length>40) towers.shift();
+  }
+  function release(ev){
+    const vids=sounding.get(ev.id);
+    if(vids){ vids.forEach(v=>stopVoice(v)); sounding.delete(ev.id); }
+    for(const t of towers) if(t.id===ev.id) t.held=false;
+  }
+  function allOff(){
+    for(const vids of sounding.values()) vids.forEach(v=>stopVoice(v));
+    sounding.clear();
+    for(const t of towers) t.held=false;
+  }
+
+  return {
+    appLabel:'🎹 Chords',
+    lockMode:'notes',
+    noVoices:true,
+    hideRail:['clear'],
+    onCell(){},
+    themes:{ dark:{label:'🎵 Notes', colors:[[1,0.2,0.2],[1,0.55,0.15],[1,0.85,0.15],
+                                             [0.25,0.75,0.32],[0.12,0.7,0.7]]} },
+    // Ten notes rather than eight: a four-note stack needs seven degrees of
+    // headroom above the lowest one before it has to turn round and go down.
+    defaults:Object.assign({}, MIDIIN.DEFAULTS, {
+      theme:'dark', look:'towers', chordSize:'auto', noteCount:10,
+      bright:0.7, size:0.55,
+    }),
+    schema:[],
+
+    railButtons:[
+      { id:'bcsil', icon:()=>'🔇', label:'Silence', title:()=>'Stop every sounding chord',
+        onClick(){ allOff(); MIDIIN.silence(); } },
+      // WIPE STOPS EVERYTHING, not just the picture. Clearing the canvas while
+      // half a dozen chords were still animating meant they carried on drawing
+      // themselves back onto it a frame later.
+      { id:'bcwipe', icon:()=>'🧽', label:'Wipe', title:()=>'Clear the picture and stop everything',
+        show:()=>MIDIIN.PERSIST()>0.01 || towers.length>0,
+        onClick(){ allOff(); towers.length=0; paint.clear(); refreshRailButtons(); } },
+    ],
+
+    buildApp(el){
+      MIDIIN.buildConnect(el);
+      const labels={}; for(const k in LOOK) labels[k]={label:LOOK[k].label};
+      // A LOOK CHANGE RETIRES THE LIVE CHORDS AND KEEPS THE PICTURE. Two
+      // different problems wear the same clothes here. A chord that is still
+      // animating gets REDRAWN by whatever look is now selected, so it appears
+      // to change shape retrospectively - that is the one to stop, and clearing
+      // the live list stops it. What is already PAINTED was finished by the old
+      // look and is a record of something that happened; wiping it on a look
+      // change threw away work, and layering the next look over it is the
+      // interesting thing to do. So: live cleared, picture kept.
+      el.appendChild(makeChips('Look','look',labels,()=>{
+        allOff(); towers.length=0; refreshRailButtons();
+        if(currentQuickMode==='visuals') buildVisualsPanel(); }));
+      el.appendChild(makeChips('How big the chord is','chordSize',SIZE,null));
+      MIDIIN.snapChips(el);
+      el.appendChild(MIDIIN.note('One key, one touch, one pad — a whole chord, always in the scale. '
+        + 'On “how hard you press decides”, a gentle press gives one note and a firm one four.'));
+    },
+
+    buildInstrument(el){
+      MIDIIN.buildNotesPane(el, 'The chord is built from every other one of these, so the scale '
+        + 'chosen here is the harmony.');
+    },
+
+    buildVisuals(el){
+      const h=document.createElement('div'); h.className='sectn'; h.textContent='Colour';
+      el.appendChild(h); MIDIIN.paletteChips(el);
+
+      const h2=document.createElement('div'); h2.className='sectn'; h2.textContent='Light';
+      el.appendChild(h2);
+      el.appendChild(makeSlider({key:'bright',label:'Brightness',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      el.appendChild(makeSlider({key:'size',label:'Size',min:0.1,max:1,step:0.05,dp:2,
+        fmt:v=>Math.round(v*100)+'%'}));
+      MIDIIN.lingerSlider(el);
+      MIDIIN.persistSlider(el, ()=>refreshRailButtons());
+      el.appendChild(MIDIIN.note('Persistence builds a picture; 🧽 Wipe clears it. '
+        + 'Linger is the gentler version — they still go.'));
+
+      const h3=document.createElement('div'); h3.className='sectn';
+      h3.textContent=look().label; el.appendChild(h3);
+      for(const p of look().params) el.appendChild(styleSlider(p[0],p[1],p[2],p[3],p[4]));
+      el.appendChild(MIDIIN.note('One mark per note of the chord. These belong to this look alone.'));
+    },
+
+    init(cv){
+      screen=cv.getContext('2d');
+      MIDIIN.setKnobs([{key:'bright',label:'Brightness'},{key:'size',label:'Size'}]);
+      MIDIIN.attach({ onHit:press, onRelease:release, onSilence:allOff });
+      this.reset();
+    },
+
+    resize(){ this.reset(); },
+
+    // A touch plays a whole chord too, so it is never a dead screen.
+    splat(x,y,dx,dy,color,opts){ MIDIIN.splatTouch(x,y,opts,420); },
+
+    frame(dt){
+      if(!screen) return;
+      W=canvas.width; H=canvas.height;
+      MIDIIN.ease(dt);
+      const S=Math.min(W,H), mode=SETTINGS.look;
+
+      // The marks go on a TRANSPARENT live layer, not straight on the screen,
+      // so persistence can stamp exactly what they painted. `band` and `halo`
+      // draw on `screen`, so `screen` IS the live layer while they run.
+      const real=screen;
+      screen=paint.begin(W,H);
+      screen.globalCompositeOperation=BLEND;
+
+      for(let i=towers.length-1;i>=0;i--){
+        const t=towers[i];
+        if(!t.held) t.life+=dt;
+        // A SEPARATE CLOCK FOR THE PICTURE. `life` deliberately stops while a key
+        // is held, so a held chord does not fade - but Sparks used it to drive
+        // how far out they had travelled, so they sat piled at the centre for as
+        // long as the key was down and then set off when it came up. That is the
+        // "delay, then they spread" - `t.age` just counts from the press.
+        t.age+=dt;
+        const f=Math.max(0,1-t.life/(2.8*MIDIIN.LINGER()));
+        if(f<=0){ towers.splice(i,1); continue; }
+        t.grow=Math.min(1,t.grow+dt*5);
+
+        const x=Math.max(0.03,Math.min(0.97,t.x))*W;
+        const anchor = t.ty!=null ? Math.max(0.06,Math.min(0.97,t.ty))
+                     : (mode==='bloom' ? 0.55 : mode==='sparks' ? 0.55 : 0.88);
+        const ay = anchor*H;
+        for(let k=0;k<t.cols.length;k++){
+          const c=MIDIIN.colourOfCol(t.cols[k], (t.hue+k*0.137)%1).join(',');
+          const a=Math.min(1, f*(0.88-0.10*k)*BR());
+
+          if(mode==='towers'){
+            const w=Math.max(18,W*0.045*pv('wide')*SZ());
+            // The step between slabs is exactly the slab height. It was slightly
+            // MORE, which left a hairline of background between them — the same
+            // dark-seam-between-tiles fault Sound Match had, and just as ugly.
+            const hgt=H*0.125*pv('tall')*SZ()*t.grow;
+            const y=ay - k*hgt;
+            band(x-w/2, y-hgt, w, hgt, c, a);
+            halo(x, y-hgt/2, Math.min(S*0.16, w*(0.6+0.45*pv('glow'))), c, a*0.16);
+          } else if(mode==='panes'){
+            // Size had no effect at all on Panes and only set the width on
+            // Towers, which is why it was hard to tell what it did.
+            const hgt=H*0.16*pv('tall')*SZ()*t.grow;
+            const y=ay + H*0.02 - k*hgt;
+            const w=W*(0.30+0.62*Math.min(1,pv('soft')))*(0.55+0.45*t.vel)*SZ();
+            band(x-w/2, y-hgt, w, hgt, c, a*0.6);
+            halo(x, y-hgt/2, Math.min(S*0.20, w*0.16*(0.7+0.5*pv('glow'))), c, a*0.10);
+          } else if(mode==='bloom'){
+            const r=S*(0.05+0.10*t.vel)*SZ()*pv('size')*(1+k*0.55*pv('gap'))*t.grow;
+            const rg=screen.createRadialGradient(x,ay,r*0.5,x,ay,r);
+            rg.addColorStop(0,'rgba('+c+',0)');
+            rg.addColorStop(0.62,'rgba('+c+','+(a*0.55).toFixed(3)+')');
+            rg.addColorStop(1,'rgba('+c+',0)');
+            screen.fillStyle=rg; screen.beginPath(); screen.arc(x,ay,r,0,Math.PI*2); screen.fill();
+            halo(x,ay, Math.min(S*0.16, r*0.24*(1+0.4*pv('glow'))), c, a*0.12);
+          } else {
+            // ONE CENTRE, EVERY DIRECTION. Three things were making it a fan
+            // that climbed: each note of the chord was offset upward by k, the
+            // whole burst carried an upward bias term, and the horizontal and
+            // vertical radii were scaled by different sliders so it was an
+            // ellipse. It is now a circle about the point that was touched, and
+            // the notes of the chord differ by colour and radius, not by height.
+            const n=Math.round(pv('count'));
+            const R0=Math.min(W,H)*0.34*pv('rise');
+            const ease=1-Math.exp(-3.2*t.age);
+            for(let m=0;m<n;m++){
+              const s1=rnd(k+1,m+1), s2=rnd(m+2,k+3), s3=rnd(k*7+m,5);
+              const ang=s2*Math.PI*2;
+              const dist=(0.28+0.85*s1)*ease*(1+k*0.30*pv('spread'));
+              const px=x+Math.cos(ang)*dist*R0;
+              const py=ay+Math.sin(ang)*dist*R0;
+              const rr=Math.max(0.8, S*0.0055*SZ()*(0.45+0.9*s3)*(1-0.45*ease));
+              screen.fillStyle='rgba('+c+','+Math.min(1,a*(0.35+0.65*s3)).toFixed(3)+')';
+              screen.beginPath(); screen.arc(px,py,rr,0,Math.PI*2); screen.fill();
+            }
+            // centred on the burst, not above it. `rise` was a local belonging
+            // to the old fan-shaped version, and this line outlived it — which
+            // threw "rise is not defined" the moment Sparks actually drew.
+            // The page-load gate cannot see that: it only fires once a note is
+            // played, so nothing but driving the app would have found it.
+            halo(x, ay, S*0.05*(1+0.5*pv('spread')), c, a*0.06);
+          }
+        }
+      }
+      screen.globalCompositeOperation='source-over';
+      screen=real;
+      paint.stamp(dt);
+      screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+      screen.fillRect(0,0,W,H);
+      paint.show(screen);
+      if(towers.length || paint.painting()) pokeSim();
+    },
+
+    reset(){
+      allOff(); towers.length=0; paint.clear();
+      if(screen){
+        screen.fillStyle='rgb('+(bgRGB[0]*255|0)+','+(bgRGB[1]*255|0)+','+(bgRGB[2]*255|0)+')';
+        screen.fillRect(0,0,canvas.width,canvas.height);
+      }
+    },
+  };
+
+  // a slab that fades out at both edges, so nothing has a hard vertical seam
+  function band(x,y,w,h,c,a){
+    const g=screen.createLinearGradient(x,0,x+w,0);
+    g.addColorStop(0,'rgba('+c+',0)');
+    g.addColorStop(0.5,'rgba('+c+','+a.toFixed(3)+')');
+    g.addColorStop(1,'rgba('+c+',0)');
+    screen.fillStyle=g; screen.fillRect(x,y,w,h);
+  }
+  function halo(x,y,r,c,a){
+    const g=screen.createRadialGradient(x,y,0,x,y,r);
+    g.addColorStop(0,'rgba('+c+','+Math.min(1,a).toFixed(3)+')');
+    g.addColorStop(1,'rgba('+c+',0)');
+    screen.fillStyle=g; screen.beginPath(); screen.arc(x,y,r,0,Math.PI*2); screen.fill();
+  }
+
+  function styleSlider(key,label,min,max,def){
+    const row=document.createElement('div'); row.className='row';
+    const head=document.createElement('div'); head.className='rowhead';
+    const lab=document.createElement('label'); lab.textContent=label;
+    const val=document.createElement('span'); val.className='val';
+    head.appendChild(lab); head.appendChild(val);
+    const inp=document.createElement('input');
+    inp.type='range'; inp.min=min; inp.max=max; inp.step=(max-min)/40; inp.value=pv(key);
+    const show=v=>Math.round(v/def*100)+'%';
+    val.textContent=show(inp.value);
+    inp.addEventListener('input',()=>{ const v=parseFloat(inp.value); setPv(key,v); val.textContent=show(v); });
+    row.appendChild(head); row.appendChild(inp);
+    return row;
+  }
+})();
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

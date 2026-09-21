@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sound Match — prototype</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  /* Only what the prototype needs to stand on its own outside the shell.
+     The left column FAKES three framework panes so the split can be judged:
+     rows marked "Notes" and "Sound" are the framework's own tabs, unchanged
+     from every other app, and only the 🃏 Game rows would be this app's. */
+  html,body{height:100%;overflow:hidden;background:#000}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink);display:flex}
+
+  #panel{width:calc(400px * var(--ui-scale));background:#111114;height:100vh;overflow:auto;
+         padding:calc(18px * var(--ui-scale));box-sizing:border-box;border-right:1px solid #26262c;
+         flex:0 0 auto}
+  #panel .sectn:first-child{margin-top:0}
+  .owner{font-size:var(--font-xs);color:rgba(255,255,255,0.45);font-weight:600;
+         letter-spacing:.06em;text-transform:uppercase;margin:calc(2px * var(--ui-scale)) 0 0}
+  #hint{margin-top:calc(18px * var(--ui-scale));padding-top:calc(14px * var(--ui-scale));
+        border-top:1px solid #26262c;color:var(--ink-quiet);font-size:var(--font-s);line-height:1.55}
+  #hint b{color:var(--ink)}
+  #newBtn{width:100%;height:var(--target);margin-top:var(--gap)}
+  .hidden{display:none}
+  .chip.off{opacity:0.30;pointer-events:none}
+  .why{font-size:var(--font-s);color:var(--ink-quiet);line-height:1.45;
+       margin:calc(-4px * var(--ui-scale)) 0 var(--gap)}
+
+  /* ── The board fills the activity, edge to edge ────────────────────────── */
+  #stage{flex:1 1 auto;position:relative;display:flex;flex-direction:column;overflow:hidden}
+  #turn{position:absolute;top:0;left:0;right:0;height:calc(40px * var(--ui-scale));
+        display:flex;align-items:center;justify-content:center;gap:calc(10px * var(--ui-scale));
+        font-size:var(--font-m);font-weight:700;z-index:3;pointer-events:none;
+        background:linear-gradient(#000c,transparent)}
+  #turn .dot{width:calc(14px * var(--ui-scale));height:calc(14px * var(--ui-scale));border-radius:50%}
+  #board{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
+         align-items:center;touch-action:none}
+  .brow{display:flex;justify-content:center}
+
+  .card{position:relative;perspective:1000px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .inner{position:absolute;inset:calc(4px * var(--ui-scale));transform-style:preserve-3d;
+         transition:transform .34s cubic-bezier(.3,.7,.3,1)}
+  .card.up .inner{transform:rotateY(180deg)}
+  .back,.front{position:absolute;inset:0;border-radius:var(--radius);
+               backface-visibility:hidden;display:flex;align-items:center;justify-content:center;
+               overflow:hidden}
+  .back{background:linear-gradient(155deg,#1c1c24,#131318);border:1px solid rgba(255,255,255,0.16)}
+  .back::after{content:'';width:22%;aspect-ratio:1;border-radius:50%;
+               border:calc(2px * var(--ui-scale)) solid rgba(255,255,255,0.10)}
+  .front{transform:rotateY(180deg);border:1px solid rgba(255,255,255,0.22);
+         background:rgb(var(--c,120,120,130));color:#12121a;font-weight:800;
+         font-size:calc(38px * var(--ui-scale));text-shadow:0 1px 0 rgba(255,255,255,0.30)}
+  /* "Cards show: Nothing" — every face identical, so only the ear can sort them.
+     A flat grey rectangle read as a dead card, so the face carries a quiet
+     waveform that comes alive while that card is sounding. */
+  .card.blank .front{background:#191920;border-color:rgba(255,255,255,0.16)}
+  .wave{display:none;align-items:flex-end;gap:calc(5px * var(--ui-scale));height:26%}
+  .card.blank .wave{display:flex}
+  .wave i{display:block;width:calc(6px * var(--ui-scale));border-radius:calc(3px * var(--ui-scale));
+          background:rgba(255,255,255,0.32);height:22%;transition:height .12s ease-out}
+
+  /* Sounding: the card lifts and a ring leaves it, so a replayed pair is
+     visibly one card then the other rather than two sounds at once. */
+  .pulsewrap{position:absolute;inset:calc(4px * var(--ui-scale));border-radius:var(--radius);
+             overflow:hidden;pointer-events:none}
+  .ring{position:absolute;left:50%;top:50%;width:60%;aspect-ratio:1;margin:-30% 0 0 -30%;
+        border-radius:50%;border:calc(3px * var(--ui-scale)) solid rgb(var(--rc,255,255,255))}
+  .card.sounding .inner{transform:rotateY(180deg) scale(1.04)}
+  .card.sounding .front{border-color:rgba(255,255,255,0.9)}
+
+  /* Chosen: a bright ring, and it can be chosen again — which is what makes
+     "Stay up" a matching game rather than a stalled memory one. */
+  .card.chosen .front{box-shadow:inset 0 0 0 calc(4px * var(--ui-scale)) var(--accent)}
+  .card.chosen .back {box-shadow:inset 0 0 0 calc(4px * var(--ui-scale)) var(--accent)}
+
+  /* Matched: EMPTIED, not dimmed. A won card drops its fill and keeps the note's
+     colour as a thick outline. Brightness alone was the first attempt and it
+     failed the case that matters — under "Stay up" the board is full of bright
+     face-up cards and a 62%-bright one does not read as different, especially
+     on a projector across a dim room. Filled versus hollow is categorical, so
+     it survives any amount of light. The colour still identifies the note, so
+     the reward is intact.
+     The opacity goes on .card and NEVER on .inner: a grouping property applied
+     to the element carrying transform-style:preserve-3d flattens it, and a
+     flattened card paints its back over its front. */
+  .card.done{cursor:default}
+  .card.done .inner{transform:rotateY(180deg) scale(0.90)}
+  .card.done .front{background:transparent;color:rgb(var(--c));text-shadow:none;
+                    border:calc(6px * var(--ui-scale)) solid rgb(var(--c))}
+  .card.done .wave{display:none}
+  .card.done .front{animation:matched .55s ease-out}
+  @keyframes matched{0%{transform:rotateY(180deg) scale(1)}
+                     40%{transform:rotateY(180deg) scale(1.10)}
+                     100%{transform:rotateY(180deg) scale(1)}}
+  body[data-players="2"] .card.done .owner-dot{opacity:1}   /* one player owns nothing */
+  .owner-dot{position:absolute;right:7%;top:7%;width:calc(16px * var(--ui-scale));
+             aspect-ratio:1;border-radius:50%;opacity:0;background:var(--pc,#fff);z-index:2;
+             box-shadow:0 0 0 calc(2px * var(--ui-scale)) rgba(0,0,0,0.45)}
+
+  #done{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+        pointer-events:none;font-size:calc(64px * var(--ui-scale));z-index:4;
+        text-shadow:0 calc(2px * var(--ui-scale)) calc(24px * var(--ui-scale)) #000}
+  #done.show{display:flex;animation:pop .7s ease-out}
+  @keyframes pop{from{transform:scale(0.6);opacity:0}to{transform:scale(1);opacity:1}}
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <div class="sectn">🎵 Notes</div>
+  <div class="owner">framework — same as every app</div>
+  <div class="ctlh">Scale</div>
+  <div class="chips" id="cScale"></div>
+  <div class="ctlh">Number of notes <span style="opacity:.55;font-weight:400">= pairs</span></div>
+  <div class="chips" id="cPairs"></div>
+
+  <div class="sectn">🎛️ Sound</div>
+  <div class="owner">framework — same as every app</div>
+  <div class="ctlh">Voice</div>
+  <div class="chips" id="cVoice"></div>
+
+  <div class="sectn">🃏 Game</div>
+  <div class="owner">this app's own tab</div>
+  <div class="ctlh">How they match them</div>
+  <div class="chips" id="cShow"></div>
+  <div class="why" id="showWhy"></div>
+  <div class="ctlh">If they don't match</div>
+  <div class="chips" id="cForgive"></div>
+  <div id="holdRow">
+    <div class="ctlh">Stay up for</div>
+    <div class="chips" id="cHold"></div>
+  </div>
+  <div class="toggle"><label for="pk">Let them peek<br>
+    <span style="font-size:var(--font-s);color:var(--ink-quiet)">hold a card to hear it again</span></label>
+    <div class="switch" id="pk"></div></div>
+  <div class="ctlh">Players</div>
+  <div class="chips" id="cPlayers"></div>
+
+  <button class="btn" id="newBtn">🔄 New game</button>
+
+  <div id="hint">
+    <b>What changed.</b> Matched cards are now <b>hollow</b> — the fill drops and
+    the note's colour becomes an outline. Dimming them was never going to read
+    against a board full of face-up cards under Stay&nbsp;up.<br><br>
+    <b>Two bugs you found.</b> Eight pairs of a seven-note scale wrapped round,
+    so <i>two different pairs were both a red C</i>; an octave up is now the same
+    colour lightened, with a mark on the letter. And a card's note ran on for up
+    to 4.8&nbsp;s, so the second card of a pair was heard <i>through</i> the
+    first — which is why matching cards did not sound the same. A note now damps
+    the one before it.<br><br>
+    <b>Sound alone</b> gives every pair its own instrument, spread across three
+    octaves, and switches Stay&nbsp;up off. Tell me whether that makes it usable
+    or whether it should go.
+  </div>
+</div>
+
+<div id="stage">
+  <div id="turn"></div>
+  <div id="board"></div>
+  <div id="done">✨</div>
+</div>
+
+<script>
+'use strict';
+
+/* ── What the real app would keep where ───────────────────────────────────────
+   Notes tab (framework):  scale, root, register, number of notes — and in this
+     app the number of notes IS the number of pairs, which is why the Game tab
+     has no grid control at all. 2..10 sits inside the framework slider's 2..12.
+   Sound tab (framework):  voice, effects, volume. Every card uses the one voice.
+   Game tab (this app):    what a face shows, what happens on a mismatch, how
+     long a mismatch stays up, peek, players.                                  */
+const S = { scale:'major', pairs:8, voice:'marimba', show:'colour',
+            forgive:'flip', hold:2000, peek:true, players:1 };
+
+/* ── Straight out of framework.js, so the prototype sounds like the suite ──── */
+const SCALES = {
+  major:{label:'Major', steps:[0,2,4,5,7,9,11]},
+  penta:{label:'Pentatonic', steps:[0,2,4,7,9]},
+  minor:{label:'Minor', steps:[0,2,3,5,7,8,10]},
+  whole:{label:'Whole-tone', steps:[0,2,4,6,8,10]},
+};
+const VOICES = {
+  marimba: {label:'Marimba', oct:0, gain:0.20, filter:{type:'lowpass',base:2600,track:1800}, pluck:0.8,
+    oscs:[{type:'sine'},{type:'sine',ratio:3.93,gain:0.38,decayTo:0.03},{type:'sine',ratio:9.2,gain:0.12,decayTo:0.01}]},
+  kalimba: {label:'Kalimba', oct:0, gain:0.20, filter:{type:'lowpass',base:2000,track:1400}, pluck:1.1,
+    oscs:[{type:'sine'},{type:'sine',ratio:5.1,gain:0.20,decayTo:0.02},{type:'triangle',gain:0.10,decayTo:0.1}]},
+  musicbox:{label:'Music box', oct:1, gain:0.15, filter:{type:'lowpass',base:5200,track:1500}, pluck:1.3,
+    oscs:[{type:'sine'},{type:'sine',ratio:4.06,gain:0.22,decayTo:0.05},{type:'sine',ratio:9.7,gain:0.08,decayTo:0.02}]},
+  bell:    {label:'Bell', oct:0, gain:0.12, filter:{type:'lowpass',base:4500,track:2000},
+    oscs:[{type:'sine'},{type:'sine',ratio:2.76,gain:0.5,decayTo:0.04},{type:'sine',ratio:5.4,gain:0.25,decayTo:0.02}]},
+  harp:    {label:'Harp', oct:0, gain:0.16, filter:{type:'lowpass',base:2800,track:1600}, pluck:1.5,
+    oscs:[{type:'triangle'},{type:'sine',gain:0.5},{type:'sine',ratio:2,gain:0.45,decayTo:0.15},
+          {type:'sine',ratio:3,gain:0.22,decayTo:0.08},{type:'sine',ratio:4,gain:0.10,decayTo:0.05}]},
+  warm:    {label:'Warm', oct:0, gain:0.13, filter:{type:'lowpass',base:780,track:1100},
+    oscs:[{type:'triangle'},{type:'sine',detune:7,gain:0.6},{type:'sine',detune:-7,gain:0.6}]},
+  // The six above are all soft and mallet-ish, which is why they blurred into
+  // one another. These five widen the range: plain, shimmering, buzzy, low and
+  // sustained. All still framework.js voices, verbatim.
+  pure:    {label:'Pure', oct:0, gain:0.12, filter:{type:'lowpass',base:1300,track:1600},
+    oscs:[{type:'sine'}]},
+  glass:   {label:'Glass', oct:0, gain:0.13, filter:{type:'highpass',base:350,track:250},
+    oscs:[{type:'sine'},{type:'sine',ratio:3.0,gain:0.45,decayTo:0.35},{type:'sine',ratio:4.2,gain:0.22,decayTo:0.25}]},
+  synth:   {label:'Synth', oct:0, gain:0.10, tc:0.75, filter:{type:'lowpass',base:600,track:2800,q:7},
+    oscs:[{type:'sawtooth'},{type:'sawtooth',detune:11,gain:0.7},{type:'sawtooth',detune:-11,gain:0.7}]},
+  deep:    {label:'Deep', oct:-1, gain:0.18, filter:{type:'lowpass',base:700,track:900},
+    oscs:[{type:'sine'},{type:'sine',ratio:2,gain:0.55},{type:'sine',ratio:3,gain:0.2}]},
+  pad:     {label:'Pad', oct:-1, gain:0.11, tc:0.95, filter:{type:'lowpass',base:500,track:1400,q:2},
+    oscs:[{type:'sawtooth',detune:6,gain:0.6},{type:'sawtooth',detune:-6,gain:0.6},{type:'sine',ratio:2,gain:0.3}]},
+};
+// Sound-alone play has nothing on screen to help, so the app stops using one
+// voice and gives every pair its own — ordered so that NEIGHBOURING pairs are
+// as unalike as possible (low sine, then a bell, then a buzz, then wood…).
+// Pitch alone was not enough: a tone apart on one marimba is not a difference
+// a student can hold in their head.
+const ALONE_VOICES = ['deep','bell','synth','marimba','pad','glass','musicbox','warm','pure','harp'];
+const BOOMWHACKER = {0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],
+                     7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+const NAMES = ['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'];
+const MARK  = ['', '′', '″'];
+// Eight pairs of a seven-note scale wraps into the next octave, and C and C'
+// share a pitch class — so two DIFFERENT pairs were being drawn as the same red
+// card with the same letter. Boomwhacker colour still identifies the note; the
+// octave above it is the same colour lightened, and the letter takes a mark.
+function noteRGB(pc, oct){
+  const base = BOOMWHACKER[pc] || (BOOMWHACKER[(pc+11)%12] || [200,200,200]).map(v => Math.round(v*0.7));
+  const lift = 0.34 * Math.min(oct || 0, 2);
+  return base.map(v => Math.round(v + (255 - v)*lift));
+}
+
+const PLAYER_COLOUR = ['#8fb4ff','#ffbe78'];
+const SHOW    = { colour:'Colour and sound', blank:'Sound alone' };
+const FORGIVE = { stay:'Stay up', flip:'Flip back' };
+const HOLDS   = { 1000:'1 second', 2000:'2 seconds', 4000:'4 seconds' };
+
+/* ── Audio ─────────────────────────────────────────────────────────────────── */
+let ac = null;
+function audio(){
+  if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+  if(ac.state === 'suspended') ac.resume();
+  return ac;
+}
+// A card's note DAMPS whatever card was sounding before it. Without this the
+// game's central promise is broken: marimba rings for 4.8 s and the replays are
+// 700 ms apart, so the second card of a pair was always heard through the tail
+// of the first — and a note heard over another note is not the same sound. The
+// reward arpeggio passes solo=false, because there the overlap is the point.
+let live = null;
+function playNote(midi, gain, voiceKey, solo){
+  const c = audio(), t = c.currentTime, V = VOICES[voiceKey || S.voice];
+  // `live` is the AudioParam itself, not a node — an earlier `live.gain.…` here
+  // was a TypeError that a try/catch swallowed, so the damping silently did
+  // nothing and the bug it was written to fix was still there. No catch now:
+  // this must fail loudly if it ever stops working.
+  if(solo !== false && live){
+    live.cancelScheduledValues(t);
+    live.setValueAtTime(live.value, t);
+    live.linearRampToValueAtTime(0.0001, t + 0.11);
+    live = null;
+  }
+  const f = 440 * Math.pow(2, (midi - 69 + 12*(V.oct||0))/12);
+  const out = c.createGain();
+  const peak = (gain==null ? 1 : gain) * V.gain * 3.2;
+  const atk = 0.008;
+  out.gain.setValueAtTime(0.0001, t);
+  out.gain.linearRampToValueAtTime(peak, t + atk);
+  const tc = V.tc || (V.pluck ? 0.55/V.pluck : 0.42);
+  out.gain.setTargetAtTime(0.0001, t + atk, tc);
+  const stop = t + atk + tc*7;
+  if(solo !== false) live = out.gain;
+
+  const flt = c.createBiquadFilter();
+  flt.type = V.filter.type;
+  flt.frequency.value = Math.min(16000, V.filter.base + V.filter.track * (f/440));
+  if(V.filter.q) flt.Q.value = V.filter.q;
+  out.connect(flt).connect(c.destination);
+
+  for(const o of V.oscs){
+    const osc = c.createOscillator();
+    osc.type = o.type;
+    osc.frequency.value = f * (o.ratio || 1);
+    if(o.detune) osc.detune.value = o.detune;
+    const g = c.createGain();
+    const lvl = o.gain == null ? 1 : o.gain;
+    g.gain.setValueAtTime(lvl, t);
+    if(o.decayTo != null) g.gain.exponentialRampToValueAtTime(Math.max(0.0001, lvl*o.decayTo), t + 0.55);
+    osc.connect(g).connect(out);
+    osc.start(t); osc.stop(stop);
+  }
+}
+
+/* ── Deck ──────────────────────────────────────────────────────────────────── */
+let deck = [], chosen = [], busy = false, turn = 0, scores = [0,0];
+const boardEl = document.getElementById('board');
+const stageEl = document.getElementById('stage');
+const turnEl  = document.getElementById('turn');
+const doneEl  = document.getElementById('done');
+
+// More pairs than the scale has notes CONTINUES INTO THE NEXT OCTAVE rather
+// than shrinking the board: 10 pairs of a 5-note pentatonic is two octaves of it.
+// Colour-and-sound play walks the scale in order, because that is the
+// Boomwhacker set a therapist already teaches. Sound-alone play SPREADS the
+// same scale across three octaves instead, so neighbouring pairs are a leap
+// apart rather than a tone apart.
+function pitchFor(i){
+  const steps = SCALES[S.scale].steps;
+  let degree = i;
+  if(S.show === 'blank' && S.pairs > 1){
+    const span = steps.length*3 - 1;
+    degree = Math.round(i * span / (S.pairs - 1));
+  }
+  const oct = Math.floor(degree / steps.length);
+  const semis = steps[degree % steps.length] + 12*oct;
+  return { midi: 60 + semis, pc: (60 + semis) % 12, oct: oct };
+}
+
+function newGame(){
+  deck = [];
+  for(let i = 0; i < S.pairs; i++){
+    const p = pitchFor(i);
+    const card = { id:i, midi:p.midi, oct:p.oct, rgb:noteRGB(p.pc, p.oct),
+                   name: NAMES[p.pc] + MARK[Math.min(p.oct, 2)],
+                   voice: S.show === 'blank' ? ALONE_VOICES[i % ALONE_VOICES.length] : null };
+    deck.push(Object.assign({}, card), Object.assign({}, card));
+  }
+  for(let i = deck.length-1; i > 0; i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  chosen = []; busy = false; turn = 0; scores = [0,0];
+  doneEl.classList.remove('show');
+  render();
+}
+
+// Fill the whole activity. Choose the column count whose cards come out
+// SQUAREST for the space available, allowing a short final row rather than
+// forcing a factor pair — 14 cards is 5/5/4, not a 7x2 strip of tall slivers.
+//
+// Squareness alone is not enough: for 16 cards it picks 5 columns (cards 1%
+// off square) and leaves ONE card alone on the last row, which reads as a
+// board that has gone wrong. Scoring squareness TIMES how full the last row is
+// puts 4x4 back on a wide screen and 4x4 on a tall one, while still allowing
+// 5/5/4 for 14 — a ragged row is fine, an abandoned one is not.
+function shapeFor(n, w, h){
+  let best = null;
+  for(let cols = 1; cols <= n; cols++){
+    const rows = Math.ceil(n/cols);
+    const cw = w/cols, ch = h/rows;
+    const square = Math.min(cw,ch) / Math.max(cw,ch);
+    const full   = (n - cols*(rows-1)) / cols;
+    const score  = square * full;
+    if(!best || score > best.score) best = { cols, rows, score };
+  }
+  return best;
+}
+
+function render(){
+  boardEl.innerHTML = '';
+  const gap  = 10;
+  const padT = S.players > 1 ? 44 : gap;   // only a two-player game owes the turn bar room
+  const W = stageEl.clientWidth - gap*2;
+  const H = stageEl.clientHeight - gap*2 - padT;
+  const { cols, rows } = shapeFor(deck.length, W, H);
+  const cw = Math.floor((W - gap*(cols-1)) / cols);
+  const ch = Math.floor((H - gap*(rows-1)) / rows);
+  boardEl.style.gap = gap + 'px';
+  boardEl.style.paddingTop = padT + 'px';
+  document.body.dataset.players = S.players;
+
+  for(let r = 0; r < rows; r++){
+    const row = document.createElement('div');
+    row.className = 'brow';
+    row.style.gap = gap + 'px';
+    for(let c = 0; c < cols; c++){
+      const idx = r*cols + c;
+      if(idx >= deck.length) break;
+      const card = deck[idx];
+      const el = document.createElement('div');
+      el.className = 'card' + (S.show === 'blank' ? ' blank' : '');
+      el.dataset.idx = idx;
+      el.style.width = cw + 'px';
+      el.style.height = ch + 'px';
+      el.style.setProperty('--c', card.rgb.join(','));
+      el.innerHTML =
+        '<div class="inner"><div class="back"></div>' +
+        '<div class="front">' + (S.show === 'blank'
+            ? '<span class="wave"><i></i><i></i><i></i><i></i><i></i></span>'
+            : card.name) + '</div></div>' +
+        '<div class="pulsewrap"></div><div class="owner-dot"></div>';
+      row.appendChild(el);
+    }
+    boardEl.appendChild(row);
+  }
+  updateTurn();
+}
+
+function updateTurn(){
+  if(S.players < 2){ turnEl.innerHTML = ''; return; }
+  turnEl.innerHTML = '<span class="dot" style="background:' + PLAYER_COLOUR[turn] + '"></span>' +
+                     'Player ' + (turn+1) +
+                     '<span style="opacity:.55;margin-left:14px">' + scores[0] + ' – ' + scores[1] + '</span>';
+}
+
+const cardEl = i => boardEl.querySelector('.card[data-idx="' + i + '"]');
+
+/* ── Sounding a card: the note, a ring, and the waveform waking up ─────────── */
+function sound(idx, gain){
+  const card = deck[idx], el = cardEl(idx);
+  playNote(card.midi, gain, card.voice);
+  if(!el) return;
+  el.classList.add('sounding');
+  setTimeout(() => el.classList.remove('sounding'), 420);
+  const ring = document.createElement('div');
+  ring.className = 'ring';
+  ring.style.setProperty('--rc', S.show === 'blank' ? '255,255,255' : card.rgb.join(','));
+  el.querySelector('.pulsewrap').appendChild(ring);
+  ring.animate([{transform:'scale(0.3)',opacity:0.9},{transform:'scale(2.4)',opacity:0}],
+               {duration:750, easing:'ease-out'}).onfinish = () => ring.remove();
+  const bars = el.querySelectorAll('.wave i');
+  if(bars.length){
+    let n = 0;
+    const tick = setInterval(() => {
+      bars.forEach(b => b.style.height = (20 + Math.random()*75) + '%');
+      if(++n > 7){ clearInterval(tick); bars.forEach(b => b.style.height = '22%'); }
+    }, 70);
+  }
+}
+
+/* ── The turn ──────────────────────────────────────────────────────────────── */
+let peekTimer = null, peekIdx = -1;
+
+boardEl.addEventListener('pointerdown', e => {
+  const el = e.target.closest('.card'); if(!el || busy) return;
+  const idx = +el.dataset.idx;
+  if(deck[idx].matched) return;
+  if(S.peek && !deck[idx].revealed && chosen.indexOf(idx) < 0){
+    peekTimer = setTimeout(() => {
+      peekIdx = idx; el.classList.add('up'); sound(idx, 0.6); peekTimer = null;
+    }, 420);
+  }
+  if(el.setPointerCapture) el.setPointerCapture(e.pointerId);
+});
+boardEl.addEventListener('pointerup', e => {
+  if(peekTimer){ clearTimeout(peekTimer); peekTimer = null; }
+  if(peekIdx >= 0){                       // a peek is never a turn
+    const el = cardEl(peekIdx); if(el) el.classList.remove('up');
+    peekIdx = -1; return;
+  }
+  const el = e.target.closest('.card'); if(!el) return;
+  tap(+el.dataset.idx);
+});
+boardEl.addEventListener('pointercancel', () => {
+  if(peekTimer){ clearTimeout(peekTimer); peekTimer = null; }
+  if(peekIdx >= 0){ const el = cardEl(peekIdx); if(el) el.classList.remove('up'); peekIdx = -1; }
+});
+
+function tap(idx){
+  if(busy || deck[idx].matched) return;
+  const el = cardEl(idx);
+  const at = chosen.indexOf(idx);
+  if(at >= 0){                              // tapping a chosen card takes it back
+    chosen.splice(at, 1);
+    el.classList.remove('chosen');
+    if(!deck[idx].revealed) el.classList.remove('up');
+    return;
+  }
+  if(chosen.length >= 2) return;
+  chosen.push(idx);
+  el.classList.add('up', 'chosen');
+  sound(idx, 0.75);
+  if(chosen.length === 2) judge();
+}
+
+// The fix for two sounds landing on one tap: nothing is compared until BOTH
+// cards have been heard on their own. Then a gap, then each is replayed in
+// turn and lifts as it sounds, so a student hears one thing at a time.
+function judge(){
+  busy = true;
+  const [a, b] = chosen;
+  setTimeout(() => sound(a, 0.75),  700);
+  setTimeout(() => sound(b, 0.75), 1400);
+  setTimeout(() => verdict(a, b),  2050);
+}
+
+function verdict(a, b){
+  const match = deck[a].id === deck[b].id;
+  [a, b].forEach(i => cardEl(i).classList.remove('chosen'));
+
+  if(match){
+    [a, b].forEach(i => {
+      deck[i].matched = true;
+      const el = cardEl(i);
+      el.classList.add('done');
+      el.style.setProperty('--pc', PLAYER_COLOUR[turn]);
+      // Sound-alone play has kept the note hidden all game; winning the pair is
+      // when it is finally shown, so the outline arrives with its letter.
+      if(S.show === 'blank') el.querySelector('.front').textContent = deck[i].name;
+    });
+    scores[turn]++;
+    // The reward is a rising figure, not a louder version of the same note — and
+    // the one place notes are MEANT to ring into each other, so solo is off.
+    [0, 4, 7, 12].forEach((s, k) =>
+      setTimeout(() => playNote(deck[a].midi + s, 0.5 - k*0.06, deck[a].voice, false), k*95));
+    chosen = []; busy = false;
+    if(deck.every(c => c.matched)) finish(); else updateTurn();
+    return;
+  }
+
+  setTimeout(() => {
+    if(S.forgive === 'flip'){
+      [a, b].forEach(i => { deck[i].revealed = false; cardEl(i).classList.remove('up'); });
+    } else {
+      [a, b].forEach(i => { deck[i].revealed = true; });   // stays up AND stays choosable
+    }
+    chosen = []; busy = false;
+    if(S.players > 1){ turn = 1 - turn; updateTurn(); }
+  }, S.hold);
+}
+
+function finish(){
+  doneEl.classList.add('show');
+  const uniq = deck.filter((c, i) => deck.findIndex(d => d.id === c.id) === i);
+  uniq.forEach((c, i) => setTimeout(() => playNote(c.midi, 0.45), i*110));
+  boardEl.querySelectorAll('.card').forEach((el, i) => setTimeout(() => {
+    el.animate([{transform:'scale(1)'},{transform:'scale(1.07)'},{transform:'scale(1)'}],
+               {duration:430, easing:'ease-out'});
+  }, i*45));
+}
+
+/* ── The fake panes ────────────────────────────────────────────────────────── */
+function chips(host, map, key, after, coerce){
+  const el = document.getElementById(host);
+  el.innerHTML = '';
+  for(const k in map){
+    const c = document.createElement('button');
+    c.className = 'chip' + (String(S[key]) === k ? ' active' : '');
+    c.textContent = map[k];
+    c.addEventListener('click', () => {
+      S[key] = coerce ? coerce(k) : k;
+      chips(host, map, key, after, coerce);
+      if(after) after();
+    });
+    el.appendChild(c);
+  }
+}
+const scaleMap = {}; for(const k in SCALES) scaleMap[k] = SCALES[k].label;
+const voiceMap = {}; for(const k in VOICES) voiceMap[k] = VOICES[k].label;
+const pairMap  = {}; for(let i = 2; i <= 10; i++) pairMap[i] = String(i);
+
+function syncHold(){ document.getElementById('holdRow').classList.toggle('hidden', S.forgive !== 'flip'); }
+
+// "Sound alone" and "Stay up" cancel each other out. Stay up exists so the
+// information stays on the screen; sound alone exists so there is none. Left
+// together the board fills with identical face-up cards that can only be told
+// apart by tapping each one again, which is Peek with extra steps. So sound
+// alone takes Stay up off the pane and says why, rather than allowing a
+// combination that looks like a setting and behaves like a fault.
+function syncShow(){
+  const alone = S.show === 'blank';
+  if(alone && S.forgive === 'stay'){ S.forgive = 'flip'; chips('cForgive', FORGIVE, 'forgive', onForgive); }
+  const stayChip = document.querySelector('#cForgive .chip');
+  if(stayChip) stayChip.classList.toggle('off', alone);
+  document.getElementById('showWhy').innerHTML = alone
+    ? 'Nothing on the faces — the ear does all of it. Every pair gets its own '
+      + 'instrument and they are spread across three octaves, because a tone '
+      + 'apart on one voice is not a difference a student can hold on to. '
+      + '<b>Stay up is off here</b>: identical faces left showing tell you nothing.'
+    : 'The note\'s Boomwhacker colour, with its letter. The octave above is the '
+      + 'same colour lightened, so two pairs are never the same card.';
+  syncHold();
+}
+function onForgive(){ syncShow(); newGame(); }   // a re-render loses the 'off' class
+
+chips('cScale',   scaleMap, 'scale',   newGame);
+chips('cPairs',   pairMap,  'pairs',   newGame, Number);
+chips('cVoice',   voiceMap, 'voice',   () => sound(0, 0.7));
+chips('cShow',    SHOW,     'show',    () => { syncShow(); newGame(); });
+chips('cForgive', FORGIVE,  'forgive', onForgive);
+chips('cHold',    HOLDS,    'hold',    null, Number);
+chips('cPlayers', {1:'One', 2:'Two'}, 'players', newGame, Number);
+syncShow();
+
+const pk = document.getElementById('pk');
+pk.classList.toggle('on', S.peek);
+pk.addEventListener('click', () => { S.peek = !S.peek; pk.classList.toggle('on', S.peek); });
+
+document.getElementById('newBtn').addEventListener('click', newGame);
+window.addEventListener('resize', render);
+newGame();
+</script>
+</body>
+</html>

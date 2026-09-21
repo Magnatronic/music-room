@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Weather — how you play becomes the sky</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#000}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(9px * var(--ui-scale)) calc(14px * var(--ui-scale));flex-wrap:wrap;
+       background:linear-gradient(#000c,#0000);z-index:3}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);flex:1 1 auto;min-width:0}
+  #go{height:calc(44px * var(--ui-scale));white-space:nowrap}
+  #mood{position:fixed;right:calc(16px * var(--ui-scale));bottom:calc(54px * var(--ui-scale));
+        z-index:3;font-size:calc(30px * var(--ui-scale));opacity:.85;pointer-events:none}
+  #hint{position:fixed;left:0;right:0;bottom:0;text-align:center;z-index:3;
+        padding:calc(10px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000d);color:var(--ink-quiet);font-size:var(--font-s);line-height:1.5}
+  #hint b{color:var(--ink)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cVoice"></div>
+  <div class="chips" id="cCalm"></div>
+  <div id="who"></div>
+</div>
+<div id="mood"></div>
+<div id="hint"><b>How you play becomes the weather.</b> Quiet and slow brings stars
+out; loud and fast builds a storm. Stop, and it always drifts back to calm on its
+own — which is the part worth watching with a student.</div>
+
+<script src="midi-core.js"></script>
+<script>
+'use strict';
+/* ── Weather ──────────────────────────────────────────────────────────────────
+   Everything else here answers a NOTE. This answers how somebody is PLAYING —
+   how hard, how often — and turns it into the state of a whole sky. It is the
+   wind-down piece, and the only one where the reward for stopping is as visible
+   as the reward for playing.
+
+   Two things make it worth having:
+
+   - **It always drifts back to calm.** Energy decays on its own, so a student who
+     storms the keyboard and then stops WATCHES the storm blow over. That is the
+     shape of co-regulation, drawn on a wall — and nothing else in the suite shows
+     it, because everything else falls silent the moment a hand comes off.
+   - **Nothing here is a note.** Loudness and rate are the input, so it works
+     identically with eight pads, eighty-eight keys or a fist on a whole octave,
+     and there is nothing to aim at.                                            */
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const CALM={ '0.10':{label:'Settles slowly'}, '0.22':{label:'Settles'}, '0.45':{label:'Settles fast'} };
+let calm=0.22;
+
+let energy=0;                   // 0 calm … 1 storm
+const drops=[], flashes=[], stars=[];
+let lightning=0, shake=0;
+
+for(let i=0;i<120;i++) stars.push({x:Math.random(),y:Math.random()*0.8,
+  tw:Math.random()*6.3, sp:0.4+Math.random()*1.4});
+
+MIDI.init({
+  canvas:cv,
+  connectBtn:document.getElementById('go'),
+  statusEl:document.getElementById('who'),
+  onHit(e){
+    // hard and frequent playing raises it; a gentle note barely moves it
+    energy=Math.min(1, energy + 0.05 + 0.22*e.vel*e.vel);
+    MIDI.play(e.note,{gain:0.07+0.12*e.vel});
+    flashes.push({x:e.x, y:0.25+0.45*Math.random(), rgb:e.rgb, vel:e.vel, life:0});
+    if(flashes.length>60) flashes.shift();
+    if(energy>0.72 && e.vel>0.7){ lightning=1; shake=1;
+      MIDI.play(28,{gain:0.10, raw:true, voice:'reed', dec:1.4}); }
+  },
+});
+
+MIDI.chips('#cScale', MIDI.SCALES, ()=>MIDI.scale, k=>MIDI.setScale(k));
+MIDI.chips('#cVoice', MIDI.VOICES, ()=>MIDI.voice, k=>MIDI.setVoice(k));
+MIDI.chips('#cCalm',  CALM, ()=>String(calm), k=>{ calm=+k; });
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+let last=performance.now(), rainAcc=0;
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  const W=cv.width=cv.clientWidth, H=cv.height=cv.clientHeight;
+
+  energy=Math.max(0, energy - calm*dt);        // it always comes back down
+  lightning=Math.max(0,lightning-dt*2.2);
+  shake=Math.max(0,shake-dt*3);
+
+  // sky: deep blue and still when calm, bruised and heavy when stormy
+  const top=[lerp(6,26,energy), lerp(10,26,energy), lerp(28,34,energy)];
+  const bot=[lerp(14,58,energy), lerp(22,40,energy), lerp(46,54,energy)];
+  const sky=ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'rgb('+top.map(Math.round).join(',')+')');
+  sky.addColorStop(1,'rgb('+bot.map(Math.round).join(',')+')');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+
+  const sx=(Math.random()-0.5)*shake*10, sy=(Math.random()-0.5)*shake*10;
+  ctx.save(); ctx.translate(sx,sy);
+
+  // stars, which the storm hides
+  const clear=Math.max(0,1-energy*1.5);
+  if(clear>0.01){
+    ctx.globalCompositeOperation='lighter';
+    for(const s of stars){
+      s.tw+=dt*s.sp;
+      const a=clear*(0.25+0.45*(0.5+0.5*Math.sin(s.tw)));
+      ctx.fillStyle='rgba(220,235,255,'+a.toFixed(3)+')';
+      const r=1+1.6*(0.5+0.5*Math.sin(s.tw*1.3));
+      ctx.beginPath(); ctx.arc(s.x*W,s.y*H,r,0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  // rain, which arrives with the energy
+  rainAcc += dt*energy*energy*260;
+  while(rainAcc>1){ rainAcc-=1;
+    drops.push({x:Math.random(),y:-0.02,v:0.55+Math.random()*0.8,len:0.02+Math.random()*0.05}); }
+  ctx.strokeStyle='rgba(180,210,255,'+(0.10+0.35*energy).toFixed(3)+')';
+  ctx.lineWidth=Math.max(1,H*0.0018);
+  ctx.beginPath();
+  for(let i=drops.length-1;i>=0;i--){
+    const d=drops[i]; d.y+=d.v*dt*(0.7+energy);
+    if(d.y>1.05){ drops.splice(i,1); continue; }
+    const slant=energy*0.06;
+    ctx.moveTo(d.x*W, d.y*H); ctx.lineTo((d.x-slant)*W, (d.y+d.len)*H);
+  }
+  ctx.stroke();
+
+  // every note leaves a bloom, calm or not
+  ctx.globalCompositeOperation='lighter';
+  for(let i=flashes.length-1;i>=0;i--){
+    const f=flashes[i]; f.life+=dt;
+    const k=Math.max(0,1-f.life/2.2); if(k<=0){ flashes.splice(i,1); continue; }
+    const c=f.rgb.join(','), r=Math.min(W,H)*(0.04+0.16*f.vel)*(1+0.9*(1-k));
+    const g=ctx.createRadialGradient(f.x*W,f.y*H,0,f.x*W,f.y*H,r);
+    g.addColorStop(0,'rgba('+c+','+(k*k*0.75).toFixed(3)+')');
+    g.addColorStop(1,'rgba('+c+',0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(f.x*W,f.y*H,r,0,Math.PI*2); ctx.fill();
+  }
+  if(lightning>0.01){
+    ctx.fillStyle='rgba(220,235,255,'+(lightning*0.5).toFixed(3)+')';
+    ctx.fillRect(0,0,W,H);
+  }
+  ctx.globalCompositeOperation='source-over';
+  ctx.restore();
+
+  const m=document.getElementById('mood');
+  m.textContent = energy<0.12?'🌙' : energy<0.32?'☁️' : energy<0.58?'🌧️' : energy<0.8?'⛈️' : '🌩️';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

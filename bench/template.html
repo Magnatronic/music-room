@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Template – Music Room</title>
+<link rel="stylesheet" href="../framework.css">
+</head>
+<body>
+<script src="../framework.js"></script>
+<script>  // this page lives a folder down; the framework writes a relative Home link
+  addEventListener('DOMContentLoaded',()=>{ const h=document.getElementById('homeBtn'); if(h) h.href='../index.html'; });
+</script>
+<script>
+'use strict';
+/* ===== ANIMATION START =====
+   Replace everything in this block to make a new app: supply an `Anim` object
+   with the hooks the framework calls. This placeholder paints soft glowing
+   blobs on a Canvas2D context that fade toward the background colour.
+
+   THE MENU IS NOT YOURS TO BUILD. framework.js owns the rail and every pane —
+   Notes, Sound, Visuals, Presets, and the whole Setup pane (Fullscreen, Access,
+   Reach area, Menu size, Performance). An app that adds nothing still gets all
+   of it. That is why this file was edited once between being written and the
+   reach area landing, while the menu itself changed across eight phases. Never
+   re-implement any of it per app; add to it through the optional hooks below.
+
+   REQUIRED — the framework calls every one of these:
+     themes    {key:{label, colors:[[r,g,b],…]}} — the palettes offered on Visuals.
+     defaults  every setting this app owns, with its starting value. Both a
+               launch link and ↺ Defaults start from here, so a key missing
+               from `defaults` is a key neither of them can restore.
+     schema    [{key,label,min,max,step,dp}] — sliders on Visuals, under the
+               heading `sectionLabel` names.
+     init(canvas)   once, after boot.
+     resize(w,h)    the drawing buffer changed size. NOT called when the chrome
+               opens or the session locks: the activity is scaled, never
+               re-laid-out, so nothing a student has drawn is ever lost.
+     splat(x,y,dx,dy,color,opts)  a pointer touched the activity. x/y are
+               normalised 0..1 with y pointing UP.
+     frame(dt)      one animation frame; dt in seconds.
+     reset()        clear back to an empty state.
+
+   OPTIONAL — define only what this app actually needs:
+     sectionLabel   names the slider section on Visuals ('Controls' if absent).
+     buildApp(el) + appLabel   this app's OWN first tab, and the only right home
+               for a setting that is about this app alone. It exists so that
+               Notes can stay Register / Scale / Starting note / note count and
+               nothing else, in all 17 apps. Define both or neither.
+               PHASE-4E-APP-TAB.md.
+     setupExtras(el)  per-student INPUT settings, appended under Setup → Access.
+     soundExtras(el)  app-specific controls on top of the Sound pane.
+     buildInstrument(el) / buildVisuals(el)  replace a pane's contents outright.
+     paneLabels  {app:'🃏 Game', instrument:'Songs'} — rename a tab. An app may
+               re-label Notes when the pane genuinely isn't notes; Sound keeps
+               its name everywhere.
+     hideRail  REMOVES what does not apply — rail buttons ('mode', 'clear') and
+               whole tabs ('app','instrument','sound','visuals','presets','setup').
+               An app with no scale to set names 'instrument' and has no Notes tab.
+     railButtons  [{id,icon(),title(),active(),show(),key,onClick()}] on the rail.
+     styles    {key:{label, …settings}} — behaviour presets as chips on Visuals.
+               A chip lights when every setting it names currently matches.
+     lockMode  'notes' | 'flow' — this app only makes sense as one of the two;
+               the Keys/Flow rail toggle disappears.
+     onCell(col,row)   a note-grid cell was hit (replaces the default flash).
+     bandColor(i)      override the colour of band i.
+     setQuality(level) 'low' | 'med' | 'high' — the automatic FPS governor moved.
+
+   TWO RULES THAT FAIL SILENTLY IF YOU MISS THEM:
+   1. Fixed-position DOM this app creates must be appended to `stageEl`
+      (#surface), never to document.body. The surface carries the transform, so
+      it is the containing block — that is what keeps an app's own furniture on
+      the activity, scaling with it and travelling into the reach area. A modal
+      that genuinely must live on the body needs class="modal", or the gamepad
+      pointer will go on playing the activity behind it, because that pointer
+      injects coordinates rather than reading DOM events.
+      PHASE-5C-ACCESS-PANE.md §11.7.
+   2. An app driven by frame() rather than by touch must call pokeSim() while it
+      has something to do, or idle sleep will stop the render loop under it.
+*/
+const Anim = {
+  sectionLabel: 'Brush',
+  themes: {
+    sunset: {label:'🌅 Sunset', colors:[[1,0.5,0.1],[1,0.2,0.3],[1,0.8,0.2],[0.9,0.3,0.5],[1,0.6,0.0]]},
+    ocean:  {label:'🌊 Ocean',  colors:[[0,0.6,1],[0,1,0.8],[0.1,0.3,0.9],[0,0.8,0.6],[0.4,0.9,1]]},
+    candy:  {label:'🍬 Candy',  colors:[[1,0.4,0.8],[0.6,0.4,1],[0.3,0.8,1],[1,0.8,0.3],[0.5,1,0.6]]},
+    mono:   {label:'⚪ Mono',   colors:[[1,1,1],[0.8,0.85,1],[0.7,0.9,1],[0.9,0.9,0.95],[1,0.95,0.9]]},
+  },
+  defaults: { theme:'sunset', brushSize:0.10, fade:0.05 },
+  schema: [
+    {key:'brushSize', label:'Brush size', min:0.02, max:0.30, step:0.01, dp:2},
+    {key:'fade',      label:'Fade speed',  min:0.0,  max:0.20, step:0.005, dp:3},
+  ],
+  _ctx: null,
+  init(cv){ this._ctx = cv.getContext('2d'); this.reset(); },
+  resize(w,h){ this.reset(); },   // a 2D canvas clears when resized
+  splat(x,y,dx,dy,color){
+    const ctx=this._ctx; if(!ctx) return;
+    const W=canvas.width, H=canvas.height;
+    const px=x*W, py=(1-y)*H, r=Math.max(6, SETTINGS.brushSize*H*0.5);
+    const col=`${Math.min(color[0],1)*255|0},${Math.min(color[1],1)*255|0},${Math.min(color[2],1)*255|0}`;
+    const g=ctx.createRadialGradient(px,py,0,px,py,r);
+    g.addColorStop(0,`rgba(${col},0.85)`); g.addColorStop(1,`rgba(${col},0)`);
+    ctx.globalCompositeOperation='lighter';
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
+  },
+  frame(dt){
+    const ctx=this._ctx; if(!ctx) return;
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle=`rgba(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0},${SETTINGS.fade})`;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  },
+  reset(){
+    const ctx=this._ctx; if(!ctx) return;
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle=`rgb(${bgRGB[0]*255|0},${bgRGB[1]*255|0},${bgRGB[2]*255|0})`;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  },
+};
+/* ===== ANIMATION END ===== */
+
+boot();
+</script>
+</body>
+</html>

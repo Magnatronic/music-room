@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>MIDI Aurora — plug anything in</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#000}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(10px * var(--ui-scale)) calc(14px * var(--ui-scale));
+       background:linear-gradient(#000d,#0000);z-index:3;flex-wrap:wrap}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);min-width:0;flex:1 1 auto}
+  #who b{color:var(--ink)}
+  #go{height:calc(46px * var(--ui-scale));white-space:nowrap}
+  .bad{color:#ff9b9b}
+  #hint{position:fixed;left:0;right:0;bottom:0;padding:calc(12px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000d);color:var(--ink-quiet);
+        font-size:var(--font-s);line-height:1.5;z-index:3;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cVoice"></div>
+  <div id="who">Nothing connected yet.</div>
+</div>
+<div id="hint">Plug in anything that sends MIDI. Nothing to set up — it finds its own
+range, and every note is pulled into the chosen scale, so it cannot play a wrong one.</div>
+
+<script>
+'use strict';
+/* ── MIDI Aurora ──────────────────────────────────────────────────────────────
+   The room has no idea what will be plugged into it, so nothing here may depend
+   on knowing. Three decisions carry that:
+
+   1. THE CLASSIFICATION IS NOT LOAD-BEARING. Whatever arrives — 88 keys, 8 pads,
+      a wind controller, something nobody has heard of — a note-on makes light and
+      a sound. Working out that something is "a drum pad" only ever adjusts the
+      flavour, and if it guesses wrong nothing breaks.
+
+   2. IT FINDS ITS OWN RANGE. Eight drum pads sending notes 36–43 would sit in a
+      thumbnail at the far left of an 88-key layout. So the screen maps whatever
+      range is actually arriving: it widens the moment a note falls outside, and
+      creeps back in slowly when it stops being used. A 25-key controller, a full
+      piano and a handful of pads all end up using the whole screen.
+
+   3. EVERY NOTE IS PULLED INTO THE SCALE. The incoming note picks a DEGREE, not a
+      pitch — which is the same promise the rest of the suite makes, that a
+      student cannot play a wrong note. It also means a drum pad, which has no
+      musical pitch at all, still makes music rather than a low cluster.
+
+   And the canvas is CLEARED and redrawn every frame rather than faded. A trail
+   made by fading toward the background does not converge on an accelerated
+   canvas, and leaves a ghost of everything ever drawn — see APPS.md on
+   Soundscape. Holding the flares in an array and drawing them from their own
+   state cannot do that.                                                       */
+
+const $ = s => document.querySelector(s);
+const cv = $('#c'), ctx = cv.getContext('2d');
+
+const BOOM = {0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],
+              7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+const noteRGB = pc => BOOM[pc] || (BOOM[(pc+11)%12]||[200,200,200]).map(v=>Math.round(v*0.7));
+
+const SCALES = { penta:{label:'Pentatonic',steps:[0,2,4,7,9]},
+                 major:{label:'Major',steps:[0,2,4,5,7,9,11]},
+                 minor:{label:'Minor',steps:[0,2,3,5,7,8,10]},
+                 whole:{label:'Whole-tone',steps:[0,2,4,6,8,10]},
+                 off:  {label:'As played',steps:null} };
+const VOICES = {
+  bell:   {label:'Bell',  oscs:[[1,1],[2.76,0.5],[5.4,0.25]], type:'sine',     dec:2.2, cut:9000},
+  marimba:{label:'Marimba',oscs:[[1,1],[3.93,0.38],[9.2,0.12]],type:'sine',    dec:0.9, cut:2600},
+  glass:  {label:'Glass', oscs:[[1,1],[3,0.45],[4.2,0.22]],   type:'sine',     dec:1.8, cut:11000},
+  warm:   {label:'Warm',  oscs:[[1,1],[2,0.3]],               type:'triangle', dec:1.4, cut:1400},
+};
+let S = { scale:'penta', voice:'bell' };
+
+/* ── Audio ─────────────────────────────────────────────────────────────────── */
+let ac = null;
+const live = new Map();                       // key: ch/note → the sounding voice
+function audio(){ if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)();
+                  if(ac.state==='suspended') ac.resume(); return ac; }
+
+// The incoming note picks a degree of the scale rather than a pitch, so nothing
+// that gets plugged in can play a wrong note.
+function snap(note){
+  const sc = SCALES[S.scale];
+  if(!sc.steps) return note;
+  const oct = Math.floor(note/12), pc = note%12;
+  let best = sc.steps[0], d = 99;
+  for(const st of sc.steps){ const dd = Math.abs(st-pc); if(dd < d){ d = dd; best = st; } }
+  return oct*12 + best;
+}
+
+function startNote(key, note, vel){
+  const c = audio(), V = VOICES[S.voice], t = c.currentTime;
+  const f = 440*Math.pow(2,(snap(note)-69)/12);
+  const out = c.createGain(), flt = c.createBiquadFilter();
+  flt.type='lowpass'; flt.frequency.value = Math.min(16000, V.cut);
+  out.gain.setValueAtTime(0.0001,t);
+  out.gain.linearRampToValueAtTime(0.22*(0.25+0.75*vel/127), t+0.01);
+  out.connect(flt).connect(c.destination);
+  const oscs = V.oscs.map(([ratio,g]) => {
+    const o = c.createOscillator(), gn = c.createGain();
+    o.type = V.type; o.frequency.value = f*ratio; gn.gain.value = g;
+    o.connect(gn).connect(out); o.start(t); return o;
+  });
+  stopNote(key);
+  live.set(key, { out, oscs, dec:V.dec });
+}
+function stopNote(key){
+  const v = live.get(key); if(!v) return;
+  live.delete(key);
+  const c = audio(), t = c.currentTime;
+  try{
+    v.out.gain.cancelScheduledValues(t);
+    v.out.gain.setValueAtTime(v.out.gain.value, t);
+    v.out.gain.setTargetAtTime(0.0001, t, v.dec*0.28);
+    v.oscs.forEach(o => o.stop(t + v.dec*2.2));
+  }catch(e){}
+}
+
+/* ── The light ─────────────────────────────────────────────────────────────── */
+const flares = [];
+// The range the screen is showing. It widens at once for a note outside it and
+// creeps back in, so a device that only ever sends eight notes still fills the
+// screen without anyone telling it to.
+let lo = 48, hi = 72, loT = 48, hiT = 72;
+const recent = [];
+// The range is what has been played LATELY, not everything ever seen. Widening
+// alone is not enough: eight pads on notes 36-43 drop `lo` to 36 and leave `hi`
+// at 72, so they crowd into the left fifth of the wall — the one case this whole
+// idea exists to handle. A rolling window contracts as well, so a device swapped
+// mid-session is followed within a few notes and nobody has to say so.
+function place(note){
+  recent.push(note); if(recent.length > 64) recent.shift();
+  const uniq = [...new Set(recent)];
+  loT = Math.min(...uniq); hiT = Math.max(...uniq);
+  // A minimum span exists so ONE note does not stretch across a wall — but it
+  // must not apply once there is a real spread, or eight pads seven semitones
+  // apart get padded out to eleven and waste a fifth of the screen.
+  if(uniq.length < 3 || hiT - loT < 2){
+    const mid = (loT + hiT)/2; loT = mid - 5.5; hiT = mid + 5.5;
+  }
+}
+// x is worked out when the flare is DRAWN, not when it is made. Baking it at
+// creation froze every early note at whatever the range happened to be when it
+// arrived, so the first pads of a roll stayed bunched even after the range had
+// settled around them.
+function xOf(note){ return Math.max(0, Math.min(1, (note - lo) / (hi - lo))); }
+
+function addFlare(note, vel, ch){
+  place(note);
+  flares.push({ note, rgb:noteRGB(note%12), vel:vel/127,
+                held:true, age:0, life:0, key:ch+'/'+note });
+  if(flares.length > 160) flares.shift();
+}
+function releaseFlare(key){ for(const f of flares) if(f.key === key && f.held) f.held = false; }
+
+let sustain = false, last = performance.now();
+function frame(now){
+  const dt = Math.min(0.05, (now-last)/1000); last = now;
+  // Widen briskly so a note off the end of the range is on screen at once;
+  // contract gently, so putting one hand back in the middle does not haul the
+  // whole picture in after it.
+  // While it is still learning, SNAP. The starting range is a guess, and easing
+  // away from a guess means the first thing anyone plays slides around for three
+  // seconds — the worst possible first impression for a thing whose whole claim
+  // is that you plug it in and it works.
+  if(recent.length < 24){ lo = loT; hi = hiT; }   // 8 was exactly a pad bank, so it eased on the last one
+  else {
+    const ease = (v,t,tau) => v + (t-v)*(1-Math.exp(-dt/tau));
+    lo = ease(lo, loT, loT < lo ? 0.12 : 1.1);
+    hi = ease(hi, hiT, hiT > hi ? 0.12 : 1.1);
+  }
+  const W = cv.width = cv.clientWidth, H = cv.height = cv.clientHeight;
+  // Cleared, not faded. Nothing accumulates, so nothing can ghost or band.
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+
+  // the range creeping back toward what is actually being played
+  ctx.globalCompositeOperation = 'lighter';
+  for(let i = flares.length-1; i >= 0; i--){
+    const f = flares[i];
+    f.age += dt;
+    if(!f.held && !sustain) f.life += dt;
+    const fade = Math.max(0, 1 - f.life/2.4);
+    if(fade <= 0){ flares.splice(i,1); continue; }
+
+    const x = xOf(f.note)*W, hgt = H*(0.18 + 0.72*f.vel);
+    const w = Math.max(10, W*0.012*(0.5+f.vel));
+    const a = fade*(0.25 + 0.6*f.vel);
+    const col = f.rgb.join(',');
+
+    // the column
+    const g = ctx.createLinearGradient(0, H, 0, H-hgt);
+    g.addColorStop(0, 'rgba('+col+',0)');
+    g.addColorStop(1, 'rgba('+col+','+(a*0.55).toFixed(3)+')');
+    ctx.fillStyle = g; ctx.fillRect(x-w/2, H-hgt, w, hgt);
+
+    // the head of it, which is the bit that reads across a room
+    const r = w*(1.6 + 1.4*f.vel);
+    const rg = ctx.createRadialGradient(x, H-hgt, 0, x, H-hgt, r);
+    rg.addColorStop(0, 'rgba('+col+','+a.toFixed(3)+')');
+    rg.addColorStop(1, 'rgba('+col+',0)');
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(x, H-hgt, r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ── MIDI ──────────────────────────────────────────────────────────────────── */
+let access = null;
+const surfaces = { keys:false, pads:false, knobs:false };
+const perChan = {};
+
+$('#go').addEventListener('click', async () => {
+  audio();                                   // the gesture that also unlocks audio
+  if(!navigator.requestMIDIAccess){
+    $('#who').innerHTML = '<span class="bad">This browser has no Web MIDI.</span> Use Edge or Chrome.';
+    return;
+  }
+  try{ access = await navigator.requestMIDIAccess({sysex:false}); }
+  catch(e){ $('#who').innerHTML = '<span class="bad">Permission refused.</span> ' +
+    'Press Connect again and choose Allow.'; return; }
+  access.onstatechange = bind; bind();
+});
+
+function bind(){
+  const ins = [...access.inputs.values()];
+  ins.forEach(i => { i.onmidimessage = onMidi; });
+  describe(ins);
+}
+function describe(ins){
+  if(!ins || !ins.length){
+    $('#who').innerHTML = '<span class="bad">No MIDI inputs.</span> Plug something in — ' +
+      'it is noticed without reloading.'; return;
+  }
+  const found = Object.keys(surfaces).filter(k => surfaces[k]);
+  const icon = { keys:'🎹 keys', pads:'🥁 pads', knobs:'🎛️ knobs' };
+  // Name the INSTRUMENT, not its ports: "MPK mini IV MIDI Port, MPK mini IV DAW
+  // Port, MPK mini IV Plugin Port, MPK mini IV Software Contro…" is not a label.
+  // Windows truncates a long port name, so the tail is matched from the word
+  // that starts the suffix rather than from a tidy "Port" at the end.
+  const PORTWORD = /\s+(MIDI|DAW|Plugin|Software|Out|In|Port)\b.*$/i;
+  const names = ins.map(i => ((i.name || 'MIDI device').replace(PORTWORD, '').trim()) || 'MIDI device');
+  const uniq = [...new Set(names)];
+  $('#who').innerHTML = '<b>' + uniq.map(esc).join(', ') + '</b>' +
+    (ins.length > uniq.length ? ' <span style="opacity:.6">(' + ins.length + ' ports)</span>' : '') +
+    (found.length ? ' — ' + found.map(k=>icon[k]).join(', ') : ' — play something');
+}
+const esc = s => String(s).replace(/[<&]/g, c => c==='<' ? '&lt;' : '&amp;');
+
+// One instrument is not one port. The MPK mini IV presents FOUR — MIDI, DAW,
+// Plugin and Software Controller — and every one of them is bound, because there
+// is no way to know in advance which carries the keys. If two of them carry the
+// same note, the same press would fire twice: two lights, two voices, double the
+// volume. So an identical note arriving within a few milliseconds of itself is
+// the same press, and is dropped.
+const lastHit = new Map();
+function onMidi(ev){
+  const [st, d1, d2] = ev.data;
+  // System real-time (clock, active sensing) arrives constantly on some gear and
+  // is none of this app's business.
+  if(st >= 0xF8) return;
+  const kind = st & 0xF0, ch = st & 0x0F, key = ch+'/'+d1;
+
+  if(kind === 0x90 && d2 > 0){
+    const now = performance.now(), tag = ch+'/'+d1;
+    if(now - (lastHit.get(tag) || -1e9) < 15) return;      // the same press, twice
+    lastHit.set(tag, now);
+    const p = perChan[ch] = perChan[ch] || { notes:new Set(), hits:0 };
+    p.notes.add(d1); p.hits++;
+    // flavour only — nothing below depends on getting this right
+    const uniq = [...p.notes].sort((a,b)=>a-b);
+    const adj = uniq.some((v,i) => i && v-uniq[i-1] === 1);
+    if(ch === 9 || (p.hits > 6 && uniq.length <= 16 && !adj && uniq.every(v=>v>=35&&v<=81)))
+      surfaces.pads = true; else surfaces.keys = true;
+    addFlare(d1, d2, ch); startNote(key, d1, d2);
+    describe(access ? [...access.inputs.values()] : null);
+  } else if(kind === 0x80 || (kind === 0x90 && d2 === 0)){
+    releaseFlare(key); stopNote(key);
+  } else if(kind === 0xB0){
+    surfaces.knobs = true;
+    if(d1 === 64){ sustain = d2 >= 64; if(!sustain) flares.forEach(f => { if(!f.held) f.life = Math.max(f.life,0.01); }); }
+    if(d1 === 123 || d1 === 120) allOff();                 // "all notes off" — always obey it
+    describe(access ? [...access.inputs.values()] : null);
+  }
+}
+function allOff(){ [...live.keys()].forEach(stopNote); flares.forEach(f => f.held = false); }
+// Nothing may be left sounding for ever because a device forgot a note-off.
+setInterval(() => { if(live.size > 24) allOff(); }, 4000);
+
+/* ── The two controls, and no more ─────────────────────────────────────────── */
+function chips(host, map, key, after){
+  const el = $(host); el.innerHTML = '';
+  for(const k in map){
+    const c = document.createElement('div');
+    c.className = 'chip' + (S[key] === k ? ' active' : '');
+    c.textContent = map[k].label;
+    c.addEventListener('click', () => { S[key] = k; chips(host, map, key, after); if(after) after(); });
+    el.appendChild(c);
+  }
+}
+chips('#cScale', SCALES, 'scale');
+chips('#cVoice', VOICES, 'voice');
+
+// Playable with no MIDI at all: the keyboard row is a fallback so the idea can
+// be judged before any hardware is found.
+addEventListener('keydown', e => {
+  if(e.repeat) return;
+  const i = 'awsedftgyhujk'.indexOf(e.key);
+  if(i < 0) return;
+  onMidi({ data:[0x90, 60+i, 100] });
+});
+addEventListener('keyup', e => {
+  const i = 'awsedftgyhujk'.indexOf(e.key);
+  if(i >= 0) onMidi({ data:[0x80, 60+i, 0] });
+});
+</script>
+</body>
+</html>

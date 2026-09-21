@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Big Chords — one finger, a whole chord</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#000}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(10px * var(--ui-scale)) calc(14px * var(--ui-scale));
+       background:linear-gradient(#000e,#0000);z-index:3;flex-wrap:wrap}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);flex:1 1 auto;min-width:0}
+  #who b{color:var(--ink)}
+  #go{height:calc(46px * var(--ui-scale));white-space:nowrap}
+  .bad{color:#ff9b9b}
+  #hint{position:fixed;left:0;right:0;bottom:0;text-align:center;z-index:3;
+        padding:calc(11px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000e);color:var(--ink-quiet);
+        font-size:var(--font-s);line-height:1.5}
+  #hint b{color:var(--ink)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cSize"></div>
+  <div class="chips" id="cVoice"></div>
+  <div id="who">Nothing connected yet.</div>
+</div>
+<div id="hint"><b>Press one key.</b> You get a whole chord, always in key —
+and <b>how hard you press decides how big it is</b>, so a gentle touch is a single
+note and a firm one is the full stack. Nothing can sound wrong.</div>
+
+<script>
+'use strict';
+/* ── Big Chords ───────────────────────────────────────────────────────────────
+   One finger, a whole chord. The point is not the harmony trick, it is the
+   ratio: the smallest motor act a student can manage — one finger, anywhere —
+   produces the biggest musical result the room can make. Everything else in the
+   suite gives one touch one note.
+
+   TWO IDEAS CARRY IT:
+
+   1. THE CHORD IS BUILT FROM SCALE DEGREES, not from semitone intervals. Take
+      the degree the key landed on and stack every other degree above it. That is
+      diatonic by construction, so it is always in key, in every scale, without a
+      table of chord shapes and without anything that can come out wrong.
+
+   2. VELOCITY IS THE SIZE OF THE CHORD. Press gently and one note sounds; press
+      hard and the whole stack does. That gives a student something expressive to
+      DO with a skill they already have — pressing harder — rather than asking
+      for a new one, and it means the instrument rewards effort without ever
+      punishing its absence.                                                    */
+
+const $ = s => document.querySelector(s);
+const cv = $('#c'), ctx = cv.getContext('2d');
+
+const BOOM = {0:[226,28,28],2:[245,125,23],4:[245,209,23],5:[59,181,74],
+              7:[28,169,169],9:[125,79,181],11:[224,90,156]};
+const noteRGB = pc => BOOM[pc] || (BOOM[(pc+11)%12]||[200,200,200]).map(v=>Math.round(v*0.7));
+
+const SCALES = {
+  major:{label:'Major',      steps:[0,2,4,5,7,9,11]},
+  penta:{label:'Pentatonic', steps:[0,2,4,7,9]},
+  minor:{label:'Minor',      steps:[0,2,3,5,7,8,10]},
+  lydian:{label:'Bright',    steps:[0,2,4,6,7,9,11]},
+  dorian:{label:'Wistful',   steps:[0,2,3,5,7,9,10]},
+};
+const SIZES = { auto:{label:'Velocity decides'}, one:{label:'Single notes'},
+                three:{label:'Always 3'}, four:{label:'Always 4'} };
+const VOICES = {
+  warm:   {label:'Warm',  oscs:[[1,1],[2,0.3],[3,0.12]], type:'triangle', dec:1.9, cut:2200},
+  glass:  {label:'Glass', oscs:[[1,1],[3,0.4],[4.2,0.2]],type:'sine',     dec:2.6, cut:9000},
+  reed:   {label:'Reed',  oscs:[[1,1],[2,0.5],[3,0.25]], type:'sawtooth', dec:1.6, cut:1500},
+  music:  {label:'Music box',oscs:[[1,1],[4.06,0.22],[9.7,0.08]],type:'sine',dec:2.4,cut:6000},
+};
+const S = { scale:'major', size:'auto', voice:'warm' };
+
+/* ── Sound ──────────────────────────────────────────────────────────────────*/
+let ac=null;
+const audio=()=>{ if(!ac) ac=new (window.AudioContext||window.webkitAudioContext)();
+                  if(ac.state==='suspended') ac.resume(); return ac; };
+const live=new Map();
+
+function play(midi, gain, key){
+  const c=audio(), V=VOICES[S.voice], t=c.currentTime+0.01;
+  const f=440*Math.pow(2,(midi-69)/12);
+  const out=c.createGain(), flt=c.createBiquadFilter();
+  flt.type='lowpass'; flt.frequency.value=V.cut;
+  out.gain.setValueAtTime(0.0001,t);
+  out.gain.linearRampToValueAtTime(gain,t+0.012);
+  out.gain.setTargetAtTime(0.0001,t+0.012,V.dec*0.32);
+  out.connect(flt).connect(c.destination);
+  const oscs=V.oscs.map(([ratio,g])=>{
+    const o=c.createOscillator(), gn=c.createGain();
+    o.type=V.type; o.frequency.value=f*ratio; gn.gain.value=g;
+    o.connect(gn).connect(out); o.start(t); o.stop(t+V.dec*2.4+0.3); return o;
+  });
+  (live.get(key)||live.set(key,[]).get(key)).push({out,oscs});
+}
+function release(key){
+  const list=live.get(key); if(!list) return;
+  live.delete(key);
+  const c=audio(), t=c.currentTime;
+  for(const v of list){
+    try{ v.out.gain.cancelScheduledValues(t);
+      v.out.gain.setValueAtTime(v.out.gain.value,t);
+      v.out.gain.setTargetAtTime(0.0001,t,0.18); }catch(e){}
+  }
+}
+function silence(){ [...live.keys()].forEach(release); }
+
+/* ── The chord ──────────────────────────────────────────────────────────────
+   Built from DEGREES of the scale, stacked in thirds — take the degree the key
+   landed on, then every other degree above it. Diatonic by construction, so it
+   is in key in every scale with no chord table and nothing that can be wrong. */
+function degreeOf(note){
+  const steps=SCALES[S.scale].steps, pc=note%12;
+  let best=0, d=99;
+  for(let i=0;i<steps.length;i++){ const dd=Math.min((steps[i]-pc+12)%12,(pc-steps[i]+12)%12);
+    if(dd<d){ d=dd; best=i; } }
+  return { deg:best, oct:Math.floor(note/12) };
+}
+function chordFor(note, vel){
+  const steps=SCALES[S.scale].steps, n=steps.length;
+  const { deg, oct } = degreeOf(note);
+  let want = S.size==='one' ? 1 : S.size==='three' ? 3 : S.size==='four' ? 4
+           : (vel<0.30 ? 1 : vel<0.55 ? 2 : vel<0.80 ? 3 : 4);
+  const out=[];
+  for(let i=0;i<want;i++){
+    const d=deg+i*2;                                   // every other degree = a third
+    out.push(oct*12 + steps[d%n] + 12*Math.floor(d/n));
+  }
+  return out;
+}
+
+/* ── The light ──────────────────────────────────────────────────────────────
+   Cleared and redrawn every frame, never faded toward the background: a fade
+   does not converge on an accelerated canvas and leaves a ghost of everything
+   ever drawn. See APPS.md on Soundscape.                                      */
+const towers=[];
+let lo=48, hi=72; const recent=[];
+function place(note){
+  recent.push(note); if(recent.length>48) recent.shift();
+  const u=[...new Set(recent)];
+  lo=Math.min(...u); hi=Math.max(...u);
+  if(u.length<3 || hi-lo<2){ const m=(lo+hi)/2; lo=m-5.5; hi=m+5.5; }
+}
+const xOf = n => Math.max(0.04, Math.min(0.96, (n-lo)/Math.max(1,hi-lo)));
+
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  const W=cv.width=cv.clientWidth, H=cv.height=cv.clientHeight;
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  ctx.globalCompositeOperation='lighter';
+  for(let i=towers.length-1;i>=0;i--){
+    const t=towers[i];
+    if(!t.held) t.life+=dt;
+    const f=Math.max(0,1-t.life/2.6); if(f<=0){ towers.splice(i,1); continue; }
+    t.grow=Math.min(1,t.grow+dt*5);
+    const x=xOf(t.note)*W, w=Math.max(24,W*0.055);
+    // one slab per note of the chord, stacked — the harder the press, the taller
+    // the tower, which is the same information the ear is getting
+    for(let k=0;k<t.notes.length;k++){
+      const c=noteRGB(t.notes[k]%12);
+      const hgt=H*0.13*t.grow, y=H*0.86 - k*H*0.145*t.grow;
+      const a=f*(0.85-0.10*k);
+      const g=ctx.createLinearGradient(x-w/2,0,x+w/2,0);
+      g.addColorStop(0,'rgba('+c+',0)');
+      g.addColorStop(0.5,'rgba('+c+','+a.toFixed(3)+')');
+      g.addColorStop(1,'rgba('+c+',0)');
+      ctx.fillStyle=g; ctx.fillRect(x-w/2,y-hgt,w,hgt);
+      const rg=ctx.createRadialGradient(x,y-hgt/2,0,x,y-hgt/2,w*1.5);
+      rg.addColorStop(0,'rgba('+c+','+(a*0.55).toFixed(3)+')'); rg.addColorStop(1,'rgba('+c+',0)');
+      ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(x,y-hgt/2,w*1.5,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.globalCompositeOperation='source-over';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ── MIDI ───────────────────────────────────────────────────────────────────*/
+let access=null, connected=false;
+const boundPorts=new Set(), lastHit=new Map();
+// One port per INSTRUMENT carries the notes. A controller can present several —
+// the MPK mini IV presents four — and if two of them deliver the same press it
+// is heard twice. See APPS.md on MIDI Light.
+const noteSource={}, sourceSeen={};
+const PORTWORD=/\s+(MIDI|DAW|Plugin|Software|Out|In|Port)\b.*$/i;
+
+$('#go').addEventListener('click',()=>{
+  audio();
+  if(!navigator.requestMIDIAccess){ $('#who').innerHTML='<span class="bad">No Web MIDI here.</span> Use Edge or Chrome.'; return; }
+  navigator.requestMIDIAccess({sysex:false}).then(a=>{
+    access=a; connected=true; a.onstatechange=bind; bind();
+  }).catch(()=>{ $('#who').innerHTML='<span class="bad">Permission refused.</span> Press Connect and choose Allow.'; });
+});
+function bind(){
+  const ins=[...access.inputs.values()];
+  ins.forEach(i=>{ if(!boundPorts.has(i.id)){ boundPorts.add(i.id);
+    const dev=(i.name||'MIDI').replace(PORTWORD,'').trim()||'MIDI';
+    i.onmidimessage = ev => onMidi(ev, i.id, dev); } });
+  const names=[...new Set(ins.map(i=>((i.name||'MIDI').replace(PORTWORD,'').trim())||'MIDI'))];
+  $('#who').innerHTML = ins.length
+    ? '<b>✓ '+names.join(', ')+'</b>'+(ins.length>names.length?' <span style="opacity:.6">('+ins.length+' ports)</span>':'')
+    : '<span class="bad">No MIDI inputs.</span> Plug something in.';
+}
+function onMidi(ev, portId, dev){
+  const d=ev.data, st=d[0]; if(st>=0xF8) return;
+  const kind=st&0xF0, ch=st&0x0F, n=d[1], v=d[2], key=ch+'/'+n;
+  if(kind===0x90 && v>0){
+    const now=performance.now();
+    const owner=noteSource[dev];
+    if(owner && owner!==portId && now-(sourceSeen[dev]||0)<3000) return;
+    noteSource[dev]=portId; sourceSeen[dev]=now;
+    if(now-(lastHit.get(key)||-1e9)<15) return;
+    lastHit.set(key,now);
+    strike(key,n,v/127);
+  } else if(kind===0x80 || (kind===0x90 && v===0)){ lift(key); }
+  else if(kind===0xB0 && (n===120||n===123)){ silence(); towers.forEach(t=>t.held=false); }
+}
+
+function strike(key, note, vel){
+  lift(key);
+  place(note);
+  const notes=chordFor(note, vel);
+  const g=0.16*(0.35+0.65*vel)/Math.sqrt(notes.length);   // a chord is not louder
+  notes.forEach((m,i)=> setTimeout(()=>play(m,g,key), i*14));  // a hair of spread
+  towers.push({ key, note, notes, held:true, life:0, grow:0 });
+  if(towers.length>40) towers.shift();
+}
+function lift(key){
+  release(key);
+  towers.forEach(t=>{ if(t.key===key) t.held=false; });
+}
+// Nothing may sound for ever because a device forgot a note-off.
+setInterval(()=>{ if(live.size>16) silence(); }, 4000);
+
+/* ── The controls ───────────────────────────────────────────────────────────*/
+function chips(host,map,key,after){
+  const el=$(host); el.innerHTML='';
+  for(const k in map){
+    const c=document.createElement('div');
+    c.className='chip'+(S[key]===k?' active':'');
+    c.textContent=map[k].label;
+    c.addEventListener('click',()=>{ S[key]=k; chips(host,map,key,after); if(after) after(); });
+    el.appendChild(c);
+  }
+}
+chips('#cScale',SCALES,'scale');
+chips('#cSize',SIZES,'size');
+chips('#cVoice',VOICES,'voice');
+
+// Playable with no MIDI at all, and a touch is a firm press so it gives the
+// full chord — the thing worth showing off.
+cv.addEventListener('pointerdown',e=>{
+  audio();
+  const r=cv.getBoundingClientRect();
+  const f=(e.clientX-r.left)/r.width;
+  const note=Math.round(lo+f*(hi-lo));
+  const vel=0.35+0.6*(1-(e.clientY-r.top)/r.height);
+  strike('touch/'+e.pointerId, note, vel);
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointerup',e=>lift('touch/'+e.pointerId));
+cv.addEventListener('pointercancel',e=>lift('touch/'+e.pointerId));
+addEventListener('keydown',e=>{ if(e.repeat) return;
+  const i='awsedftgyhujk'.indexOf(e.key); if(i<0) return;
+  audio(); strike('k'+i, 60+i, 0.9); });
+addEventListener('keyup',e=>{ const i='awsedftgyhujk'.indexOf(e.key); if(i>=0) lift('k'+i); });
+</script>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Mirror — it answers you back</title>
+<link rel="stylesheet" href="../framework.css">
+<style>
+  html,body{height:100%;overflow:hidden;background:#050308}
+  body{margin:0;font:var(--font-m) system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block;width:100%;height:100%}
+  #bar{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:var(--gap);
+       padding:calc(9px * var(--ui-scale)) calc(14px * var(--ui-scale));flex-wrap:wrap;
+       background:linear-gradient(#000e,#0000);z-index:3}
+  #bar .chips{margin:0}
+  #who{color:var(--ink-quiet);font-size:var(--font-s);flex:1 1 auto;min-width:0}
+  #go{height:calc(44px * var(--ui-scale));white-space:nowrap}
+  #turn{position:fixed;left:0;right:0;top:calc(74px * var(--ui-scale));text-align:center;
+        z-index:3;pointer-events:none;font-size:calc(30px * var(--ui-scale));font-weight:800;
+        letter-spacing:-0.01em;transition:opacity .25s}
+  #hint{position:fixed;left:0;right:0;bottom:0;text-align:center;z-index:3;
+        padding:calc(10px * var(--ui-scale)) calc(18px * var(--ui-scale));
+        background:linear-gradient(#0000,#000e);color:var(--ink-quiet);font-size:var(--font-s);line-height:1.5}
+  #hint b{color:var(--ink)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="go">🔌 Connect</button>
+  <div class="chips" id="cScale"></div>
+  <div class="chips" id="cVoice"></div>
+  <div class="chips" id="cReply"></div>
+  <div class="chips" id="cWait"></div>
+  <div id="who"></div>
+</div>
+<div id="turn"></div>
+<div id="hint"><b>Play something, then stop.</b> It waits, and then answers — the
+same rhythm you gave it, in a different shape. <b>There is nothing to get right</b>:
+it is a conversation, not a test.</div>
+
+<script src="midi-core.js"></script>
+<script>
+'use strict';
+/* ── Mirror ───────────────────────────────────────────────────────────────────
+   Turn-taking is a named goal, and Echo Bird already covers "play back what you
+   heard" — which is a MEMORY task, and a test: there is a right answer and a
+   student can fail it.
+
+   This is the other thing therapists actually do, which is improvised call and
+   response. The app does not ask the student to repeat anything. It listens to
+   whatever came, waits until the student stops, and answers with a phrase of its
+   own that keeps their RHYTHM but moves the notes — the musical equivalent of
+   replying rather than repeating. There is no right answer, so there is nothing
+   to fail, and the only thing being taught is the shape of a turn: you go, I go,
+   you go.
+
+   ANY KEY, NEVER THAT KEY: the reply is built from scale degrees relative to what
+   was played, so it never needs to know where anything is on the instrument.   */
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const REPLY={ echo:{label:'Same, a bit higher'}, invert:{label:'Upside down'},
+              tail:{label:'Carries on'} };
+const WAIT={ '0.8':{label:'Answers quickly'}, '1.4':{label:'Waits a moment'}, '2.4':{label:'Waits a while'} };
+let replyStyle='echo', waitFor=1.4;
+
+let phrase=[];              // what the student is playing right now
+let lastPlayed=0;
+let mode='listen';          // listen | thinking | answering
+const marks=[];             // everything on screen, theirs and ours
+
+function add(note, vel, mine){
+  marks.push({ note, vel, mine, life:0, x:Math.random(), t:performance.now() });
+  if(marks.length>120) marks.shift();
+}
+
+MIDI.init({
+  canvas:cv,
+  connectBtn:document.getElementById('go'),
+  statusEl:document.getElementById('who'),
+  onHit(e){
+    if(mode==='answering') return;                 // it is still talking; let it finish
+    const now=performance.now();
+    phrase.push({ deg:MIDI.degree(e.note), vel:e.vel, gap:phrase.length? now-lastPlayed : 0 });
+    if(phrase.length>16) phrase.shift();
+    lastPlayed=now;
+    mode='listen';
+    MIDI.play(e.note,{gain:0.09+0.12*e.vel});
+    add(MIDI.snap(e.note), e.vel, true);
+  },
+});
+
+MIDI.chips('#cScale', MIDI.SCALES, ()=>MIDI.scale, k=>MIDI.setScale(k));
+MIDI.chips('#cVoice', MIDI.VOICES, ()=>MIDI.voice, k=>MIDI.setVoice(k));
+MIDI.chips('#cReply', REPLY, ()=>replyStyle, k=>{ replyStyle=k; });
+MIDI.chips('#cWait',  WAIT,  ()=>String(waitFor), k=>{ waitFor=+k; });
+
+// The reply keeps the RHYTHM and moves the notes. Same shape, different words.
+function buildReply(src){
+  const out=[];
+  const first=src[0].deg;
+  for(let i=0;i<src.length;i++){
+    const s=src[i];
+    let deg;
+    if(replyStyle==='echo')        deg = s.deg + 2;                       // a third up
+    else if(replyStyle==='invert') deg = first - (s.deg - first);         // turned over
+    else                           deg = s.deg + (i===src.length-1 ? 3 : 1);
+    out.push({ deg, vel:Math.min(1,s.vel*0.9+0.1), gap:s.gap });
+  }
+  if(replyStyle==='tail'){                       // ...and adds a note of its own
+    out.push({ deg:out[out.length-1].deg+2, vel:0.75,
+               gap:Math.max(180, out[out.length-1].gap||260) });
+  }
+  return out;
+}
+
+function answer(){
+  const src=phrase.slice(); phrase=[];
+  if(!src.length){ mode='listen'; return; }
+  mode='answering';
+  const reply=buildReply(src);
+  let t=0;
+  reply.forEach((r,i)=>{
+    t += i===0 ? 120 : Math.min(900, Math.max(110, r.gap||260));
+    setTimeout(()=>{
+      const note=MIDI.fromDegree(r.deg);
+      MIDI.play(note,{gain:0.08+0.11*r.vel, raw:true});
+      add(note, r.vel, false);
+      if(i===reply.length-1) setTimeout(()=>{ mode='listen'; }, 320);
+    }, t);
+  });
+}
+
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  const W=cv.width=cv.clientWidth, H=cv.height=cv.clientHeight;
+
+  // has the student finished a phrase?
+  if(mode==='listen' && phrase.length && (performance.now()-lastPlayed)/1000>waitFor) answer();
+
+  const el=document.getElementById('turn');
+  if(mode==='answering'){ el.textContent='🎵 listen'; el.style.color='#ffbe78'; el.style.opacity=1; }
+  else if(phrase.length){ el.textContent='🎤 your turn'; el.style.color='#8fb4ff'; el.style.opacity=1; }
+  else { el.style.opacity=0; }
+
+  ctx.fillStyle='#050308'; ctx.fillRect(0,0,W,H);
+  // theirs above the line, ours below it — a turn you can see as well as hear
+  ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+
+  ctx.globalCompositeOperation='lighter';
+  for(let i=marks.length-1;i>=0;i--){
+    const m=marks[i]; m.life+=dt;
+    const f=Math.max(0,1-m.life/4.5); if(f<=0){ marks.splice(i,1); continue; }
+    const c=MIDI.noteRGB(m.note%12).join(',');
+    // drifts away from the middle line, so the newest is nearest it
+    const y = m.mine ? H/2 - 14 - m.life*H*0.075 : H/2 + 14 + m.life*H*0.075;
+    const x = m.x*W;
+    const r = (7+26*m.vel)*(0.55+0.45*f);
+    const a = f*(m.mine?0.75:0.6);
+    const g=ctx.createRadialGradient(x,y,0,x,y,r*2.5);
+    g.addColorStop(0,'rgba('+c+','+a.toFixed(3)+')');
+    g.addColorStop(0.35,'rgba('+c+','+(a*0.4).toFixed(3)+')');
+    g.addColorStop(1,'rgba('+c+',0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r*2.5,0,Math.PI*2); ctx.fill();
+    if(!m.mine){                                  // ours get a ring, so they read as a reply
+      ctx.strokeStyle='rgba('+c+','+(a*0.8).toFixed(3)+')'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(x,y,r*1.25,0,Math.PI*2); ctx.stroke();
+    }
+  }
+  ctx.globalCompositeOperation='source-over';
+
+  if(!marks.length){
+    ctx.fillStyle='rgba(255,255,255,0.28)';
+    ctx.font=Math.round(Math.min(W,H)*0.033)+'px system-ui,sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('play a few notes, then stop', W/2, H/2-10);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
