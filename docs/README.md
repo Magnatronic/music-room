@@ -257,6 +257,11 @@ a single control of its own. Nothing below adds any of that per app.
 1. Copy `template.html` to e.g. `drums.html`, retitle it, and replace the
    ANIMATION block. That block's header comment **is** the `Anim` contract —
    every hook the framework calls, and the two rules that fail silently.
+   Keep the template's `<meta name="darkreader-lock">`: the pages are already
+   dark, and without it the Dark Reader extension darkens the white slider and
+   switch knobs until they vanish — on the hosted site, not on `file://`, where
+   extensions do not run by default. It has to be in the page's own `<head>`,
+   so it cannot live in `framework.js`.
 2. Add a tile to the right section of `SECTIONS` in `index.html`:
    `{file, emoji, title, blurb, accent}`. The sections say *when* a therapist
    reaches for an app — Instruments · Songs & Games · Sensory & Calm — and are
